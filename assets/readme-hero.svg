@@ -1,0 +1,71 @@
+<svg width="960" height="420" viewBox="0 0 960 420" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">MiMo AI coding assistant hero preview</title>
+  <desc id="desc">A stylized VS Code chat panel showing MiMo planning, editing, testing, and recovery.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="960" y2="420" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#111827"/>
+      <stop offset="0.45" stop-color="#1E293B"/>
+      <stop offset="1" stop-color="#0F766E"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="148" y1="96" x2="812" y2="326" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#38BDF8"/>
+      <stop offset="0.55" stop-color="#A78BFA"/>
+      <stop offset="1" stop-color="#34D399"/>
+    </linearGradient>
+    <filter id="shadow" x="54" y="40" width="852" height="336" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="24" stdDeviation="26" flood-color="#020617" flood-opacity="0.42"/>
+    </filter>
+    <style>
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .sans { font-family: Inter, Segoe UI, Arial, sans-serif; }
+      .pulse { animation: pulse 2.6s ease-in-out infinite; transform-origin: center; }
+      .slide { animation: slide 3.2s ease-in-out infinite; }
+      @keyframes pulse { 0%, 100% { opacity: .62; transform: scale(1); } 50% { opacity: 1; transform: scale(1.05); } }
+      @keyframes slide { 0%, 100% { transform: translateX(0); opacity: .86; } 50% { transform: translateX(16px); opacity: 1; } }
+      @media (prefers-reduced-motion: reduce) {
+        .pulse, .slide { animation: none; }
+      }
+    </style>
+  </defs>
+  <rect width="960" height="420" rx="30" fill="url(#bg)"/>
+  <path d="M138 318C235 214 344 159 466 154C587 150 674 77 818 104" stroke="url(#accent)" stroke-width="2" opacity="0.28"/>
+  <path d="M118 104C233 191 346 224 458 204C603 179 682 226 832 304" stroke="url(#accent)" stroke-width="2" opacity="0.22"/>
+
+  <g filter="url(#shadow)">
+    <rect x="84" y="62" width="792" height="292" rx="18" fill="#F8FAFC"/>
+    <rect x="84" y="62" width="792" height="44" rx="18" fill="#E2E8F0"/>
+    <circle cx="112" cy="84" r="6" fill="#EF4444"/>
+    <circle cx="134" cy="84" r="6" fill="#F59E0B"/>
+    <circle cx="156" cy="84" r="6" fill="#10B981"/>
+    <text x="190" y="90" class="sans" font-size="14" fill="#334155">MiMo Agent - New Chat Window</text>
+
+    <rect x="112" y="126" width="182" height="198" rx="12" fill="#0F172A"/>
+    <text x="134" y="158" class="sans" font-size="16" font-weight="700" fill="#F8FAFC">MiMo</text>
+    <text x="134" y="182" class="mono" font-size="11" fill="#93C5FD">mode: Auto</text>
+    <text x="134" y="204" class="mono" font-size="11" fill="#A7F3D0">tools: enabled</text>
+    <rect x="134" y="230" width="128" height="30" rx="8" fill="#1E293B"/>
+    <text x="150" y="250" class="sans" font-size="12" fill="#CBD5E1">Plan first</text>
+    <rect x="134" y="272" width="106" height="30" rx="8" fill="#134E4A"/>
+    <text x="150" y="292" class="sans" font-size="12" fill="#CCFBF1">Run tests</text>
+
+    <rect x="326" y="126" width="330" height="58" rx="14" fill="#EEF2FF"/>
+    <text x="348" y="151" class="sans" font-size="13" font-weight="700" fill="#312E81">You</text>
+    <text x="348" y="170" class="sans" font-size="14" fill="#1E293B">Review this project and improve the docs.</text>
+
+    <rect x="326" y="202" width="438" height="94" rx="14" fill="#ECFDF5"/>
+    <text x="348" y="228" class="sans" font-size="13" font-weight="700" fill="#065F46">MiMo</text>
+    <text x="348" y="250" class="sans" font-size="14" fill="#0F172A">1. Read related files</text>
+    <text x="348" y="273" class="sans" font-size="14" fill="#0F172A">2. Patch README and assets</text>
+    <text x="348" y="296" class="sans" font-size="14" fill="#0F172A">3. Validate syntax and formatting</text>
+
+    <g class="slide">
+      <rect x="690" y="140" width="114" height="36" rx="18" fill="#0EA5E9"/>
+      <text x="715" y="163" class="sans" font-size="13" font-weight="700" fill="#FFFFFF">Edit</text>
+    </g>
+    <g class="pulse">
+      <circle cx="806" cy="254" r="30" fill="#10B981" opacity="0.22"/>
+      <circle cx="806" cy="254" r="16" fill="#10B981"/>
+      <path d="M798 254L804 260L816 246" stroke="white" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+  </g>
+</svg>
