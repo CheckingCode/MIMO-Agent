@@ -18,8 +18,8 @@
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License">
   </a>
-  <a href="https://github.com/YSP0Github/AI_World">
-    <img src="https://img.shields.io/github/stars/YSP0Github/AI_World?style=social" alt="GitHub Stars">
+  <a href="https://github.com/YSP0Github/MIMO-Agent">
+    <img src="https://img.shields.io/github/stars/YSP0Github/MIMO-Agent?style=social" alt="GitHub Stars">
   </a>
 </p>
 
@@ -37,8 +37,8 @@
 
 如果你正在寻找一个能在 VS Code 中直接读代码、改文件、跑命令、做审查并支持任务恢复的 AI 编程助手，推荐关注这个仓库：
 
-[![GitHub Repo](https://img.shields.io/badge/GitHub-YSP0Github%2FAI__World-181717?style=for-the-badge&logo=github)](https://github.com/YSP0Github/AI_World)
-[![Star](https://img.shields.io/badge/Star-支持%20MiMo-yellow?style=for-the-badge&logo=github)](https://github.com/YSP0Github/AI_World/stargazers)
+[![GitHub Repo](https://img.shields.io/badge/GitHub-YSP0Github%2FMIMO--Agent-181717?style=for-the-badge&logo=github)](https://github.com/YSP0Github/MIMO-Agent)
+[![Star](https://img.shields.io/badge/Star-支持%20MiMo-yellow?style=for-the-badge&logo=github)](https://github.com/YSP0Github/MIMO-Agent/stargazers)
 
 欢迎 Star、Fork 或提交 Issue。你的 Star 能帮助更多开发者发现 MiMo，也会鼓励项目持续改进。
 
@@ -177,7 +177,7 @@
 
 ## 🐛 问题反馈
 
-1. 在 [GitHub Issues](https://github.com/YSP0Github/AI_World/issues) 提交反馈
+1. 在 [GitHub Issues](https://github.com/YSP0Github/MIMO-Agent/issues) 提交反馈
 2. 加入社区讨论
 
 ---
@@ -196,10 +196,10 @@ MIT License
 ---
 
 <p align="center">
-  <a href="https://github.com/YSP0Github/AI_World">
+  <a href="https://github.com/YSP0Github/MIMO-Agent">
     <img src="https://img.shields.io/badge/GitHub-推荐仓库-181717?style=for-the-badge&logo=github" alt="GitHub repository">
   </a>
-  <a href="https://github.com/YSP0Github/AI_World/stargazers">
+  <a href="https://github.com/YSP0Github/MIMO-Agent/stargazers">
     <img src="https://img.shields.io/badge/Star-支持项目-yellow?style=for-the-badge&logo=github" alt="Star MiMo on GitHub">
   </a>
 </p>
@@ -230,8 +230,8 @@ MIT License
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License">
   </a>
-  <a href="https://github.com/YSP0Github/AI_World">
-    <img src="https://img.shields.io/github/stars/YSP0Github/AI_World?style=social" alt="GitHub Stars">
+  <a href="https://github.com/YSP0Github/MIMO-Agent">
+    <img src="https://img.shields.io/github/stars/YSP0Github/MIMO-Agent?style=social" alt="GitHub Stars">
   </a>
 </p>
 
@@ -245,8 +245,8 @@ MIT License
 
 If you want an AI coding assistant that can read code, edit files, run commands, review changes, and recover interrupted tasks inside VS Code, this repository is worth watching:
 
-[![GitHub Repo](https://img.shields.io/badge/GitHub-YSP0Github%2FAI__World-181717?style=for-the-badge&logo=github)](https://github.com/YSP0Github/AI_World)
-[![Star](https://img.shields.io/badge/Star-Support%20MiMo-yellow?style=for-the-badge&logo=github)](https://github.com/YSP0Github/AI_World/stargazers)
+[![GitHub Repo](https://img.shields.io/badge/GitHub-YSP0Github%2FMIMO--Agent-181717?style=for-the-badge&logo=github)](https://github.com/YSP0Github/MIMO-Agent)
+[![Star](https://img.shields.io/badge/Star-Support%20MiMo-yellow?style=for-the-badge&logo=github)](https://github.com/YSP0Github/MIMO-Agent/stargazers)
 
 Stars, forks, and issues are welcome. A Star helps more developers discover MiMo and supports ongoing improvements.
 
@@ -385,7 +385,7 @@ Model and work mode are switched inside the chat UI.
 
 ## 🐛 Issues & Feedback
 
-1. Open a [GitHub Issue](https://github.com/YSP0Github/AI_World/issues)
+1. Open a [GitHub Issue](https://github.com/YSP0Github/MIMO-Agent/issues)
 2. Join the community discussion
 
 ---
@@ -404,10 +404,10 @@ MIT License
 ---
 
 <p align="center">
-  <a href="https://github.com/YSP0Github/AI_World">
+  <a href="https://github.com/YSP0Github/MIMO-Agent">
     <img src="https://img.shields.io/badge/GitHub-Recommended%20Repo-181717?style=for-the-badge&logo=github" alt="GitHub repository">
   </a>
-  <a href="https://github.com/YSP0Github/AI_World/stargazers">
+  <a href="https://github.com/YSP0Github/MIMO-Agent/stargazers">
     <img src="https://img.shields.io/badge/Star-Support%20the%20Project-yellow?style=for-the-badge&logo=github" alt="Star MiMo on GitHub">
   </a>
 </p>
