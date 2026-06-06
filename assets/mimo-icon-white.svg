@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <!-- Speech bubble: black outline behind white stroke -->
+  <rect x="10" y="10" width="108" height="108" rx="18" ry="18"
+        style="stroke:#1a1a1a;stroke-width:14;paint-order:stroke;fill:none"/>
+  <rect x="10" y="10" width="108" height="108" rx="18" ry="18"
+        style="stroke:#FFFFFF;stroke-width:8;fill:none"/>
+  <!-- Letter M: black outline behind white stroke -->
+  <path d="M36 92 V40 L64 58 L92 40 V92"
+        style="stroke:#1a1a1a;stroke-width:16;paint-order:stroke;fill:none;stroke-linecap:round;stroke-linejoin:round"/>
+  <path d="M36 92 V40 L64 58 L92 40 V92"
+        style="stroke:#FFFFFF;stroke-width:10;fill:none;stroke-linecap:round;stroke-linejoin:round"/>
+</svg>

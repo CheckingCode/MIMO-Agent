@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <!-- Speech bubble -->
+  <rect x="8" y="12" width="112" height="104" rx="18" ry="18" stroke="#FF6900" stroke-width="12" fill="none"/>
+  <!-- Letter M -->
+  <path d="M34 96 V38 L64 58 L94 38 V96" stroke="#FF6900" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>
