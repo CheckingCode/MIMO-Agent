@@ -9,19 +9,41 @@
 </p>
 
 <p align="center">
-  <a href="https://marketplace.visualstudio.com/items?itemName=mimo-agent.mimo">
-    <img src="https://img.shields.io/visual-studio-marketplace/v/mimo-agent.mimo.svg?label=VS%20Code%20Marketplace" alt="VS Code Marketplace">
+  <a href="https://marketplace.visualstudio.com/items?itemName=mimo-agent.mimo-agent">
+    <img src="https://img.shields.io/visual-studio-marketplace/v/mimo-agent.mimo-agent.svg?label=VS%20Code%20Marketplace" alt="VS Code Marketplace">
   </a>
-  <a href="https://marketplace.visualstudio.com/items?itemName=mimo-agent.mimo">
-    <img src="https://img.shields.io/visual-studio-marketplace/i/mimo-agent.mimo.svg" alt="Installs">
+  <a href="https://marketplace.visualstudio.com/items?itemName=mimo-agent.mimo-agent">
+    <img src="https://img.shields.io/visual-studio-marketplace/i/mimo-agent.mimo-agent.svg" alt="Installs">
   </a>
-  <a href="https://github.com/anthropics/claude-code/blob/main/LICENSE">
+  <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License">
+  </a>
+  <a href="https://github.com/YSP0Github/AI_World">
+    <img src="https://img.shields.io/github/stars/YSP0Github/AI_World?style=social" alt="GitHub Stars">
   </a>
 </p>
 
 <p align="center">
   <strong>🇨🇳 中文</strong> | <a href="#-english">🇬🇧 English</a> | <a href="#-changelog">📋 Changelog</a>
+</p>
+
+<p align="center">
+  <img src="assets/readme-hero.svg" alt="MiMo AI coding assistant preview" width="920">
+</p>
+
+---
+
+## 🌟 推荐仓库
+
+如果你正在寻找一个能在 VS Code 中直接读代码、改文件、跑命令、做审查并支持任务恢复的 AI 编程助手，推荐关注这个仓库：
+
+[![GitHub Repo](https://img.shields.io/badge/GitHub-YSP0Github%2FAI__World-181717?style=for-the-badge&logo=github)](https://github.com/YSP0Github/AI_World)
+[![Star](https://img.shields.io/badge/Star-支持%20MiMo-yellow?style=for-the-badge&logo=github)](https://github.com/YSP0Github/AI_World/stargazers)
+
+欢迎 Star、Fork 或提交 Issue。你的 Star 能帮助更多开发者发现 MiMo，也会鼓励项目持续改进。
+
+<p align="center">
+  <img src="assets/readme-workflow.svg" alt="MiMo reads context, uses tools, verifies work, and recovers tasks" width="920">
 </p>
 
 ---
@@ -31,7 +53,7 @@
 ### 🤖 智能对话
 - **多轮对话** — 支持连续对话，AI 记住上下文，越聊越懂你
 - **图片理解** — 直接粘贴图片（Ctrl+V），AI 分析代码截图、错误信息、UI 设计稿
-- **语音输入** — 点击麦克风按钮，用语音描述你的需求
+- **语音输入** — 支持本地语音输入能力（可在界面启用后使用）
 
 ### 🛠️ 强大的工具能力
 
@@ -52,6 +74,11 @@
 | **轮询** | ⏩ | 自动继续直到任务完成 | 复杂任务、批量重构 |
 | **规划** | 📋 | 先只读分析再执行 | 大型项目、架构设计 |
 | **对决** | ⚔️ | 疯狂程序猿 vs 多维审查团 | 代码审查、安全审计 |
+
+### 🧭 任务恢复
+- **推理循环检测** — 自动识别模型重复思考、卡住不动的情况
+- **Fresh model 恢复** — 在同一会话中切换到新的模型调用继续收尾
+- **中断交接总结** — 达到轮次上限时输出已完成内容、改动文件、验证状态和下一步恢复建议
 
 ### 🔒 安全执行（沙箱模式）
 - **Safe Mode** — 轻量级本地保护：命令检查、工作区边界检查、超时、输出限制
@@ -76,11 +103,11 @@
 
 在 VS Code 扩展市场搜索 **MiMo** 并安装，或直接点击：
 
-[![Install](https://img.shields.io/badge/Install-MiMo-blueviolet?style=for-the-badge&logo=visual-studio-code)](vscode:extension/mimo-agent.mimo)
+[![Install](https://img.shields.io/badge/Install-MiMo-blueviolet?style=for-the-badge&logo=visual-studio-code)](vscode:extension/mimo-agent.mimo-agent)
 
 ### 第二步：配置 API Key
 
-1. 按 `Ctrl+Shift+P`，输入 `MiMo: Open Settings`
+1. 按 `Ctrl+Shift+P`，输入 `MiMo: Settings`
 2. 在 **API Key** 栏输入你的密钥
 3. 根据需要调整模型、温度等参数
 4. 点击 **Save and Apply**
@@ -89,7 +116,7 @@
 
 ### 第三步：开始对话
 
-按 `Ctrl+Shift+P` 输入 `MiMo: New Chat`，或在侧边栏点击 **MiMo** 图标后点击 **+** 按钮。
+按 `Ctrl+Shift+P` 输入 `MiMo: New Chat Window`，或用 `MiMo: Open Chat` 打开聊天视图。
 
 ---
 
@@ -110,11 +137,15 @@
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
 | `api.api_key` | API 密钥 | — |
-| `api.base_url` | API 端点地址 | `https://api.openai.com/v1` |
+| `api.base_url` | API 端点地址 | `https://token-plan-cn.xiaomimimo.com/v1` |
 | `api.model` | 默认模型 | `mimo-v2.5-pro` |
 | `agent.max_tokens` | 最大 Token 数 | `8192` |
+| `agent.max_rounds` / `mimo.maxRounds` | 最大工具调用轮次 | `100` |
 | `agent.temperature` | 温度（越高越随机） | `0.7` |
+| `agent.enable_thinking` / `mimo.enableThinking` | 是否启用 MiMo thinking | `false` |
 | `sandbox.mode` | 沙箱模式 (`safe` / `docker`) | `safe` |
+
+配置优先级：`~/.mimo/settings.json` > 环境变量 > VS Code 设置 > 默认值。
 
 更多配置请查看扩展设置界面。
 
@@ -124,10 +155,15 @@
 
 | 命令 | 说明 |
 |------|------|
-| `MiMo: New Chat` | 新建对话 |
-| `MiMo: Open Settings` | 打开设置界面 |
-| `MiMo: Switch Model` | 切换当前使用的模型 |
-| `MiMo: Switch Mode` | 切换工作模式 |
+| `MiMo: Open Chat` | 打开当前聊天视图 |
+| `MiMo: New Chat Window` | 新建聊天窗口 |
+| `MiMo: Settings` | 打开设置界面 |
+| `MiMo: Clear Conversation` | 清空当前对话 |
+| `MiMo: Explain Code` | 解释选中的代码 |
+| `MiMo: Review Code` | 审查选中的代码 |
+| `MiMo: Refactor Code` | 重构选中的代码 |
+
+模型和工作模式可在聊天界面底部切换。
 
 ---
 
@@ -141,7 +177,7 @@
 
 ## 🐛 问题反馈
 
-1. 在 [GitHub Issues](https://github.com/your-repo/mimo-agent-vscode/issues) 提交反馈
+1. 在 [GitHub Issues](https://github.com/YSP0Github/AI_World/issues) 提交反馈
 2. 加入社区讨论
 
 ---
@@ -160,6 +196,15 @@ MIT License
 ---
 
 <p align="center">
+  <a href="https://github.com/YSP0Github/AI_World">
+    <img src="https://img.shields.io/badge/GitHub-推荐仓库-181717?style=for-the-badge&logo=github" alt="GitHub repository">
+  </a>
+  <a href="https://github.com/YSP0Github/AI_World/stargazers">
+    <img src="https://img.shields.io/badge/Star-支持项目-yellow?style=for-the-badge&logo=github" alt="Star MiMo on GitHub">
+  </a>
+</p>
+
+<p align="center">
   <strong>如果觉得好用，请给个 Star 支持一下！</strong>
 </p>
 
@@ -176,15 +221,37 @@ MIT License
 </p>
 
 <p align="center">
-  <a href="https://marketplace.visualstudio.com/items?itemName=mimo-agent.mimo">
-    <img src="https://img.shields.io/visual-studio-marketplace/v/mimo-agent.mimo.svg?label=VS%20Code%20Marketplace" alt="VS Code Marketplace">
+  <a href="https://marketplace.visualstudio.com/items?itemName=mimo-agent.mimo-agent">
+    <img src="https://img.shields.io/visual-studio-marketplace/v/mimo-agent.mimo-agent.svg?label=VS%20Code%20Marketplace" alt="VS Code Marketplace">
   </a>
-  <a href="https://marketplace.visualstudio.com/items?itemName=mimo-agent.mimo">
-    <img src="https://img.shields.io/visual-studio-marketplace/i/mimo-agent.mimo.svg" alt="Installs">
+  <a href="https://marketplace.visualstudio.com/items?itemName=mimo-agent.mimo-agent">
+    <img src="https://img.shields.io/visual-studio-marketplace/i/mimo-agent.mimo-agent.svg" alt="Installs">
   </a>
-  <a href="https://github.com/anthropics/claude-code/blob/main/LICENSE">
+  <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License">
   </a>
+  <a href="https://github.com/YSP0Github/AI_World">
+    <img src="https://img.shields.io/github/stars/YSP0Github/AI_World?style=social" alt="GitHub Stars">
+  </a>
+</p>
+
+---
+
+<p align="center">
+  <img src="assets/readme-hero.svg" alt="MiMo AI coding assistant preview" width="920">
+</p>
+
+## 🌟 Recommended Repository
+
+If you want an AI coding assistant that can read code, edit files, run commands, review changes, and recover interrupted tasks inside VS Code, this repository is worth watching:
+
+[![GitHub Repo](https://img.shields.io/badge/GitHub-YSP0Github%2FAI__World-181717?style=for-the-badge&logo=github)](https://github.com/YSP0Github/AI_World)
+[![Star](https://img.shields.io/badge/Star-Support%20MiMo-yellow?style=for-the-badge&logo=github)](https://github.com/YSP0Github/AI_World/stargazers)
+
+Stars, forks, and issues are welcome. A Star helps more developers discover MiMo and supports ongoing improvements.
+
+<p align="center">
+  <img src="assets/readme-workflow.svg" alt="MiMo reads context, uses tools, verifies work, and recovers tasks" width="920">
 </p>
 
 ---
@@ -194,7 +261,7 @@ MIT License
 ### 🤖 Smart Conversation
 - **Multi-turn dialogue** — AI remembers context across messages
 - **Image understanding** — Paste images directly (Ctrl+V) to analyze code screenshots
-- **Voice input** — Click the mic button to describe your needs by voice
+- **Voice input** — Supports local voice input when enabled in the UI
 
 ### 🛠️ Powerful Tool Capabilities
 
@@ -215,6 +282,11 @@ MIT License
 | **Polling** | ⏩ | Auto-continues until task is complete | Complex tasks, batch refactoring |
 | **Plan** | 📋 | Read-only analysis first, then execute | Large projects, architecture design |
 | **Duel** | ⚔️ | CrazyCoder vs Multi-dimension Reviewer | Code review, security audits |
+
+### 🧭 Task Recovery
+- **Reasoning loop detection** — Detects repeated thinking loops and stalled model calls
+- **Fresh model recovery** — Starts a new model call in the same conversation to produce a handoff or final answer
+- **Interrupted-task summary** — When the round budget is reached, MiMo reports completed work, changed files, validation status, and the next recovery step
 
 ### 🔒 Safe Execution (Sandbox)
 - **Safe Mode** — Lightweight local protection: command checks, workspace boundary checks, timeouts
@@ -239,11 +311,11 @@ MIT License
 
 Search for **MiMo** in the VS Code extension marketplace and install:
 
-[![Install](https://img.shields.io/badge/Install-MiMo-blueviolet?style=for-the-badge&logo=visual-studio-code)](vscode:extension/mimo-agent.mimo)
+[![Install](https://img.shields.io/badge/Install-MiMo-blueviolet?style=for-the-badge&logo=visual-studio-code)](vscode:extension/mimo-agent.mimo-agent)
 
 ### Step 2: Configure API Key
 
-1. Press `Ctrl+Shift+P`, type `MiMo: Open Settings`
+1. Press `Ctrl+Shift+P`, type `MiMo: Settings`
 2. Enter your API key in the **API Key** field
 3. Adjust model, temperature, and other parameters as needed
 4. Click **Save and Apply**
@@ -252,7 +324,7 @@ Search for **MiMo** in the VS Code extension marketplace and install:
 
 ### Step 3: Start Chatting
 
-Press `Ctrl+Shift+P` and type `MiMo: New Chat`, or click the **MiMo** icon in the sidebar and hit **+**.
+Press `Ctrl+Shift+P` and type `MiMo: New Chat Window`, or use `MiMo: Open Chat` to open the chat view.
 
 ---
 
@@ -273,11 +345,15 @@ Press `Ctrl+Shift+P` and type `MiMo: New Chat`, or click the **MiMo** icon in th
 | Setting | Description | Default |
 |---------|-------------|---------|
 | `api.api_key` | API Key | — |
-| `api.base_url` | API endpoint URL | `https://api.openai.com/v1` |
+| `api.base_url` | API endpoint URL | `https://token-plan-cn.xiaomimimo.com/v1` |
 | `api.model` | Default model | `mimo-v2.5-pro` |
 | `agent.max_tokens` | Max output tokens | `8192` |
+| `agent.max_rounds` / `mimo.maxRounds` | Max tool-calling rounds | `100` |
 | `agent.temperature` | Temperature (higher = more random) | `0.7` |
+| `agent.enable_thinking` / `mimo.enableThinking` | Enable MiMo thinking mode | `false` |
 | `sandbox.mode` | Sandbox mode (`safe` / `docker`) | `safe` |
+
+Configuration priority: `~/.mimo/settings.json` > environment variables > VS Code settings > defaults.
 
 More settings available in the extension Settings UI.
 
@@ -287,10 +363,15 @@ More settings available in the extension Settings UI.
 
 | Command | Description |
 |---------|-------------|
-| `MiMo: New Chat` | Create a new conversation |
-| `MiMo: Open Settings` | Open settings UI |
-| `MiMo: Switch Model` | Switch the active model |
-| `MiMo: Switch Mode` | Switch work mode |
+| `MiMo: Open Chat` | Open the chat view |
+| `MiMo: New Chat Window` | Create a new chat window |
+| `MiMo: Settings` | Open settings UI |
+| `MiMo: Clear Conversation` | Clear the current conversation |
+| `MiMo: Explain Code` | Explain the selected code |
+| `MiMo: Review Code` | Review the selected code |
+| `MiMo: Refactor Code` | Refactor the selected code |
+
+Model and work mode are switched inside the chat UI.
 
 ---
 
@@ -304,7 +385,7 @@ More settings available in the extension Settings UI.
 
 ## 🐛 Issues & Feedback
 
-1. Open a [GitHub Issue](https://github.com/your-repo/mimo-agent-vscode/issues)
+1. Open a [GitHub Issue](https://github.com/YSP0Github/AI_World/issues)
 2. Join the community discussion
 
 ---
@@ -323,6 +404,15 @@ MIT License
 ---
 
 <p align="center">
+  <a href="https://github.com/YSP0Github/AI_World">
+    <img src="https://img.shields.io/badge/GitHub-Recommended%20Repo-181717?style=for-the-badge&logo=github" alt="GitHub repository">
+  </a>
+  <a href="https://github.com/YSP0Github/AI_World/stargazers">
+    <img src="https://img.shields.io/badge/Star-Support%20the%20Project-yellow?style=for-the-badge&logo=github" alt="Star MiMo on GitHub">
+  </a>
+</p>
+
+<p align="center">
   <strong>If you find this useful, please give us a Star!</strong>
 </p>
 
@@ -338,6 +428,7 @@ MIT License
 - ✨ 设置界面支持多语言 / Settings page supports multi-language
 - 🔄 推理循环检测优化 / Optimized reasoning loop detection
 - 🛡️ 新增三级循环恢复机制 / Added three-tier loop recovery
+- 🧭 达到轮次上限时输出恢复交接总结 / Added recovery handoff summary when max rounds are reached
 
 ### v1.3.0
 - ⚔️ 新增对决模式 / Added Duel Mode (CrazyCoder + Multi-dimension Review)
