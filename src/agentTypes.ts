@@ -2,6 +2,30 @@ import { ChatMessage } from './api';
 import { TokenUsage } from './tokenTracker';
 import { WorkflowResult } from './workflow';
 
+export interface StopGuardInfo {
+    round: number;
+    reason: string;
+    summary?: string;
+}
+
+export interface TaskChangeFile {
+    path: string;
+    added: number;
+    removed: number;
+    binary?: boolean;
+}
+
+export interface TaskChangeSummary {
+    id: string;
+    files: TaskChangeFile[];
+    totalAdded: number;
+    totalRemoved: number;
+    patch: string;
+    createdAt: number;
+    canUndo?: boolean;
+    warning?: string;
+}
+
 export interface AgentEvents {
     onToken: (token: string) => void;
     onReasoning: (token: string) => void;
@@ -29,6 +53,7 @@ export interface AgentEvents {
     onAdversarialToolStart?: (persona: 'programmer' | 'pm', toolName: string, args: Record<string, any>) => void;
     onAdversarialToolEnd?: (persona: 'programmer' | 'pm', toolName: string, result: string, isError: boolean, elapsed: number) => void;
     onAskUser?: (previewId: string, question: string, options: string[]) => void;
+    onStopGuard?: (info: StopGuardInfo) => void;
 }
 
 export type AgentMode = 'auto' | 'polling' | 'plan' | 'adversarial' | 'infinite';
@@ -84,6 +109,11 @@ export interface RoundProgress {
     valuableProgress: boolean;
     errorOnly: boolean;
     reason: string;
+    completedCount?: number;
+    errorCount?: number;
+    noProgressCount?: number;
+    progressToolCount?: number;
+    readOnlySuccessCount?: number;
 }
 
 export interface CompletionGateDecision {

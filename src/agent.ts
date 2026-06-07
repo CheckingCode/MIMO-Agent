@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { execFile, spawn } from 'child_process';
 import { MiMoAPI, ChatMessage, ContentPart, ToolCall } from './api';
 import { TOOL_DEFINITIONS, executeTool } from './tools';
 import { buildSystemPrompt, loadInstructions, validateInstructions } from './prompt';
@@ -17,7 +18,7 @@ import { TokenTracker, TokenUsage } from './tokenTracker';
 import { executeWorkflow, WorkflowPhase, WorkflowResult, WorkflowEvents } from './workflow';
 import { classifyIntent, IntentResult, checkAdversarialSuitability, quickClassifyIntent } from './router';
 import { MemoryManager, ToolObservation } from './memory';
-import { AgentEvents, AgentMode, CompletionGateDecision, ConversationState, PendingAsk, PendingEdit, PendingWrite, RoundProgress, TrackedIssue } from './agentTypes';
+import { AgentEvents, AgentMode, CompletionGateDecision, ConversationState, PendingAsk, PendingEdit, PendingWrite, RoundProgress, TaskChangeSummary, TrackedIssue } from './agentTypes';
 import { DEFAULT_MODELS, MODEL_CAPABILITIES, ModelCapabilities, PREFERRED_CHAT_MODELS, inferModelCapabilities, normalizeModelName } from './modelCapabilities';
 import { getFriendlyError } from './agentErrors';
 import { buildUserFacingHandoff, stripInternalHandoffNoise } from './handoff';
@@ -1222,11 +1223,12 @@ Updated summary:`;
         const progressTools = toolCalls.filter((tc, index) =>
             this.isProgressTool(tc.function.name, toolResults[index] || ''),
         );
-        const readOnlySuccess = toolCalls.some((tc, index) =>
+        const readOnlySuccessCount = toolCalls.filter((tc, index) =>
             !this.isToolResultError(toolResults[index] || '')
             && !this.isNoProgressToolResult(toolResults[index] || '')
             && ['read_file', 'search_files', 'glob_files', 'list_directory', 'get_file_info', 'git_status', 'git_diff', 'git_log', 'fetch_url', 'web_search'].includes(tc.function.name),
-        );
+        ).length;
+        const readOnlySuccess = readOnlySuccessCount > 0;
         const valuableProgress = progressTools.length > 0;
         const madeProgress = valuableProgress || readOnlySuccess;
         const errorOnly = completed.length > 0 && errors.length === completed.length;
@@ -1244,7 +1246,129 @@ Updated summary:`;
             reason += '；本轮达到超时保护';
         }
 
-        return { madeProgress, valuableProgress, errorOnly, reason };
+        return {
+            madeProgress,
+            valuableProgress,
+            errorOnly,
+            reason,
+            completedCount: completed.length,
+            errorCount: errors.length,
+            noProgressCount: noProgress.length,
+            progressToolCount: progressTools.length,
+            readOnlySuccessCount,
+        };
+    }
+
+    private buildRoundNarration(
+        round: number,
+        taskComplexity: 'simple' | 'moderate' | 'complex',
+        conv: ConversationState,
+        stallRounds: number,
+        softMaxRounds: number,
+        hardMaxRounds: number,
+        unlimitedRounds: boolean,
+    ): string {
+        const budget = unlimitedRounds
+            ? '当前没有软轮次预算，但仍会监测停滞和重复。'
+            : `软预算 ${softMaxRounds} 轮，硬上限 ${hardMaxRounds} 轮。`;
+        const modeHint = conv.mode === 'infinite'
+            ? 'Infinite 模式会允许更长执行，但低进展时仍会暂停交接。'
+            : 'Auto 模式会在探索、修改、验证之间尽量收敛。';
+        const stallHint = stallRounds > 0
+            ? `上一轮进展偏低，当前停滞计数 ${stallRounds}。本轮会优先换一个更具体的动作。`
+            : '本轮会先根据已有上下文选择最有信息量的下一步。';
+        return `[第 ${round} 轮] 任务复杂度：${taskComplexity}。${budget} ${modeHint} ${stallHint}`;
+    }
+
+    private describeToolAction(name: string, args: Record<string, any>): string {
+        const pathArg = args.path || args.filePath || args.directory || args.dir || args.cwd;
+        switch (name) {
+            case 'read_file':
+                return `读取 ${pathArg || '文件'}`;
+            case 'write_file':
+                return `写入 ${pathArg || '文件'}`;
+            case 'edit_file':
+                return `编辑 ${pathArg || '文件'}`;
+            case 'list_directory':
+                return `查看目录 ${pathArg || ''}`.trim();
+            case 'search_files':
+                return `搜索 "${args.pattern || args.query || ''}"`;
+            case 'glob_files':
+                return `匹配 ${args.pattern || ''}`;
+            case 'execute_command': {
+                const command = String(args.command || '').replace(/\s+/g, ' ').trim();
+                return `运行命令 ${command.slice(0, 90)}${command.length > 90 ? '...' : ''}`;
+            }
+            case 'git_status':
+                return '查看 git 状态';
+            case 'git_diff':
+                return '查看 git diff';
+            case 'git_log':
+                return '查看提交历史';
+            case 'fetch_url':
+                return `获取 ${args.url || '网页'}`;
+            case 'web_search':
+                return `搜索网页 "${args.query || ''}"`;
+            case 'spawn_subagent':
+                return '启动子代理';
+            case 'run_workflow':
+                return '运行工作流';
+            default:
+                return `调用 ${name}`;
+        }
+    }
+
+    private describeToolOutcome(name: string, args: Record<string, any>, result: string, elapsed: number): string {
+        const action = this.describeToolAction(name, args);
+        const seconds = `${elapsed.toFixed(1)}s`;
+        if (this.isToolResultError(result)) {
+            const firstLine = this.extractMessageText(result).split(/\r?\n/).find(Boolean) || '工具返回错误';
+            return `[工具结果] ${action}失败（${seconds}）：${firstLine.slice(0, 160)}`;
+        }
+        if (this.isNoProgressToolResult(result)) {
+            return `[工具结果] ${action}被跳过：检测到重复或无进展。`;
+        }
+        const text = this.extractMessageText(result);
+        const lineCount = text ? text.split(/\r?\n/).length : 0;
+        const sizeHint = text.length > 0
+            ? `返回约 ${lineCount} 行 / ${text.length} 字符`
+            : '没有返回正文';
+        return `[工具结果] ${action}完成（${seconds}），${sizeHint}。`;
+    }
+
+    private describeToolPlan(
+        round: number,
+        tasks: Array<{ tc: ToolCall; args: Record<string, any>; parallel: boolean }>,
+        skippedCount: number,
+    ): string {
+        const preview = tasks
+            .slice(0, 5)
+            .map(task => this.describeToolAction(task.tc.function.name, task.args))
+            .join('；');
+        const more = tasks.length > 5 ? `；另有 ${tasks.length - 5} 个动作` : '';
+        const skipped = skippedCount > 0 ? ` 已跳过 ${skippedCount} 个重复只读调用。` : '';
+        return `[工具计划] 第 ${round} 轮准备执行 ${tasks.length} 个动作：${preview || '无工具动作'}${more}。${skipped}`;
+    }
+
+    private buildProgressRecoveryInstruction(
+        reason: string,
+        roundProgress: RoundProgress,
+        readonlyOnlyRounds: number,
+        stallRounds: number,
+    ): ChatMessage {
+        return {
+            role: 'system',
+            content: `[Progress guard]
+The last round showed low-value progress: ${reason}.
+Stats: valuable tools=${roundProgress.progressToolCount || 0}, read-only successes=${roundProgress.readOnlySuccessCount || 0}, no-progress tools=${roundProgress.noProgressCount || 0}, errors=${roundProgress.errorCount || 0}, read-only-only rounds=${readonlyOnlyRounds}, stall rounds=${stallRounds}.
+
+Change strategy now:
+1. Do not repeat broad listing/searching/checking that already happened.
+2. If enough evidence exists, either make the smallest concrete change, run validation, or produce the final answer.
+3. If a tool is needed, choose one high-value tool call with a specific target.
+4. State briefly what you learned and what you are doing next.
+5. If there is no credible next action, stop and summarize current progress instead of continuing to inspect.`,
+        } as any;
     }
 
     private hasRecentTool(conv: ConversationState, names: string[], lookback = 40): boolean {
@@ -1402,6 +1526,94 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
 
     getTokenTracker(): TokenTracker {
         return this.tokenTracker;
+    }
+
+    private execGit(args: string[], maxBuffer = 8 * 1024 * 1024): Promise<string> {
+        return new Promise((resolve, reject) => {
+            execFile('git', args, {
+                cwd: this.config.workspace,
+                windowsHide: true,
+                maxBuffer,
+            }, (error, stdout, stderr) => {
+                if (error) {
+                    reject(new Error((stderr || error.message || '').trim()));
+                    return;
+                }
+                resolve(stdout || '');
+            });
+        });
+    }
+
+    private applyGitPatch(args: string[], patch: string): Promise<void> {
+        return new Promise((resolve, reject) => {
+            const child = spawn('git', args, {
+                cwd: this.config.workspace,
+                windowsHide: true,
+                stdio: ['pipe', 'pipe', 'pipe'],
+            });
+            let stderr = '';
+            child.stderr.on('data', chunk => { stderr += String(chunk); });
+            child.on('error', reject);
+            child.on('close', code => {
+                if (code === 0) {
+                    resolve();
+                } else {
+                    reject(new Error(stderr.trim() || `git ${args.join(' ')} exited with ${code}`));
+                }
+            });
+            child.stdin.write(patch);
+            child.stdin.end();
+        });
+    }
+
+    async getWorkspaceChangeSummary(): Promise<TaskChangeSummary | null> {
+        try {
+            await this.execGit(['rev-parse', '--is-inside-work-tree'], 256 * 1024);
+            const patch = await this.execGit(['diff', '--binary', '--', '.']);
+            if (!patch.trim()) return null;
+            const numstat = await this.execGit(['diff', '--numstat', '--', '.'], 1024 * 1024);
+            const files = numstat
+                .split(/\r?\n/)
+                .map(line => line.trim())
+                .filter(Boolean)
+                .map(line => {
+                    const parts = line.split('\t');
+                    const addedRaw = parts[0] || '0';
+                    const removedRaw = parts[1] || '0';
+                    const filePath = parts.slice(2).join('\t') || '(unknown)';
+                    const binary = addedRaw === '-' || removedRaw === '-';
+                    return {
+                        path: filePath,
+                        added: binary ? 0 : (parseInt(addedRaw, 10) || 0),
+                        removed: binary ? 0 : (parseInt(removedRaw, 10) || 0),
+                        binary,
+                    };
+                });
+            if (files.length === 0) return null;
+            return {
+                id: `changes_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                files,
+                totalAdded: files.reduce((sum, file) => sum + file.added, 0),
+                totalRemoved: files.reduce((sum, file) => sum + file.removed, 0),
+                patch,
+                createdAt: Date.now(),
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    async undoWorkspaceChanges(patch: string): Promise<{ ok: boolean; error?: string }> {
+        try {
+            if (!patch || patch.length > 8 * 1024 * 1024) {
+                return { ok: false, error: 'No reversible patch is available.' };
+            }
+            await this.applyGitPatch(['apply', '--check', '-R', '--whitespace=nowarn'], patch);
+            await this.applyGitPatch(['apply', '-R', '--whitespace=nowarn'], patch);
+            return { ok: true };
+        } catch (e: any) {
+            return { ok: false, error: String(e?.message || e).slice(0, 400) };
+        }
     }
 
     // ── Chat ──
@@ -1725,6 +1937,8 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
         let reasoningLoopCount = 0; // Track consecutive reasoning loops
         let consecutiveRateRetries = 0;
         let stallRounds = 0;
+        let readonlyOnlyRounds = 0;
+        let progressRecoveryPrompts = 0;
         let stopReason = '达到硬安全上限';
         let stopRound = HARD_MAX_ROUNDS;
         const memoryToolObservations: ToolObservation[] = [];
@@ -1743,7 +1957,17 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
                 stallRounds,
             });
             events.onRoundStart(round);
-            events.onStatus(`Processing round ${round}...`);
+            const roundNarration = this.buildRoundNarration(
+                round,
+                taskComplexity,
+                conv,
+                stallRounds,
+                SOFT_MAX_ROUNDS,
+                HARD_MAX_ROUNDS,
+                unlimitedRounds,
+            );
+            events.onStatus(`第 ${round} 轮：规划下一步...`);
+            events.onReasoning(roundNarration);
 
             let systemContent = persona
                 ? buildPersonaPrompt(this.systemPrompt, persona)
@@ -2283,6 +2507,7 @@ ${friendlyError}`;
                 }
             }
             if (currentBatch.length > 0) batches.push(currentBatch);
+            events.onReasoning(this.describeToolPlan(round, tasks, skippedToolResults.size));
 
             // Execute each tool (shared logic)
             const execToolCall = async (task: ToolTask): Promise<{ result: string; elapsed: number }> => {
@@ -2391,7 +2616,8 @@ ${friendlyError}`;
                     for (const task of batch) {
                         events.onToolCallStart(task.tc.function.name, task.args);
                     }
-                    events.onStatus(`Executing ${batch.length} tools in parallel...`);
+                    events.onStatus(`并行执行 ${batch.length} 个只读工具...`);
+                    events.onReasoning(`[并行执行] 同时处理 ${batch.length} 个只读动作，用来快速收集证据。`);
 
                     // Execute with concurrency cap
                     const queue = [...batch];
@@ -2428,6 +2654,7 @@ ${friendlyError}`;
                         const res = settled[j];
                         const isError = res.result.startsWith('Safety:') || res.result.startsWith('Tool error:') || res.result.startsWith('Unknown tool') || res.result.startsWith('Blocked by');
                         events.onToolCallEnd(task.tc.function.name, res.result, isError, res.elapsed);
+                        events.onReasoning(this.describeToolOutcome(task.tc.function.name, task.args, res.result, res.elapsed));
                         toolResults[task.index] = res.result;
                         toolElapsedTimes[task.index] = res.elapsed;
                     }
@@ -2436,11 +2663,13 @@ ${friendlyError}`;
                     if (this.isStopping(effectiveConvId, signal)) break;
                     const task = batch[0];
                     events.onToolCallStart(task.tc.function.name, task.args);
-                    events.onStatus(`Executing ${task.tc.function.name}...`);
+                    events.onStatus(`执行工具：${task.tc.function.name}...`);
+                    events.onReasoning(`[执行工具] ${this.describeToolAction(task.tc.function.name, task.args)}。`);
 
                     const { result, elapsed } = await execToolCall(task);
                     const isError = result.startsWith('Safety:') || result.startsWith('Tool error:') || result.startsWith('Unknown tool') || result.startsWith('Blocked by');
                     events.onToolCallEnd(task.tc.function.name, result, isError, elapsed);
+                    events.onReasoning(this.describeToolOutcome(task.tc.function.name, task.args, result, elapsed));
                     toolResults[task.index] = result;
                     toolElapsedTimes[task.index] = elapsed;
                 }
@@ -2457,13 +2686,50 @@ ${friendlyError}`;
             });
             const overSoftBudget = !unlimitedRounds && round >= SOFT_MAX_ROUNDS;
             const readOnlyAuditTask = this.isReadOnlyAuditRequest(userInput);
+            const readonlyOnlyRound = !roundProgress.valuableProgress && (roundProgress.readOnlySuccessCount || 0) > 0;
+            if (roundProgress.valuableProgress) {
+                readonlyOnlyRounds = 0;
+                progressRecoveryPrompts = 0;
+            } else if (readonlyOnlyRound) {
+                readonlyOnlyRounds++;
+            } else if (!roundProgress.madeProgress) {
+                readonlyOnlyRounds = 0;
+            }
+            const lowValueReadOnlyLoop = !readOnlyAuditTask && readonlyOnlyRounds >= 2;
             const progressKeepsGoing = overSoftBudget
                 ? (roundProgress.valuableProgress || (readOnlyAuditTask && roundProgress.madeProgress))
-                : roundProgress.madeProgress;
+                : (roundProgress.madeProgress && !lowValueReadOnlyLoop);
             stallRounds = progressKeepsGoing ? 0 : stallRounds + 1;
             let shouldStopAfterSaving = false;
+            let shouldRetryWithProgressRecovery = false;
+            let progressRecoveryInstruction: ChatMessage | null = null;
             if (overSoftBudget || stallRounds > 0) {
-                events.onReasoning(`[进展检查] ${roundProgress.reason}；停滞 ${stallRounds}/${overSoftBudget ? POST_BUDGET_STALL_LIMIT : STALL_LIMIT}`);
+                const loopHint = lowValueReadOnlyLoop
+                    ? `；连续 ${readonlyOnlyRounds} 轮只有只读探索，准备切换策略`
+                    : '';
+                events.onReasoning(`[进展检查] ${roundProgress.reason}${loopHint}；停滞 ${stallRounds}/${overSoftBudget ? POST_BUDGET_STALL_LIMIT : STALL_LIMIT}`);
+            } else {
+                events.onReasoning(`[进展检查] ${roundProgress.reason}；本轮仍有有效推进。`);
+            }
+
+            if (lowValueReadOnlyLoop && progressRecoveryPrompts < 2 && !overSoftBudget) {
+                progressRecoveryPrompts++;
+                shouldRetryWithProgressRecovery = true;
+                const recoveryReason = `连续 ${readonlyOnlyRounds} 轮只读探索，没有检测到修改、验证或明确交付`;
+                progressRecoveryInstruction = this.buildProgressRecoveryInstruction(
+                    recoveryReason,
+                    roundProgress,
+                    readonlyOnlyRounds,
+                    stallRounds,
+                );
+                this.traceEvent(conv, 'progress_guard.redirect', {
+                    round,
+                    reason: recoveryReason,
+                    readonlyOnlyRounds,
+                    stallRounds,
+                    recoveryPrompts: progressRecoveryPrompts,
+                });
+                events.onReasoning(`[进展守卫] ${recoveryReason}。我会要求模型停止泛泛检查，改为具体修改、验证或总结。`);
             }
 
             if (overSoftBudget && progressKeepsGoing) {
@@ -2500,8 +2766,14 @@ ${friendlyError}`;
                     _toolElapsed: toolElapsedTimes[i] || 0,
                 });
             }
+            if (shouldRetryWithProgressRecovery && progressRecoveryInstruction && !shouldStopAfterSaving) {
+                conv.messages.push(progressRecoveryInstruction);
+            }
             this.saveConversations();
             reasoningLoopCount = 0;
+            if (shouldRetryWithProgressRecovery && progressRecoveryInstruction && !shouldStopAfterSaving) {
+                continue;
+            }
             if (shouldStopAfterSaving) {
                 break;
             }
@@ -2525,8 +2797,9 @@ ${friendlyError}`;
         });
         events.onToken(summary);
         events.onDone(summary);
+        events.onStopGuard?.({ round: stopRound, reason: stopReason, summary });
         if (!this.isSubstantialFinalReport(summary)) {
-            events.onError(`已由停止保护中断：第 ${stopRound} 轮，${stopReason}`);
+            events.onStatus(`Stop guard paused at round ${stopRound}. Progress was saved; send a follow-up message to continue.`);
         }
         this.finishChat(effectiveConvId);
         return summary;

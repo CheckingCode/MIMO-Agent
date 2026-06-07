@@ -75,6 +75,24 @@ interface EditedFileInfo {
     removed: number;
 }
 
+interface TaskChangeFile {
+    path: string;
+    added: number;
+    removed: number;
+    binary?: boolean;
+}
+
+interface TaskChangeSummary {
+    id: string;
+    files: TaskChangeFile[];
+    totalAdded: number;
+    totalRemoved: number;
+    patch: string;
+    createdAt: number;
+    canUndo?: boolean;
+    warning?: string;
+}
+
 interface WorkflowUiState {
     card: HTMLElement;
     phases: Array<{ title: string; mode: string; tasks: Array<{ label: string; result?: any }> }>;
@@ -312,6 +330,10 @@ export const Messages = {
         bus.on('planReady', (planContent?: string, planPath?: string) => this.showPlanConfirm(planContent, planPath));
         // Ask user interactive dialog
         bus.on('askUser', (previewId: string, question: string, options: string[]) => this.renderAskUserCard(previewId, question, options));
+        bus.on('stopGuard', (info: any) => this.renderStopGuardCard(info));
+        bus.on('taskChanges', (summary: TaskChangeSummary) => this.renderTaskChangesCard(summary));
+        bus.on('taskChangesUndoResult', (result: any) => this.handleTaskChangesUndoResult(result));
+        bus.on('taskChangesRefresh', (summary: TaskChangeSummary | null) => this.handleTaskChangesRefresh(summary));
         // Message queue
         bus.on('messageQueued', (text: string, queueLength: number) => this.showQueuedMessage(text, queueLength));
         bus.on('queueProcessed', (remaining: number) => this.updateQueueDisplay(remaining));
@@ -1369,6 +1391,100 @@ export const Messages = {
         return box;
     },
 
+    renderTaskChangesCard(summary: TaskChangeSummary | null): void {
+        if (!summary || !summary.files || summary.files.length === 0 || !summary.patch) return;
+        const messagesDiv = document.getElementById('messages')!;
+        const card = createElement('div', 'task-changes-card');
+        card.setAttribute('data-task-change-id', summary.id);
+        (card as any)._patch = summary.patch;
+
+        const fileCount = summary.files.length;
+        const fileText = fileCount === 1 ? '1 个文件' : `${fileCount} 个文件`;
+        const rows = summary.files.map(file => {
+            const binary = file.binary ? '<span class="task-change-binary">binary</span>' : '';
+            return `<button class="task-change-row" type="button" data-file="${escapeHtml(file.path)}">` +
+                `<span class="task-change-path">${escapeHtml(file.path)}</span>` +
+                `<span class="task-change-row-stats">${binary}<span class="diff-stats-add">+${file.added}</span> <span class="diff-stats-del">-${file.removed}</span></span>` +
+                `</button>`;
+        }).join('');
+
+        card.innerHTML = `
+            <div class="task-changes-head">
+                <div class="task-changes-icon">+</div>
+                <div class="task-changes-title">
+                    <div>已编辑 ${fileText}</div>
+                    <div class="task-changes-stats"><span class="diff-stats-add">+${summary.totalAdded}</span> <span class="diff-stats-del">-${summary.totalRemoved}</span></div>
+                </div>
+                <div class="task-changes-actions">
+                    <button class="task-changes-undo" type="button">撤销</button>
+                    <button class="task-changes-review" type="button">审核</button>
+                </div>
+            </div>
+            ${summary.warning ? `<div class="task-changes-warning">${escapeHtml(summary.warning)}</div>` : ''}
+            <div class="task-changes-list">${rows}</div>
+            <div class="task-changes-diff" hidden></div>
+            <div class="task-changes-status"></div>
+        `;
+
+        messagesDiv.appendChild(card);
+        smartScroll(messagesDiv);
+
+        const reviewBtn = card.querySelector<HTMLButtonElement>('.task-changes-review');
+        const undoBtn = card.querySelector<HTMLButtonElement>('.task-changes-undo');
+        const diffEl = card.querySelector<HTMLElement>('.task-changes-diff');
+        const statusEl = card.querySelector<HTMLElement>('.task-changes-status');
+        if (undoBtn && summary.canUndo === false) {
+            undoBtn.disabled = true;
+            undoBtn.title = summary.warning || 'Cannot safely undo this diff.';
+        }
+
+        const toggleReview = () => {
+            if (!diffEl) return;
+            const opening = diffEl.hidden;
+            if (opening && !diffEl.hasChildNodes()) {
+                renderMessageGitDiff(diffEl, summary.patch);
+            }
+            diffEl.hidden = !opening;
+            if (reviewBtn) reviewBtn.textContent = opening ? '收起' : '审核';
+            smartScroll(messagesDiv);
+        };
+
+        reviewBtn?.addEventListener('click', toggleReview);
+        card.querySelectorAll('.task-change-row').forEach(row => {
+            row.addEventListener('click', toggleReview);
+        });
+        undoBtn?.addEventListener('click', () => {
+            if (summary.canUndo === false) return;
+            if (!confirm('撤销本次卡片中的所有未提交改动？')) return;
+            undoBtn.disabled = true;
+            if (reviewBtn) reviewBtn.disabled = true;
+            if (statusEl) statusEl.textContent = '正在撤销...';
+            vscode.taskChangesUndo(summary.id, summary.patch);
+        });
+    },
+
+    handleTaskChangesUndoResult(result: { id?: string; ok?: boolean; error?: string }): void {
+        const id = String(result?.id || '');
+        const card = document.querySelector<HTMLElement>(`.task-changes-card[data-task-change-id="${CSS.escape(id)}"]`);
+        if (!card) return;
+        const statusEl = card.querySelector<HTMLElement>('.task-changes-status');
+        const undoBtn = card.querySelector<HTMLButtonElement>('.task-changes-undo');
+        const reviewBtn = card.querySelector<HTMLButtonElement>('.task-changes-review');
+        if (result.ok) {
+            card.classList.add('task-changes-undone');
+            if (statusEl) statusEl.textContent = '已撤销本次改动。';
+        } else {
+            if (undoBtn) undoBtn.disabled = false;
+            if (reviewBtn) reviewBtn.disabled = false;
+            if (statusEl) statusEl.textContent = `撤销失败：${result.error || 'patch 无法反向应用'}`;
+        }
+    },
+
+    handleTaskChangesRefresh(_summary: TaskChangeSummary | null): void {
+        // The active card already reflects the undo result. This hook is reserved
+        // for a future live refresh if staged/untracked changes are added.
+    },
+
     handleError(error: string): void {
         // Mark thinking as done on error too
         this._markThinkingDone();
@@ -2145,6 +2261,57 @@ export const Messages = {
         submitBtn.addEventListener('click', () => submitAnswer(input.value));
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') submitAnswer(input.value);
+        });
+    },
+
+    renderStopGuardCard(info: { round?: number; reason?: string; summary?: string }): void {
+        this._markThinkingDone();
+        const messagesDiv = document.getElementById('messages')!;
+        const card = createElement('div', 'stop-guard-card');
+        const round = Number.isFinite(info?.round) ? Number(info.round) : 0;
+        const reason = String(info?.reason || '检测到连续低进展');
+        const continuePrompt = [
+            '继续执行当前任务。',
+            '请从刚才已经保存的进度继续，优先完成未完成项。',
+            '避免重复已经做过的检查；如果继续没有新进展，请尽快总结并停止。'
+        ].join('\n');
+
+        card.innerHTML = `
+            <div class="stop-guard-header">暂停保护已接管</div>
+            <div class="stop-guard-body">
+                <div class="stop-guard-title">MIMO 已保存当前进度，这次暂停不会作为错误处理。</div>
+                <div class="stop-guard-meta">
+                    <span>第 ${round || '-'} 轮</span>
+                    <span>${escapeHtml(reason)}</span>
+                </div>
+            </div>
+            <div class="stop-guard-actions">
+                <button class="stop-guard-continue" type="button">继续执行</button>
+                <button class="stop-guard-dismiss" type="button">先停在这里</button>
+            </div>
+            <div class="stop-guard-status"></div>
+        `;
+
+        messagesDiv.appendChild(card);
+        smartScroll(messagesDiv);
+        this.makeCardCollapsible(card, '.stop-guard-header', false);
+
+        const continueBtn = card.querySelector<HTMLButtonElement>('.stop-guard-continue');
+        const dismissBtn = card.querySelector<HTMLButtonElement>('.stop-guard-dismiss');
+        const statusEl = card.querySelector<HTMLElement>('.stop-guard-status');
+        const disableActions = (status: string) => {
+            card.querySelectorAll('button').forEach(btn => (btn as HTMLButtonElement).disabled = true);
+            if (statusEl) statusEl.textContent = status;
+            card.classList.add('stop-guard-decided');
+        };
+
+        continueBtn?.addEventListener('click', () => {
+            disableActions('已发送继续指令。');
+            vscode.send(continuePrompt);
+        });
+        dismissBtn?.addEventListener('click', () => {
+            disableActions('已保留当前结果。');
+            card.classList.add('collapsed');
         });
     },
 

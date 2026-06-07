@@ -788,6 +788,15 @@ export class ChatViewProvider {
                 case 'askUserConfirm':
                     this.agent.confirmAskUser(msg.previewId, msg.answer);
                     break;
+                case 'taskChangesUndo': {
+                    const result = await this.agent.undoWorkspaceChanges(String(msg.patch || ''));
+                    post({ type: 'taskChangesUndoResult', id: msg.id, ...result });
+                    if (result.ok) {
+                        const summary = await this.agent.getWorkspaceChangeSummary();
+                        post({ type: 'taskChangesRefresh', summary });
+                    }
+                    break;
+                }
                 case 'planConfirm': {
                     const stPlan = this.panels.get(panelId);
                     this.agent.confirmPlan(true, stPlan?.activeConvId);
@@ -1150,6 +1159,8 @@ while ($true) { Start-Sleep -Milliseconds 100 }
 
         // Show user message with optional images
         const turnStartedAt = Date.now();
+        const baselineChanges = await this.agent.getWorkspaceChangeSummary();
+        const baselinePatch = baselineChanges?.patch || '';
         post({ type: 'userMessage', text, images: images || null });
         post({ type: 'busy' });
 
@@ -1248,6 +1259,9 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                 onAskUser: (previewId: string, question: string, options: string[]) => {
                     post({ type: 'askUser', previewId, question, options });
                 },
+                onStopGuard: (info: any) => {
+                    post({ type: 'stopGuard', ...info });
+                },
                 onWorkflowStart: (totalPhases: number, totalTasks: number) => {
                     post({ type: 'workflowStart', totalPhases, totalTasks });
                 },
@@ -1301,6 +1315,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                         personaId: conv.personaId,
                         activeSkillPrompt: conv.activeSkillPrompt,
                     });
+                    this.postTaskChanges(post, baselinePatch);
                     // Plan mode: auto-save plan text to ~/.mimo/plans/, show confirm buttons
                     // Skip if response is a greeting/direct reply (not an actual plan)
                     const _hasPlanMarkers = looksLikePlanResponse(response);
@@ -1400,6 +1415,8 @@ while ($true) { Start-Sleep -Milliseconds 100 }
 
         post({ type: 'userMessage', text: `[${skillName}] ${text}` });
         const turnStartedAt = Date.now();
+        const baselineChanges = await this.agent.getWorkspaceChangeSummary();
+        const baselinePatch = baselineChanges?.patch || '';
         post({ type: 'busy' });
 
         let responseText = '';
@@ -1482,6 +1499,9 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                 onAskUser: (previewId: string, question: string, options: string[]) => {
                     post({ type: 'askUser', previewId, question, options });
                 },
+                onStopGuard: (info: any) => {
+                    post({ type: 'stopGuard', ...info });
+                },
                 onWorkflowStart: (totalPhases: number, totalTasks: number) => {
                     post({ type: 'workflowStart', totalPhases, totalTasks });
                 },
@@ -1532,6 +1552,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                         personaId: conv.personaId,
                         activeSkillPrompt: conv.activeSkillPrompt,
                     });
+                    this.postTaskChanges(post, baselinePatch);
                 },
                 onError: (error) => {
                     this.saveRecoverySnapshot(activeId, conv);
@@ -1546,6 +1567,23 @@ while ($true) { Start-Sleep -Milliseconds 100 }
             post({ type: 'idle' });
             this.processNextQueued(panel, convId);
         }
+    }
+
+    private postTaskChanges(post: (msg: any) => void, baselinePatch = ''): void {
+        void this.agent.getWorkspaceChangeSummary()
+            .then(summary => {
+                if (summary?.patch === baselinePatch) return;
+                if (summary && baselinePatch.trim()) {
+                    summary.canUndo = false;
+                    summary.warning = '任务开始前已有未提交改动，无法安全隔离本轮撤销；请审核 diff 后手动处理。';
+                } else if (summary) {
+                    summary.canUndo = true;
+                }
+                if (summary && summary.files.length > 0) {
+                    post({ type: 'taskChanges', summary });
+                }
+            })
+            .catch(() => { /* best-effort task summary only */ });
     }
 
     /**

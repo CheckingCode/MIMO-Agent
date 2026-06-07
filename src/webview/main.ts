@@ -411,6 +411,22 @@ function init(): void {
                 bus.emit('askUser', msg.previewId, msg.question, msg.options);
                 break;
 
+            case 'stopGuard':
+                bus.emit('stopGuard', msg);
+                break;
+
+            case 'taskChanges':
+                bus.emit('taskChanges', msg.summary);
+                break;
+
+            case 'taskChangesUndoResult':
+                bus.emit('taskChangesUndoResult', msg);
+                break;
+
+            case 'taskChangesRefresh':
+                bus.emit('taskChangesRefresh', msg.summary);
+                break;
+
             // 閳光偓閳光偓 Workflow 閳光偓閳光偓
             case 'workflowStart':
                 renderQueue.enqueue(msg);

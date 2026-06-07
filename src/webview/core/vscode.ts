@@ -141,6 +141,10 @@ export const vscode = {
         api.postMessage({ type: 'askUserConfirm', previewId, answer });
     },
 
+    taskChangesUndo(id: string, patch: string): void {
+        api.postMessage({ type: 'taskChangesUndo', id, patch });
+    },
+
     voiceInput(): void {
         api.postMessage({ type: 'voiceInput' });
     },
