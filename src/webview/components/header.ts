@@ -25,6 +25,7 @@ export const Header = {
             const welcomeHint = document.querySelector('.welcome-hint');
             if (welcomeDesc) welcomeDesc.innerHTML = desc;
             if (welcomeHint) welcomeHint.innerHTML = hint;
+            bus.emit('langChanged');
         });
 
         // Title input — edit conversation title
@@ -63,7 +64,7 @@ export const Header = {
     },
 
     updateModeLabels(): void {
-        const modes = ['auto', 'polling', 'plan', 'adversarial'];
+        const modes = ['auto', 'polling', 'plan', 'adversarial', 'infinite'];
         for (const mode of modes) {
             const option = document.querySelector(`.mode-option[data-mode="${mode}"]`);
             if (option) {

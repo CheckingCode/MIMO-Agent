@@ -8,7 +8,7 @@ import { AgentMode } from '../agent';
 import { HistoryManager } from '../history';
 import { saveSetting, getSettingsPanel, loadConfig } from '../config';
 import { renderMarkdown } from '../markdown';
-import { ContentPart, ChatMessage } from '../api';
+import { ContentPart, ChatMessage, MiMoAPI } from '../api';
 
 /**
  * Auto-clean old plan files in ~/.mimo/plans/
@@ -100,7 +100,7 @@ function sanitizeBoolean(value: unknown): boolean | undefined {
 }
 
 function sanitizeMode(value: unknown): AgentMode | undefined {
-    return value === 'auto' || value === 'polling' || value === 'plan' || value === 'adversarial'
+    return value === 'auto' || value === 'polling' || value === 'plan' || value === 'adversarial' || value === 'infinite'
         ? value
         : undefined;
 }
@@ -122,6 +122,124 @@ function looksLikePlanResponse(response: string): boolean {
         || numbered >= 3
         || (headings >= 2 && (englishHits > 0 || hasChinesePlanMarker))
         || (headings >= 1 && englishHits >= 2);
+}
+
+function summarizeTitleFromInput(input: string): string {
+    let text = (input || '')
+        .replace(/```[\s\S]*?```/g, ' ')
+        .replace(/!\[[^\]]*\]\([^)]+\)/g, ' ')
+        .replace(/\[[^\]]+\]\([^)]+\)/g, ' ')
+        .replace(/https?:\/\/\S+/gi, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    text = text.replace(/^(请|帮我|麻烦|能不能|可以不可以|你帮我|我想|我希望|please|help me|can you|could you|i want to|i need to)\s*/i, '');
+    text = text.replace(/[，。！？；:：,.!?;]+$/g, '');
+
+    const semanticTitle = summarizeSemanticTitle(text);
+    if (semanticTitle) return semanticTitle;
+
+    const rules: Array<[RegExp, string]> = [
+        [/搜(?:索|一下|一搜)?(.+?)(?:，|。|然后|并|并且|$)/, '搜索$1'],
+        [/查(?:找|一下|一查)?(.+?)(?:，|。|然后|并|并且|$)/, '查找$1'],
+        [/(?:修复|修一下|解决|排查)(.+?)(?:，|。|然后|并|并且|$)/, '修复$1'],
+        [/(?:优化|提升|加速)(.+?)(?:，|。|然后|并|并且|$)/, '优化$1'],
+        [/(?:生成|创建|新建)(.+?)(?:，|。|然后|并|并且|$)/, '生成$1'],
+        [/(?:写|撰写)(.+?)(?:，|。|然后|并|并且|$)/, '写作$1'],
+        [/(?:翻译)(.+?)(?:，|。|然后|并|并且|$)/, '翻译$1'],
+        [/(?:总结|概括)(.+?)(?:，|。|然后|并|并且|$)/, '总结$1'],
+        [/(?:解释|说明)(.+?)(?:，|。|然后|并|并且|$)/, '解释$1'],
+        [/(?:对比|比较)(.+?)(?:，|。|然后|并|并且|$)/, '对比$1'],
+    ];
+    for (const [pattern, format] of rules) {
+        const match = text.match(pattern);
+        if (match?.[1]) {
+            text = format.replace('$1', match[1].trim());
+            break;
+        }
+    }
+
+    text = text
+        .replace(/(?:然后|并且|并|以此为题|作为|为我|给我).*/g, '')
+        .replace(/[《》"“”'`*_#\[\]{}()（）]/g, '')
+        .replace(/\s+/g, '');
+    if (!text) return 'New Chat';
+
+    const hasChinese = /[\u4e00-\u9fff]/.test(text);
+    const maxLen = hasChinese ? 18 : 48;
+    if (text.length <= maxLen) return text;
+    return text.slice(0, maxLen);
+}
+
+function summarizeSemanticTitle(text: string): string | null {
+    const clean = (text || '').trim();
+    if (!clean) return null;
+    const lower = clean.toLowerCase();
+
+    const topicRules: Array<[RegExp, string]> = [
+        [/\b(?:mimo|mmo\s*mimo|mmomimo)\b|米墨/i, 'MiMo'],
+        [/\bvs\s*code\b|\bvscode\b/i, 'VS Code 插件'],
+        [/\bwebview\b/i, 'Webview'],
+        [/\bagent\b|智能体/i, 'Agent'],
+        [/大模型|模型/i, '模型'],
+    ];
+    const issueRules: Array<[RegExp, string]> = [
+        [/无限循环|死循环|循环|loop|stall|卡住|卡死|重复工具|重复调用/i, '循环防护'],
+        [/标题|title|总结|摘要|summary/i, '标题总结'],
+        [/上传|图片|image|vision/i, '图片处理'],
+        [/stop|停止|中断|取消/i, '停止逻辑'],
+        [/webview|前端|界面|ui/i, '界面体验'],
+        [/报错|错误|异常|error|exception/i, '错误处理'],
+    ];
+
+    const topics = topicRules
+        .filter(([pattern]) => pattern.test(clean))
+        .map(([, label]) => label);
+    const issues = issueRules
+        .filter(([pattern]) => pattern.test(clean))
+        .map(([, label]) => label);
+
+    const uniqueTopics = Array.from(new Set(topics));
+    const uniqueIssues = Array.from(new Set(issues));
+    if (uniqueTopics.length === 0 && uniqueIssues.length === 0) return null;
+
+    let action = '分析';
+    if (/修复|修一下|解决|fix|repair/.test(lower)) {
+        action = '修复';
+    } else if (/优化|改进|提升|方案|建议|想法|optimi[sz]e|improve|proposal/.test(lower)) {
+        action = '优化';
+    } else if (/实现|新增|添加|create|add|implement/.test(lower)) {
+        action = '实现';
+    }
+
+    const topic = uniqueTopics[0] || '';
+    const issue = uniqueIssues.slice(0, 2).join('与');
+    if (topic && issue) return compactTitle(`${topic} ${issue}${action}`);
+    if (issue) return compactTitle(`${issue}${action}`);
+    return compactTitle(`${topic}${action}`);
+}
+
+function compactTitle(title: string): string {
+    const clean = title.replace(/\s+/g, ' ').trim();
+    if (!clean) return 'New Chat';
+    const hasChinese = /[\u4e00-\u9fff]/.test(clean);
+    const maxLen = hasChinese ? 18 : 48;
+    return clean.length > maxLen ? clean.slice(0, maxLen).trim() : clean;
+}
+
+function sanitizeAiTitle(raw: string, fallback: string): string {
+    let title = (raw || '')
+        .replace(/```[\s\S]*?```/g, ' ')
+        .replace(/^["'“”‘’《》\s]+|["'“”‘’《》\s]+$/g, '')
+        .replace(/^(标题|title)\s*[:：]\s*/i, '')
+        .replace(/[\r\n\t]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    title = title.replace(/[。！？.!?]+$/g, '').trim();
+    if (!title) return fallback;
+    const hasChinese = /[\u4e00-\u9fff]/.test(title);
+    const maxLen = hasChinese ? 18 : 48;
+    if (title.length > maxLen) title = title.slice(0, maxLen).trim();
+    return title || fallback;
 }
 
 function sanitizeImages(input: unknown): Array<{ dataUrl: string; name: string; size: number }> | undefined {
@@ -152,6 +270,27 @@ function sanitizeSettings(input: unknown): Record<string, unknown> {
     if (baseUrl && /^https?:\/\//i.test(baseUrl)) out.base_url = baseUrl.replace(/\/+$/, '');
     const model = sanitizeString(s.model, 128);
     if (model !== undefined) out.model = model;
+    const activeProviderProfile = sanitizeString(s.active_provider_profile, 80);
+    if (activeProviderProfile !== undefined) out.active_provider_profile = activeProviderProfile;
+    if (Array.isArray(s.provider_profiles)) {
+        out.provider_profiles = s.provider_profiles
+            .map((profile) => {
+                if (!profile || typeof profile !== 'object') return undefined;
+                const raw = profile as Record<string, unknown>;
+                const id = sanitizeString(raw.id, 80);
+                const name = sanitizeString(raw.name, 120) || id;
+                const baseUrl = sanitizeString(raw.base_url, 2048);
+                const profileModel = sanitizeString(raw.model, 128) || '';
+                const apiKey = sanitizeString(raw.api_key, 4096) || '';
+                const profileModels = Array.isArray(raw.models)
+                    ? raw.models.map(v => sanitizeString(v, 128)).filter((v): v is string => !!v).slice(0, 100)
+                    : [];
+                if (!id || !baseUrl || !/^https?:\/\//i.test(baseUrl)) return undefined;
+                return { id, name, base_url: baseUrl.replace(/\/+$/, ''), model: profileModel, api_key: apiKey, models: profileModels };
+            })
+            .filter(Boolean)
+            .slice(0, 50);
+    }
     if (Array.isArray(s.models)) {
         out.models = s.models
             .map(v => sanitizeString(v, 128))
@@ -164,11 +303,41 @@ function sanitizeSettings(input: unknown): Record<string, unknown> {
     if (temperature !== undefined) out.temperature = temperature;
     const topP = sanitizeNumber(s.top_p, 0, 1);
     if (topP !== undefined) out.top_p = topP;
+    const reasoningEffort = sanitizeString(s.reasoning_effort, 16);
+    if (reasoningEffort) {
+        const normalizedReasoning =
+            reasoningEffort === 'off' || reasoningEffort === 'low' ? 'fast' :
+            reasoningEffort === 'auto' || reasoningEffort === 'medium' ? 'balanced' :
+            reasoningEffort === 'high' ? 'deep' :
+            ['turbo', 'fast', 'balanced', 'deep', 'max'].includes(reasoningEffort) ? reasoningEffort : undefined;
+        if (normalizedReasoning) {
+            out.reasoning_effort = normalizedReasoning;
+            out.enable_thinking = normalizedReasoning === 'deep' || normalizedReasoning === 'max';
+        }
+    }
+    const maxOutputLen = sanitizeNumber(s.max_output_len, 1000, 200000);
+    if (maxOutputLen !== undefined) out.max_output_len = Math.round(maxOutputLen);
+    const commandTimeout = sanitizeNumber(s.command_timeout, 5, 3600);
+    if (commandTimeout !== undefined) out.command_timeout = Math.round(commandTimeout);
+    const dependencyLongTimeout = sanitizeNumber(s.dependency_install_long_timeout_sec, 60, 3600);
+    if (dependencyLongTimeout !== undefined) out.dependency_install_long_timeout_sec = Math.round(dependencyLongTimeout);
+    const memoryMaxItems = sanitizeNumber(s.memory_max_items, 10, 500);
+    if (memoryMaxItems !== undefined) out.memory_max_items = Math.round(memoryMaxItems);
+    const memoryMaxInjected = sanitizeNumber(s.memory_max_injected, 0, 20);
+    if (memoryMaxInjected !== undefined) out.memory_max_injected = Math.round(memoryMaxInjected);
+    const dependencyProjectMode = sanitizeString(s.dependency_install_project_mode, 32);
+    if (dependencyProjectMode && ['auto', 'confirm', 'disabled'].includes(dependencyProjectMode)) {
+        out.dependency_install_project_mode = dependencyProjectMode;
+    }
+    const dependencySystemMode = sanitizeString(s.dependency_install_system_mode, 32);
+    if (dependencySystemMode && ['confirm', 'disabled'].includes(dependencySystemMode)) {
+        out.dependency_install_system_mode = dependencySystemMode;
+    }
     const sandboxCpu = sanitizeNumber(s.sandbox_cpu, 1, 8);
     if (sandboxCpu !== undefined) out.sandbox_cpu = Math.round(sandboxCpu);
     const sandboxMode = sanitizeString(s.sandbox_mode, 32);
     if (sandboxMode && ['safe', 'docker'].includes(sandboxMode)) out.sandbox_mode = sandboxMode;
-    for (const key of ['enable_thinking', 'sandbox_enabled', 'sandbox_git_snapshot', 'sandbox_logging', 'sandbox_network_disabled']) {
+    for (const key of ['enable_thinking', 'sandbox_enabled', 'sandbox_git_snapshot', 'sandbox_logging', 'sandbox_network_disabled', 'dependency_install_enabled', 'memory_enabled', 'memory_learn_from_explicit_preferences']) {
         const value = sanitizeBoolean(s[key]);
         if (value !== undefined) out[key] = value;
     }
@@ -190,6 +359,63 @@ function sanitizeSkill(input: unknown): { name: string; description: string; too
         ? raw.tools.map(v => sanitizeString(v, 80)).filter((v): v is string => !!v).slice(0, 50)
         : undefined;
     return { name, description, prompt, tools };
+}
+
+function trimWebviewToolResult(result: string, maxChars = 12_000): string {
+    if (!result || result.length <= maxChars) return result || '';
+    const head = result.slice(0, Math.floor(maxChars * 0.7));
+    const tail = result.slice(-Math.floor(maxChars * 0.25));
+    return `${head}\n\n... output truncated for Webview responsiveness (${result.length} chars). Showing head and tail only. ...\n\n${tail}`;
+}
+
+function createStreamingRenderQueue(post: (msg: any) => void) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let lastText = '';
+    let lastRenderedText = '';
+
+    const renderNow = (text: string) => {
+        if (text === lastRenderedText) return;
+        lastRenderedText = text;
+        try {
+            post({ type: 'streamHtml', html: renderMarkdown(text) });
+        } catch (e: any) {
+            post({ type: 'error', error: `Render failed: ${e?.message || String(e)}` });
+        }
+    };
+
+    return {
+        schedule(text: string) {
+            lastText = text;
+            if (timer) return;
+            const delay = text.length > 30_000 ? 1800 : text.length > 12_000 ? 1000 : 500;
+            timer = setTimeout(() => {
+                timer = undefined;
+                renderNow(lastText);
+            }, delay);
+        },
+        flush(text?: string) {
+            if (timer) {
+                clearTimeout(timer);
+                timer = undefined;
+            }
+            renderNow(text ?? lastText);
+        },
+        cancel() {
+            if (timer) {
+                clearTimeout(timer);
+                timer = undefined;
+            }
+        },
+    };
+}
+
+function renderAssistantMarkdown(post: (msg: any) => void, type: 'assistantUpdate' | 'finalAnswer', text: string): void {
+    if (!text.trim()) return;
+    try {
+        post({ type, html: renderMarkdown(text) });
+    } catch (e: any) {
+        post({ type: 'error', error: `Render failed: ${e?.message || String(e)}` });
+    }
 }
 
 interface PanelState {
@@ -241,6 +467,76 @@ export class ChatViewProvider {
                 this.cssContent = '/* CSS not found */';
             }
         }
+    }
+
+    private async generateAiTitle(input: string): Promise<string | null> {
+        const cfg = loadConfig();
+        if (!cfg.apiKey || !cfg.baseUrl) return null;
+        const fallback = summarizeTitleFromInput(input);
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 8_000);
+        try {
+            const api = new MiMoAPI(cfg.apiKey, cfg.baseUrl);
+            const result = await api.chatCompletion({
+                model: 'mimo-v2',
+                messages: [
+                    {
+                        role: 'system',
+                        content: [
+                            'You generate concise chat titles.',
+                            'Return only one title, no quotes, no explanation.',
+                            'Prefer the pattern: subject + core problem + action.',
+                            'Chinese input: 8 to 18 Chinese characters.',
+                            'English input: 3 to 6 words.',
+                            'Do not copy filler like "help me", "can you", "what do you think", or screenshot labels.',
+                            'Do not mention files unless they are the main topic.',
+                        ].join(' '),
+                    },
+                    {
+                        role: 'user',
+                        content: `Create a concise title for this user request:\n\n${input.slice(0, 1800)}`,
+                    },
+                ],
+                max_tokens: 32,
+                temperature: 0.2,
+                top_p: 0.8,
+                stream_options: null,
+                extra_body: { thinking: { type: 'disabled' } },
+            }, controller.signal);
+            const title = sanitizeAiTitle(result, fallback);
+            return title && title !== 'New Chat' ? title : null;
+        } catch (e) {
+            console.warn('[MiMo] AI title generation failed:', e);
+            return null;
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
+    private scheduleAiTitle(
+        activeId: string,
+        panel: vscode.WebviewPanel,
+        text: string,
+        fallbackTitle: string,
+    ): void {
+        this.generateAiTitle(text).then((title) => {
+            if (!title || title === fallbackTitle) return;
+            const conv = this.agent.getConversation(activeId);
+            if (!conv || conv.title !== fallbackTitle) return;
+            conv.title = title;
+            const st = this.findStateByPanel(panel);
+            panel.webview.postMessage({ type: 'tabList', tabs: this.getTabList(st?.convIds, activeId), activeId });
+            panel.title = title;
+            panel.webview.postMessage({ type: 'convTitle', title, convId: activeId });
+            try {
+                const msgs = this.agent.getMessages(activeId);
+                this.history.save(activeId, conv.title, msgs, conv.model, {
+                    mode: conv.mode,
+                    personaId: conv.personaId,
+                    activeSkillPrompt: conv.activeSkillPrompt,
+                });
+            } catch { /* best effort only */ }
+        });
     }
 
     /** Create a new MIMO panel (always creates fresh) */
@@ -297,7 +593,7 @@ export class ChatViewProvider {
 
             switch (msg.type) {
                 case 'ready': {
-                    post({ type: 'setLang', lang: 'zh' });
+                    post({ type: 'setLang', lang: vscode.env.language.startsWith('zh') ? 'zh' : 'en' });
 
                     // ALWAYS initialize 鈥?no dependency on pendingInit
                     const st = this.panels.get(panelId);
@@ -433,15 +729,8 @@ export class ChatViewProvider {
                     const images = sanitizeImages(msg.images);
                     if (!text && !images?.length) break;
                     if (this.agent.isConvRunning(sendConvId)) {
-                        // Only THIS conversation is busy 鈥?queue for this panel
-                        if (st) {
-                            st.messageQueue.push({ text, images });
-                            panel.webview.postMessage({
-                                type: 'messageQueued',
-                                text,
-                                queueLength: st.messageQueue.length,
-                            });
-                        }
+                        post({ type: 'system', text: 'A message is already running. Wait for it to finish or press Stop before sending another message.' });
+                        post({ type: 'clearQueue' });
                     } else {
                         await this.handleUserMessage(text, images, sendConvId, panel);
                     }
@@ -467,13 +756,7 @@ export class ChatViewProvider {
                 case 'setMode': {
                     const stMode = this.panels.get(panelId);
                     this.agent.setMode(msg.mode, stMode?.activeConvId);
-                    const modeDescs: Record<string, string> = {
-                        auto: 'Auto mode: the agent works autonomously.',
-                        plan: 'Plan mode: generate a plan first, then execute after confirmation.',
-                        polling: 'Polling mode: edits show previews for confirmation.',
-                        adversarial: 'Duel mode: builder and reviewer collaborate.',
-                    };
-                    post({ type: 'system', text: modeDescs[msg.mode] || `Mode switched: ${msg.mode}` });
+                    post({ type: 'modeSwitched', mode: msg.mode });
                     break;
                 }
                 case 'stop': {
@@ -508,7 +791,7 @@ export class ChatViewProvider {
                 case 'planConfirm': {
                     const stPlan = this.panels.get(panelId);
                     this.agent.confirmPlan(true, stPlan?.activeConvId);
-                    post({ type: 'system', text: 'Plan confirmed. Starting execution...' });
+                    post({ type: 'system', text: vscode.env.language.startsWith('zh') ? '计划已确认，开始执行...' : 'Plan confirmed. Starting execution...' });
                     const planRef = stPlan?.planPath
                         ? `Read the plan file ${stPlan.planPath} and execute the plan.`
                         : 'Execute the confirmed plan.';
@@ -518,7 +801,7 @@ export class ChatViewProvider {
                 case 'planReject': {
                     const stReject = this.panels.get(panelId);
                     this.agent.confirmPlan(false, stReject?.activeConvId);
-                    post({ type: 'system', text: 'Plan rejected. Please describe the requirement again.' });
+                    post({ type: 'system', text: vscode.env.language.startsWith('zh') ? '计划已拒绝，请重新描述需求。' : 'Plan rejected. Please describe the requirement again.' });
                     break;
                 }
                 case 'planModify': {
@@ -636,10 +919,15 @@ export class ChatViewProvider {
                     if (s.base_url !== undefined) saveSetting('api.base_url', s.base_url);
                     if (s.model !== undefined) saveSetting('api.model', s.model);
                     if (s.models !== undefined) saveSetting('api.models', s.models);
+                    if (s.active_provider_profile !== undefined) saveSetting('api.active_provider_profile', s.active_provider_profile);
+                    if (s.provider_profiles !== undefined) saveSetting('api.provider_profiles', s.provider_profiles);
                     if (s.max_tokens !== undefined) saveSetting('agent.max_tokens', s.max_tokens);
                     if (s.temperature !== undefined) saveSetting('agent.temperature', s.temperature);
                     if (s.top_p !== undefined) saveSetting('agent.top_p', s.top_p);
+                    if (s.reasoning_effort !== undefined) saveSetting('agent.reasoning_effort', s.reasoning_effort);
                     if (s.enable_thinking !== undefined) saveSetting('agent.enable_thinking', s.enable_thinking);
+                    if (s.max_output_len !== undefined) saveSetting('safety.max_output_len', s.max_output_len);
+                    if (s.command_timeout !== undefined) saveSetting('safety.command_timeout', s.command_timeout);
                     if (s.sandbox_enabled !== undefined) saveSetting('sandbox.enabled', s.sandbox_enabled);
                     if (s.sandbox_mode !== undefined) saveSetting('sandbox.mode', s.sandbox_mode);
                     if (s.sandbox_image !== undefined) saveSetting('sandbox.image', s.sandbox_image);
@@ -648,10 +936,21 @@ export class ChatViewProvider {
                     if (s.sandbox_git_snapshot !== undefined) saveSetting('sandbox.git_snapshot', s.sandbox_git_snapshot);
                     if (s.sandbox_logging !== undefined) saveSetting('sandbox.logging', s.sandbox_logging);
                     if (s.sandbox_network_disabled !== undefined) saveSetting('sandbox.network_disabled', s.sandbox_network_disabled);
+                    if (s.dependency_install_enabled !== undefined) saveSetting('dependency_install.enabled', s.dependency_install_enabled);
+                    if (s.dependency_install_project_mode !== undefined) saveSetting('dependency_install.project_mode', s.dependency_install_project_mode);
+                    if (s.dependency_install_system_mode !== undefined) saveSetting('dependency_install.system_mode', s.dependency_install_system_mode);
+                    if (s.dependency_install_long_timeout_sec !== undefined) saveSetting('dependency_install.long_timeout_sec', s.dependency_install_long_timeout_sec);
+                    if (s.memory_enabled !== undefined) saveSetting('memory.enabled', s.memory_enabled);
+                    if (s.memory_learn_from_explicit_preferences !== undefined) saveSetting('memory.learn_from_explicit_preferences', s.memory_learn_from_explicit_preferences);
+                    if (s.memory_max_items !== undefined) saveSetting('memory.max_items', s.memory_max_items);
+                    if (s.memory_max_injected !== undefined) saveSetting('memory.max_injected', s.memory_max_injected);
                     // Hot-reload: re-read config and update agent in memory
                     const newConfig = loadConfig();
                     this.agent.updateConfig(newConfig);
-                    post({ type: 'system', text: 'Settings saved and applied.' });
+                    if (!msg.silent) {
+                        post({ type: 'system', text: vscode.env.language.startsWith('zh') ? '设置已保存并生效。' : 'Settings saved and applied.' });
+                    }
+                    post({ type: 'settingsData', settings: getSettingsPanel() });
                     break;
                 }
                 case 'openUrl': {
@@ -682,8 +981,11 @@ export class ChatViewProvider {
                             }
                         }
                         const workspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-                        if (workspace && !isPathInside(workspace, filePath)) {
+                        const mimoPlansDir = path.join(os.homedir(), '.mimo', 'plans');
+                        const allowOutsideWorkspace = isPathInside(mimoPlansDir, filePath);
+                        if (workspace && !allowOutsideWorkspace && !isPathInside(workspace, filePath)) {
                             vscode.window.showWarningMessage('Cannot open file outside the current workspace.');
+                            post({ type: 'fileOpenResult', path: msg.path, ok: false, error: 'outside_workspace' });
                             break;
                         }
                         const uri = vscode.Uri.file(filePath);
@@ -691,8 +993,10 @@ export class ChatViewProvider {
                         const range = new vscode.Range(position, position);
                         const column = msg.beside ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
                         await vscode.window.showTextDocument(uri, { selection: range, viewColumn: column });
+                        post({ type: 'fileOpenResult', path: msg.path, ok: true });
                     } catch (e: any) {
                         vscode.window.showWarningMessage(`Cannot open file: ${e.message}`);
+                        post({ type: 'fileOpenResult', path: msg.path, ok: false, error: e.message });
                     }
                     break;
                 }
@@ -831,61 +1135,106 @@ while ($true) { Start-Sleep -Milliseconds 100 }
             return;
         }
 
-        // Auto-title from first user message (max 20 chars)
+        // Auto-title from first user message.
         if (!conv.title || conv.title === 'New Chat' || conv.title === '新对话' || conv.title === 'Untitled') {
-            // Generate a concise title: take first meaningful content, max 20 chars
-            let rawTitle = text.replace(/\n/g, ' ').trim();
-            // Remove common prefixes
-            rawTitle = rawTitle.replace(/^(please|help me|can you|could you|i want to|i need to)\s+/i, '');
-            // Take first 20 chars
-            conv.title = rawTitle.substring(0, 20).trim();
-            if (rawTitle.length > 20) conv.title += '...';
-            // Fallback if empty
-            if (!conv.title) conv.title = 'New Chat';
+            conv.title = summarizeTitleFromInput(text);
+            const fallbackTitle = conv.title;
 
             const st6 = this.findStateByPanel(panel);
             post({ type: 'tabList', tabs: this.getTabList(st6?.convIds, activeId), activeId });
             // Update the VSCode editor tab title + header input
             panel.title = conv.title;
             post({ type: 'convTitle', title: conv.title, convId: activeId });
+            this.scheduleAiTitle(activeId, panel, text, fallbackTitle);
         }
 
         // Show user message with optional images
+        const turnStartedAt = Date.now();
         post({ type: 'userMessage', text, images: images || null });
         post({ type: 'busy' });
 
         let responseText = '';
+        let committedResponseText = '';
+        let finalAnswerEmitted = false;
         let hasToolCalls = false;
         let totalToolCalls = 0;
+        const startedAsPlanExecution = conv.mode === 'plan' && !!conv.planConfirmed;
+        const streamRender = createStreamingRenderQueue(post);
+        const commitAssistantUpdate = () => {
+            streamRender.cancel();
+            renderAssistantMarkdown(post, 'assistantUpdate', responseText);
+            committedResponseText += responseText;
+            responseText = '';
+        };
+        const emitFinalAnswer = (response: string) => {
+            if (finalAnswerEmitted) return;
+            const responseToEmit = (() => {
+                if (!response) return responseText;
+                if (!committedResponseText) return response;
+                if (response.startsWith(committedResponseText)) {
+                    return response.slice(committedResponseText.length);
+                }
+                if (committedResponseText.includes(response.trim())) return responseText;
+                return responseText || response;
+            })();
+            if (responseToEmit.trim()) {
+                renderAssistantMarkdown(post, 'finalAnswer', responseToEmit);
+            }
+            finalAnswerEmitted = true;
+            responseText = '';
+        };
         try {
         // Build event handlers 鈥?store for potential reconnection
         const handlers = {
-            onToken: (token: string) => {
+                onToken: (token: string) => {
                     responseText += token;
-                    // Always show text 鈥?the new prompt enforces conciseness
-                    post({ type: 'streamHtml', html: renderMarkdown(responseText) });
+                    streamRender.schedule(responseText);
+                },
+                onAssistantUpdate: (text: string) => {
+                    streamRender.cancel();
+                    renderAssistantMarkdown(post, 'assistantUpdate', text);
+                    committedResponseText += text;
+                    responseText = '';
+                },
+                onFinalAnswer: (text: string) => {
+                    streamRender.cancel();
+                    emitFinalAnswer(text);
+                },
+                onThoughtSummary: (text: string) => {
+                    post({ type: 'reasoning', token: text });
                 },
                 onReasoning: (token: string) => {
                     post({ type: 'reasoning', token });
                 },
                 onToolCallStart: (name: string, args: Record<string, any>) => {
+                    if (responseText.trim()) {
+                        commitAssistantUpdate();
+                    }
                     hasToolCalls = true;
                     totalToolCalls++;
                     post({ type: 'toolCallStart', name, args });
                 },
                 onToolCallEnd: (name: string, result: string, isError: boolean, elapsed: number) => {
-                    post({ type: 'toolCallEnd', name, result, isError, elapsed });
+                    post({ type: 'toolCallEnd', name, result: trimWebviewToolResult(result), isError, elapsed });
                 },
                 onRoundStart: (round: number) => {
                     hasToolCalls = false;
                     responseText = '';
                     post({ type: 'roundStart', round });
                 },
+                onRoundEnd: (_round: number) => {
+                    // Flush accumulated text at end of each round so interleaved
+                    // text output (thinking → text → tools) renders in real time
+                    // instead of being held until onDone.
+                    if (responseText) {
+                        commitAssistantUpdate();
+                    }
+                },
                 onStatus: (status: string) => {
                     post({ type: 'status', text: status });
                 },
-                onModelSwitched: (model: string) => {
-                    post({ type: 'modelSwitched', model });
+                onModelSwitched: (model: string, reason?: 'chat' | 'image') => {
+                    post({ type: 'modelSwitched', model, reason });
                 },
                 onTokenUsage: (usage: any) => {
                     post({ type: 'tokenUsage', usage });
@@ -927,11 +1276,16 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     post({ type: 'adversarialToolEnd', persona, toolName, result, isError, elapsed });
                 },
                 onDone: (response: string) => {
-                    // Only show text for the final round (no tool calls)
-                    if (!hasToolCalls) {
-                        post({ type: 'streamHtml', html: renderMarkdown(response || responseText) });
+                    const elapsedSec = Math.max(0, (Date.now() - turnStartedAt) / 1000);
+                    const stoppedByUser = response === '(stopped by user)';
+                    if (!stoppedByUser) {
+                        streamRender.cancel();
+                        emitFinalAnswer(response);
+                    } else if (responseText.trim()) {
+                        commitAssistantUpdate();
                     }
-                    post({ type: 'done', response });
+                    this.annotateLastAssistantElapsed(activeId, elapsedSec);
+                    post({ type: 'done', response, elapsedSec });
                     // Send conversation-level usage summary
                     const convUsage = this.agent.getTokenTracker().getConversationUsage(activeId);
                     if (convUsage) {
@@ -950,7 +1304,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     // Plan mode: auto-save plan text to ~/.mimo/plans/, show confirm buttons
                     // Skip if response is a greeting/direct reply (not an actual plan)
                     const _hasPlanMarkers = looksLikePlanResponse(response);
-                    if (conv.mode === 'plan' && !conv.planConfirmed && response && _hasPlanMarkers) {
+                    if (conv.mode === 'plan' && !startedAsPlanExecution && response && _hasPlanMarkers) {
                         try {
                             // Use user home ~/.mimo/plans/ (not workspace .mimo)
                             const mimoPlansDir = path.join(os.homedir(), '.mimo', 'plans');
@@ -973,14 +1327,23 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     }
                 },
                 onError: (error: string) => {
+                    this.saveRecoverySnapshot(activeId, conv);
+                    const stErr = this.findStateByPanel(panel);
+                    if (stErr) stErr.messageQueue = [];
+                    post({ type: 'systemI18n', key: 'recovery.snapshot.saved' });
+                    post({ type: 'clearQueue' });
                     post({ type: 'error', error });
                 },
             };
 
             await this.agent.chat(text, handlers, images, activeId);
         } catch (e: any) {
+            const stErr = this.findStateByPanel(panel);
+            if (stErr) stErr.messageQueue = [];
+            post({ type: 'clearQueue' });
             post({ type: 'error', error: e.message });
         } finally {
+            streamRender.cancel();
             post({ type: 'idle' });
 
             // Process next message in queue (if any)
@@ -1003,6 +1366,29 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         }
     }
 
+    private saveRecoverySnapshot(activeId: string, conv: any): void {
+        try {
+            const msgs = this.agent.getMessages(activeId);
+            this.history.save(activeId, conv.title, msgs, conv.model, {
+                mode: conv.mode,
+                personaId: conv.personaId,
+                activeSkillPrompt: conv.activeSkillPrompt,
+            });
+        } catch {
+            // Best-effort recovery only.
+        }
+    }
+
+    private annotateLastAssistantElapsed(convId: string, elapsedSec: number): void {
+        const messages = this.agent.getMessages(convId);
+        for (let i = messages.length - 1; i >= 0; i--) {
+            if (messages[i].role === 'assistant') {
+                messages[i]._elapsedSec = Number(elapsedSec.toFixed(1));
+                return;
+            }
+        }
+    }
+
     private async handleSkillInvocation(skillName: string, text: string, convId?: string, targetPanel?: vscode.WebviewPanel) {
         const panel = targetPanel || this.panel;
         if (!panel) return;
@@ -1013,31 +1399,77 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         if (!conv) return;
 
         post({ type: 'userMessage', text: `[${skillName}] ${text}` });
+        const turnStartedAt = Date.now();
         post({ type: 'busy' });
 
         let responseText = '';
+        let committedResponseText = '';
+        let finalAnswerEmitted = false;
         let hasToolCalls = false;
         let totalToolCalls = 0;
+        const streamRender = createStreamingRenderQueue(post);
+        const commitAssistantUpdate = () => {
+            streamRender.cancel();
+            renderAssistantMarkdown(post, 'assistantUpdate', responseText);
+            committedResponseText += responseText;
+            responseText = '';
+        };
+        const emitFinalAnswer = (response: string) => {
+            if (finalAnswerEmitted) return;
+            const responseToEmit = (() => {
+                if (!response) return responseText;
+                if (!committedResponseText) return response;
+                if (response.startsWith(committedResponseText)) {
+                    return response.slice(committedResponseText.length);
+                }
+                if (committedResponseText.includes(response.trim())) return responseText;
+                return responseText || response;
+            })();
+            if (responseToEmit.trim()) {
+                renderAssistantMarkdown(post, 'finalAnswer', responseToEmit);
+            }
+            finalAnswerEmitted = true;
+            responseText = '';
+        };
         try {
             await this.agent.chatWithSkill(skillName, text, {
                 onToken: (token) => {
                     responseText += token;
-                    post({ type: 'streamHtml', html: renderMarkdown(responseText) });
+                    streamRender.schedule(responseText);
                 },
+                onAssistantUpdate: (text: string) => {
+                    streamRender.cancel();
+                    renderAssistantMarkdown(post, 'assistantUpdate', text);
+                    committedResponseText += text;
+                    responseText = '';
+                },
+                onFinalAnswer: (text: string) => {
+                    streamRender.cancel();
+                    emitFinalAnswer(text);
+                },
+                onThoughtSummary: (text: string) => post({ type: 'reasoning', token: text }),
                 onReasoning: (token) => post({ type: 'reasoning', token }),
                 onToolCallStart: (name, args) => {
+                    if (responseText.trim()) {
+                        commitAssistantUpdate();
+                    }
                     hasToolCalls = true;
                     totalToolCalls++;
                     post({ type: 'toolCallStart', name, args });
                 },
-                onToolCallEnd: (name, result, isError, elapsed) => post({ type: 'toolCallEnd', name, result, isError, elapsed }),
+                onToolCallEnd: (name, result, isError, elapsed) => post({ type: 'toolCallEnd', name, result: trimWebviewToolResult(result), isError, elapsed }),
                 onRoundStart: (round) => {
                     hasToolCalls = false;
                     responseText = '';
                     post({ type: 'roundStart', round });
                 },
+                onRoundEnd: (_round: number) => {
+                    if (responseText) {
+                        commitAssistantUpdate();
+                    }
+                },
                 onStatus: (status) => post({ type: 'status', text: status }),
-                onModelSwitched: (model) => post({ type: 'modelSwitched', model }),
+                onModelSwitched: (model, reason) => post({ type: 'modelSwitched', model, reason }),
                 onTokenUsage: (usage) => {
                     post({ type: 'tokenUsage', usage });
                 },
@@ -1078,10 +1510,15 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     post({ type: 'adversarialToolEnd', persona, toolName, result, isError, elapsed });
                 },
                 onDone: (response: string) => {
-                    if (!hasToolCalls) {
-                        post({ type: 'streamHtml', html: renderMarkdown(response || responseText) });
+                    const elapsedSec = Math.max(0, (Date.now() - turnStartedAt) / 1000);
+                    streamRender.cancel();
+                    if (response === '(stopped by user)' && responseText.trim()) {
+                        commitAssistantUpdate();
+                    } else {
+                        emitFinalAnswer(response);
                     }
-                    post({ type: 'done', response });
+                    this.annotateLastAssistantElapsed(activeId, elapsedSec);
+                    post({ type: 'done', response, elapsedSec });
                     const convUsage = this.agent.getTokenTracker().getConversationUsage(activeId);
                     if (convUsage) {
                         post({ type: 'conversationUsage', usage: {
@@ -1096,11 +1533,16 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                         activeSkillPrompt: conv.activeSkillPrompt,
                     });
                 },
-                onError: (error) => post({ type: 'error', error }),
+                onError: (error) => {
+                    this.saveRecoverySnapshot(activeId, conv);
+                    post({ type: 'systemI18n', key: 'recovery.snapshot.saved' });
+                    post({ type: 'error', error });
+                },
             });
         } catch (e: any) {
             post({ type: 'error', error: e.message });
         } finally {
+            streamRender.cancel();
             post({ type: 'idle' });
             this.processNextQueued(panel, convId);
         }
@@ -1133,7 +1575,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         // Refresh history list
         this.postToWebview({ type: 'historyList', items: this.history.list() }, p);
 
-        // Only do full message replay on FIRST restore (retainContextWhenHidden preserves DOM)
+        // Only restore messages on FIRST restore (retainContextWhenHidden preserves DOM).
         if (st7?.restored) return;
 
         // Fresh conversation with no messages 鈥?keep welcome page
@@ -1142,86 +1584,51 @@ while ($true) { Start-Sleep -Milliseconds 100 }
             return;
         }
 
-        // Full replay with tool cards, reasoning, round markers
+        // Render a lightweight history transcript instead of replaying live events.
         this.postToWebview({ type: 'clearMessages' }, p);
         this.replayConversation(conv.messages, p);
         if (st7) st7.restored = true;
     }
 
     /**
-     * Replay a conversation history to the webview, including tool cards,
-     * reasoning blocks, round markers.
-     *
-     * SAFETY DESIGN:
-     * - Replays all saved messages, but yields between render steps to prevent UI freeze
-     * - Defers each renderMarkdown to setImmediate so Node.js event loop
-     *   is never blocked for more than one render call (~10-50ms)
-     * - Batches lightweight events (non-markdown) into one postMessage
-     * - Each markdown render is sent individually after setImmediate
+     * Build a lightweight transcript snapshot for history viewing.
+     * History must not replay live tool/reasoning events: that caused duplicate
+     * "Processed" drawers, delayed rendering, and a frozen-feeling webview.
      */
-    private replayConversation(messages: ChatMessage[], targetPanel?: vscode.WebviewPanel): void {
-        const replayId = ++this.replaySeq;
-        this.postToWebview({ type: 'historyReplayStart', replayId, totalMessages: messages.length }, targetPanel);
-        const replayMessages = messages;
-        const skippedCount = 0;
+    private buildHistoryTurns(messages: ChatMessage[]): any[] {
+        const turns: any[] = [];
+        let current: {
+            user: { text: string; images: any[] | null };
+            assistantTexts: string[];
+            hasDetails: boolean;
+            details: Array<{ type: 'reasoning' | 'tool'; title: string; body: string; elapsedSec?: number; isError?: boolean }>;
+            elapsedSec: number;
+            estimatedTokens: number;
+        } | null = null;
 
-        // Build a fallback map: tool_call_id 鈫?tool name from assistant messages
-        const toolNameFallback = new Map<string, string>();
-        for (const m of replayMessages) {
-            if (m.role === 'assistant' && m.tool_calls) {
-                for (const tc of m.tool_calls) {
-                    toolNameFallback.set(tc.id, tc.function.name);
-                }
-            }
-        }
-
-        // Build tool results map
-        const toolResults = new Map<string, any>();
-        for (const m of replayMessages) {
-            if (m.role === 'tool' && m.tool_call_id) {
-                const contentStr = extractText(m.content);
-                const isError = contentStr.startsWith('Safety:') || contentStr.startsWith('Tool error:');
-                const toolName = m._toolName || toolNameFallback.get(m.tool_call_id) || 'tool';
-                toolResults.set(m.tool_call_id, {
-                    type: 'toolCallEnd',
-                    name: toolName,
-                    result: contentStr || '(no result)',
-                    isError,
-                    elapsed: m._toolElapsed || 0,
+        const flush = () => {
+            if (!current) return;
+            const visibleText = current.assistantTexts.map(s => s.trim()).filter(Boolean).pop() || '';
+            const assistantHtml = visibleText ? renderMarkdown(visibleText) : '';
+            const tokens = current.estimatedTokens || (visibleText ? Math.ceil(visibleText.length / 3) : 0);
+            if (current.user.text || current.user.images?.length || assistantHtml) {
+                turns.push({
+                    user: current.user,
+                    assistantHtml,
+                    meta: {
+                        hasDetails: current.hasDetails,
+                        details: current.details,
+                        elapsedSec: current.elapsedSec > 0 ? Number(current.elapsedSec.toFixed(1)) : 0,
+                        tokens,
+                    },
                 });
             }
-        }
-
-        // Show "skipped earlier messages" notice
-        if (skippedCount > 0) {
-            this.postToWebview({
-                type: 'system',
-                text: `Showing recent ${replayMessages.length} messages out of ${messages.length}; skipped ${skippedCount} older messages for faster loading.`,
-            }, targetPanel);
-        }
-
-        // 鈹€鈹€ Build replay plan: separate light events from heavy markdown renders 鈹€鈹€
-        // Light events (userMessage, roundStart, toolCall*, reasoning) are cheap.
-        // streamHtml requires renderMarkdown which is CPU-intensive (highlight.js).
-        // We batch all light events first, then render markdown one-by-one with setImmediate.
-
-        type ReplayStep =
-            | { kind: 'light'; events: any[] }
-            | { kind: 'markdown'; text: string };
-
-        const steps: ReplayStep[] = [];
-        const lightBatch: any[] = [];
-        let round = 0;
-
-        const flushLight = () => {
-            if (lightBatch.length > 0) {
-                steps.push({ kind: 'light', events: lightBatch.splice(0) });
-            }
+            current = null;
         };
 
-        for (const m of replayMessages) {
+        for (const m of messages) {
             if (m.role === 'user') {
-                const text = extractText(m.content);
+                flush();
                 let images: any[] | null = null;
                 if (Array.isArray(m.content)) {
                     const imgParts = m.content.filter((p: any) => p.type === 'image_url');
@@ -1232,82 +1639,65 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                         }));
                     }
                 }
-                lightBatch.push({ type: 'userMessage', text, images });
-            } else if (m.role === 'assistant') {
-                round++;
-                lightBatch.push({ type: 'roundStart', round });
+                current = {
+                    user: { text: extractText(m.content), images },
+                    assistantTexts: [],
+                    hasDetails: false,
+                    details: [],
+                    elapsedSec: 0,
+                    estimatedTokens: 0,
+                };
+                continue;
+            }
 
-                if (m.reasoning_content) {
-                    const text = m.reasoning_content;
-                    const chunkSize = 4000;
-                    for (let i = 0; i < text.length; i += chunkSize) {
-                        lightBatch.push({ type: 'reasoning', token: text.slice(i, i + chunkSize) });
-                    }
-                }
+            if (!current) continue;
 
-                if (m.tool_calls && m.tool_calls.length > 0) {
-                    for (const tc of m.tool_calls) {
-                        let args: Record<string, any> = {};
-                        try { args = JSON.parse(tc.function.arguments); } catch { /* empty */ }
-                        lightBatch.push({ type: 'toolCallStart', name: tc.function.name, args });
-                        const result = toolResults.get(tc.id);
-                        if (result) lightBatch.push(result);
-                    }
-                }
-
+            if (m.role === 'assistant') {
                 const text = extractText(m.content);
-                if (text) {
-                    // Flush accumulated light events before a heavy markdown step
-                    flushLight();
-                    steps.push({ kind: 'markdown', text });
+                if (text.trim()) {
+                    current.assistantTexts.push(text);
+                    current.estimatedTokens += Math.ceil(text.length / 3);
                 }
-            }
-        }
-        flushLight();
-
-        // Append the 'done' event as a final light step
-        const lastAssistant = [...replayMessages].reverse().find(
-            (m: any) => m.role === 'assistant' && extractText(m.content)
-        );
-        if (lastAssistant) {
-            lightBatch.push({ type: 'done', response: extractText(lastAssistant.content) });
-            flushLight();
-        }
-
-        // 鈹€鈹€ Execute steps: light = immediate, markdown = deferred via setImmediate 鈹€鈹€
-        let stepIdx = 0;
-
-        const runNext = () => {
-            if (stepIdx >= steps.length) return;
-
-            const step = steps[stepIdx++];
-
-            if (step.kind === 'light') {
-                // Lightweight events 鈥?send immediately, continue
-                for (let i = 0; i < step.events.length; i += 25) {
-                    this.postToWebview({ type: 'replayBatch', replayId, events: step.events.slice(i, i + 25) }, targetPanel);
+                if (typeof m._elapsedSec === 'number' && m._elapsedSec > 0) {
+                    current.elapsedSec = m._elapsedSec;
                 }
-                // If next step is also light, chain immediately (no yield needed)
-                // If next is markdown, it will yield via setImmediate
-                if (stepIdx < steps.length && steps[stepIdx].kind === 'light') {
-                    runNext();
-                } else {
-                    // Either done, or next is markdown 鈥?yield to let UI breathe
-                    setImmediate(runNext);
+                if (m.reasoning_content) {
+                    current.hasDetails = true;
+                    const reasoning = String(m.reasoning_content);
+                    current.details.push({
+                        type: 'reasoning',
+                        title: 'Thought',
+                        body: reasoning,
+                    });
+                    current.estimatedTokens += Math.ceil(reasoning.length / 3);
                 }
-            } else {
-                // Heavy: renderMarkdown runs in setImmediate to avoid blocking Node.js
-                setImmediate(() => {
-                    const html = renderMarkdown(step.text);
-                    if (replayId !== this.replaySeq) return;
-                    this.postToWebview({ type: 'replayBatch', replayId, events: [{ type: 'streamHtml', html }] }, targetPanel);
-                    // Continue to next step after yielding
-                    runNext();
+                if (m.tool_calls && m.tool_calls.length > 0) {
+                    current.hasDetails = true;
+                }
+            } else if (m.role === 'tool') {
+                current.hasDetails = true;
+                const toolText = extractText(m.content);
+                current.details.push({
+                    type: 'tool',
+                    title: m._toolName || 'tool',
+                    body: toolText,
+                    elapsedSec: Number(m._toolElapsed || 0),
+                    isError: /^(Safety:|Tool error:|Unknown tool|Blocked by)/.test(toolText),
                 });
+                if (current.elapsedSec <= 0) {
+                    current.elapsedSec += Number(m._toolElapsed || 0);
+                }
             }
-        };
+        }
+        flush();
+        return turns;
+    }
 
-        runNext();
+    private replayConversation(messages: ChatMessage[], targetPanel?: vscode.WebviewPanel): void {
+        const replayId = ++this.replaySeq;
+        this.postToWebview({ type: 'historyReplayStart', replayId, totalMessages: messages.length }, targetPanel);
+        const turns = this.buildHistoryTurns(messages);
+        this.postToWebview({ type: 'historyRender', replayId, turns }, targetPanel);
     }
 
     private postToWebview(msg: any, targetPanel?: vscode.WebviewPanel) {
@@ -1362,9 +1752,20 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         <div class="setting-group"><label>API Key</label><input type="password" id="set-apikey" placeholder="sk-..."></div>
         <div class="setting-group"><label>Base URL</label><input type="text" id="set-baseurl"></div>
         <div class="setting-group"><label>Model</label><input type="text" id="set-model"></div>
+        <div class="setting-group"><label>Active Profile ID</label><input type="text" id="set-active-provider-profile" placeholder="mimo"></div>
+        <div class="setting-group"><label>Provider Profiles JSON</label><textarea id="set-provider-profiles" spellcheck="false" style="min-height:74px" placeholder='[{"id":"deepseek","base_url":"https://api.deepseek.com/v1","model":"deepseek-chat"}]'></textarea></div>
         <div class="setting-group"><label>Temperature</label><input type="number" id="set-temperature" min="0" max="2" step="0.1"></div>
         <div class="setting-group"><label>Max Tokens</label><input type="number" id="set-maxtokens" min="256" max="131072"></div>
+        <div class="setting-group"><label>Command Timeout (s)</label><input type="number" id="set-command-timeout" min="5" max="3600"></div>
+        <div class="setting-group"><label>Max Tool Output</label><input type="number" id="set-max-output-len" min="1000" max="200000"></div>
         <div class="setting-group"><label><input type="checkbox" id="set-thinking"> Enable thinking mode</label></div>
+        <div class="setting-group" style="margin-top:12px;padding-top:8px;border-top:1px solid var(--vscode-editorWidget-border)">
+            <label style="font-weight:600;color:var(--vscode-foreground)">Memory</label>
+        </div>
+        <div class="setting-group"><label><input type="checkbox" id="set-memory-enabled" checked> Enable local long-term memory</label></div>
+        <div class="setting-group"><label><input type="checkbox" id="set-memory-learn" checked> Learn explicit preferences from chat</label></div>
+        <div class="setting-group"><label>Max Memory Items</label><input type="number" id="set-memory-max-items" min="10" max="500" step="10"></div>
+        <div class="setting-group"><label>Memories Injected Per Turn</label><input type="number" id="set-memory-max-injected" min="0" max="20" step="1"></div>
         <div class="setting-group" style="margin-top:12px;padding-top:8px;border-top:1px solid var(--vscode-editorWidget-border)">
             <label style="font-weight:600;color:var(--vscode-foreground)">Safety</label>
         </div>
@@ -1377,6 +1778,13 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         <div class="setting-group"><label>Docker Image</label><input type="text" id="set-sandbox-image" placeholder="node:20-alpine"></div>
         <div class="setting-group"><label>Memory Limit</label><input type="text" id="set-sandbox-memory" placeholder="512m"></div>
         <div class="setting-group"><label>CPU Limit</label><input type="number" id="set-sandbox-cpu" min="1" max="8" step="1"></div>
+        <div class="setting-group" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--vscode-editorWidget-border)">
+            <label style="font-weight:600;color:var(--vscode-foreground)" data-i18n="settings.dependency.title">Dependency Install Policy</label>
+        </div>
+        <div class="setting-group"><label><input type="checkbox" id="set-dependency-install-enabled" checked> <span data-i18n="settings.dependency.enabled">Enable dependency install policy</span></label></div>
+        <div class="setting-group"><label data-i18n="settings.dependency.project.mode">Project Dependency Installs</label><select id="set-dependency-project-mode"><option value="auto" data-i18n="settings.dependency.project.auto">Auto install project dependencies</option><option value="confirm" data-i18n="settings.dependency.project.confirm">Ask before project dependency installs</option><option value="disabled" data-i18n="settings.dependency.project.disabled">Disable project dependency installs</option></select></div>
+        <div class="setting-group"><label data-i18n="settings.dependency.system.mode">System Software Installs</label><select id="set-dependency-system-mode"><option value="confirm" data-i18n="settings.dependency.system.confirm">Always ask before system installs</option><option value="disabled" data-i18n="settings.dependency.system.disabled">Disable system installs</option></select></div>
+        <div class="setting-group"><label data-i18n="settings.dependency.long.timeout">Long Install Timeout (s)</label><input type="number" id="set-dependency-long-timeout" min="60" max="3600" step="30"></div>
         <button class="save-btn" id="save-settings">Save Settings</button>
     </div>
 </div>
@@ -1401,12 +1809,12 @@ while ($true) { Start-Sleep -Milliseconds 100 }
     <div id="cmd-palette"></div>
     <div id="input-wrapper" class="mode-auto">
         <div id="image-preview"></div>
-        <textarea id="input" placeholder="Type a message... (Ctrl+V to paste images)" rows="1"></textarea>
+        <textarea id="input" data-i18n="paste.hint" placeholder="输入消息... (Ctrl+V 粘贴图片)" rows="1"></textarea>
         <div id="input-bottom">
             <div style="position:relative">
                 <button class="mode-trigger" id="mode-trigger">
                     <span class="mode-label" id="mode-label" data-i18n="auto">Auto</span>
-                    <span class="mode-arrow">v</span>
+                    <span class="select-chevron" aria-hidden="true"></span>
                 </button>
                 <div id="mode-popup">
                     <div class="mode-option active" data-mode="auto">
@@ -1437,9 +1845,20 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                             <span class="mode-option-desc" data-i18n="adversarial.desc">CrazyCoder vs SuperPM</span>
                         </div>
                     </div>
+                    <div class="mode-option" data-mode="infinite">
+                        <span class="mode-option-icon">I</span>
+                        <div class="mode-option-info">
+                            <span class="mode-option-name" data-i18n="infinite">Infinite</span>
+                            <span class="mode-option-desc" data-i18n="infinite.desc">High-budget multi-pass refinement loop</span>
+                        </div>
+                    </div>
                 </div>
             </div>
-            <select id="model-select"></select>
+            <span class="model-select-wrap">
+                <select id="model-select"></select>
+                <span class="select-chevron" aria-hidden="true"></span>
+            </span>
+            <button id="reasoning-effort-btn" class="reasoning-effort-btn" title="Reasoning effort">推理: 均衡</button>
             <input type="file" id="file-input" accept="image/*" multiple style="display:none">
             <button class="tb-icon voice-btn" id="voice-btn" title="Voice input" style="display:none">Mic</button>
             <div style="flex:1"></div>
@@ -1464,4 +1883,3 @@ function getNonce(): string {
     }
     return text;
 }
-

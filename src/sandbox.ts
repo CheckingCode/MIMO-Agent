@@ -246,7 +246,7 @@ export async function safeModeExec(
     timeoutSec: number,
     maxOutput: number,
     config: SandboxConfig,
-): Promise<{ stdout: string; stderr: string; code: number }> {
+): Promise<{ stdout: string; stderr: string; code: number; timedOut?: boolean }> {
     const timeoutMs = timeoutSec * 1000;
 
     // Layer 1: Pre-execution safety re-check (prevent bypass via indirect calls)
@@ -281,7 +281,7 @@ export async function safeModeExec(
         });
     }
 
-    return { stdout, stderr, code: result.code };
+    return { stdout, stderr, code: result.code, timedOut: result.timedOut };
 }
 
 /**
@@ -319,7 +319,7 @@ function execPromise(
     timeoutSec: number,
     cwd?: string,
     timeoutMs?: number,
-): Promise<{ stdout: string; stderr: string; code: number }> {
+): Promise<{ stdout: string; stderr: string; code: number; timedOut?: boolean }> {
     return new Promise((resolve, reject) => {
         const shell = process.platform === 'win32' ? 'powershell' : 'bash';
         const proc = require('child_process').exec(cmd, {
@@ -331,10 +331,12 @@ function execPromise(
         }, (err: any, stdout: string, stderr: string) => {
             if (err) {
                 // Still resolve with the output — don't reject on non-zero exit
+                const timedOut = err.killed === true && err.signal === 'SIGTERM';
                 resolve({
                     stdout: stdout || '',
                     stderr: stderr || err.message || '',
                     code: err.code || 1,
+                    timedOut,
                 });
             } else {
                 resolve({ stdout, stderr, code: 0 });

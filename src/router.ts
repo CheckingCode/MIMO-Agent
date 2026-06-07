@@ -1,14 +1,11 @@
 /**
  * Intent Router - pre-classifies user input before the main agent loop.
- *
- * Uses a fast local heuristic path first, then falls back to a cheap LLM call
- * only for ambiguous requests.
  */
 
 import { MiMoAPI } from './api';
 
 export type IntentCategory =
-    'greeting'
+    | 'greeting'
     | 'question'
     | 'code_task'
     | 'explanation'
@@ -29,9 +26,8 @@ export interface IntentResult {
     source?: 'heuristic' | 'model';
 }
 
-const ROUTER_PROMPT = `You are an intent classifier for a coding assistant. Analyze the user's message and classify it.
-
-Respond with ONLY a JSON object (no markdown, no explanation):
+const ROUTER_PROMPT = `You are an intent classifier for a coding assistant.
+Respond with ONLY a JSON object:
 {
   "needsTools": true/false,
   "category": "greeting|question|code_task|explanation|refactor|debug|search|review|config|creative|multi_step",
@@ -40,52 +36,40 @@ Respond with ONLY a JSON object (no markdown, no explanation):
   "suggestedPersona": "programmer|pm|reviewer|architect|debugger|summarizer|analyst|null"
 }
 
-Classification rules:
-- Greetings and acknowledgements -> greeting, needsTools=false
-- Pure knowledge questions -> question, needsTools=false
-- Code implementation or file changes -> code_task, needsTools=true
-- Code explanation requests -> explanation, needsTools=false
-- Refactor or optimization requests -> refactor, needsTools=true
-- Bug, crash, error, fix requests -> debug, needsTools=true
-- Search, research, latest, find requests -> search, needsTools=true
-- Review, audit, security inspection requests -> review, needsTools=true
-- Config, setup, environment requests -> config, needsTools=true
-- Brainstorm or design-only requests -> creative, needsTools=false
-- Multi-step tasks with explicit ordered steps -> multi_step, needsTools=true
-
-Suggested persona mapping:
-- debug, error, crash -> debugger
-- review, audit, security -> reviewer
-- architecture, design, scale -> architect
-- requirement, spec, planning -> pm
-- summarize, document, readme -> summarizer
-- data, analyze, statistics -> analyst
-- code, implement, fix -> programmer
-
-CRITICAL: do NOT use tools for:
-- Questions about conversation history
-- Meta questions about the assistant
-- Opinions or advice without requested execution
-- Simple factual or yes/no questions
+Rules:
+- Greetings or acknowledgements -> greeting, needsTools=false
+- Pure questions -> question, needsTools=false
+- Code changes or implementation -> code_task, needsTools=true
+- Explain code -> explanation, needsTools=false
+- Refactor / optimization -> refactor, needsTools=true
+- Bug / crash / error -> debug, needsTools=true
+- Search / research / latest -> search, needsTools=true
+- Review / audit / security -> review, needsTools=true
+- Config / setup / environment -> config, needsTools=true
+- Brainstorm / design-only -> creative, needsTools=false
+- Multi-step task -> multi_step, needsTools=true
 
 Respond with ONLY the JSON object.`;
 
 const QUICK_GREETINGS = new Set([
     'hi', 'hello', 'hey', 'ok', 'okay', 'thanks', 'thank you', 'thx',
-    '你好', '嗨', '哈喽', '好的', '嗯', '收到', '谢谢',
+    '你好', '嗨', '哈喽', '好的', '收到', '谢谢',
 ]);
 
+function looksLikeSimpleQuestion(text: string): boolean {
+    const trimmed = text.trim();
+    return /^(what|why|how|can|could|is|are|do|does|will|would)\b/i.test(trimmed)
+        || /^(什么是|为什么|怎么|如何|能否|可不可以|有没有|是不是|是否)/.test(trimmed)
+        || (trimmed.length <= 80 && /[?？]$/.test(trimmed));
+}
+
 const QUICK_DIRECT_PATTERNS: Array<{ pattern: RegExp; result: IntentResult }> = [
-    {
-        pattern: /^(什么是|为什么|怎么|如何|请问|能否|可不可以|有没有|是不是|是否|what|why|how|can|could|is|are|do|does|will|would)\b/i,
-        result: { needsTools: false, category: 'question', plan: 'Answer directly', complexity: 'simple', suggestedPersona: null, source: 'heuristic' },
-    },
     {
         pattern: /(解释这段代码|这段代码什么意思|explain this code|what does this code do)/i,
         result: { needsTools: false, category: 'explanation', plan: 'Explain the referenced code or concept', complexity: 'simple', suggestedPersona: null, source: 'heuristic' },
     },
     {
-        pattern: /(头脑风暴|方案设计|想一想|brainstorm|design ideas|architecture ideas)/i,
+        pattern: /(头脑风暴|方案设计|brainstorm|design ideas|architecture ideas)/i,
         result: { needsTools: false, category: 'creative', plan: 'Brainstorm without tools first', complexity: 'moderate', suggestedPersona: 'architect', source: 'heuristic' },
     },
 ];
@@ -104,7 +88,7 @@ const QUICK_TOOL_PATTERNS: Array<{ pattern: RegExp; result: IntentResult }> = [
         result: { needsTools: true, category: 'review', plan: 'Inspect the codebase and produce a review', complexity: 'complex', suggestedPersona: 'reviewer', source: 'heuristic' },
     },
     {
-        pattern: /(搜索|查找|找一下|帮我搜|search|find|grep|rg|文献综述|论文|调研|竞品分析|最新)/i,
+        pattern: /(搜索|查找|找一个|帮我找|search|find|grep|rg|文献综述|论文|调研|竞品分析|最新)/i,
         result: { needsTools: true, category: 'search', plan: 'Search the workspace or external sources as needed', complexity: 'moderate', suggestedPersona: 'analyst', source: 'heuristic' },
     },
     {
@@ -112,7 +96,7 @@ const QUICK_TOOL_PATTERNS: Array<{ pattern: RegExp; result: IntentResult }> = [
         result: { needsTools: true, category: 'config', plan: 'Inspect the relevant configuration and update it safely', complexity: 'moderate', suggestedPersona: 'programmer', source: 'heuristic' },
     },
     {
-        pattern: /(写一个|帮我写|实现|创建文件|修改文件|改代码|增加功能|实现功能|build|implement|create|edit|write file)/i,
+        pattern: /(写一个|帮我写|实现|创建文件|修改文件|增加功能|build|implement|create|edit|write file)/i,
         result: { needsTools: true, category: 'code_task', plan: 'Inspect the relevant files and implement the requested change', complexity: 'moderate', suggestedPersona: 'programmer', source: 'heuristic' },
     },
 ];
@@ -154,13 +138,13 @@ export function quickClassifyIntent(userInput: string): IntentResult | null {
         };
     }
 
-    if ((trimmed.includes('然后') && trimmed.includes('最后')) || /第[一二三四五六七八九十].*第[一二三四五六七八九十]/.test(trimmed)) {
+    if (looksLikeSimpleQuestion(trimmed)) {
         return {
-            needsTools: true,
-            category: 'multi_step',
-            plan: 'Break the work into steps and execute them in order',
-            complexity: 'complex',
-            suggestedPersona: 'pm',
+            needsTools: false,
+            category: 'question',
+            plan: 'Answer directly',
+            complexity: 'simple',
+            suggestedPersona: null,
             source: 'heuristic',
         };
     }
@@ -173,13 +157,20 @@ export function quickClassifyIntent(userInput: string): IntentResult | null {
         if (entry.pattern.test(trimmed)) return entry.result;
     }
 
+    if (trimmed.length >= 8 && /[A-Za-z0-9_\-./\\]/.test(trimmed) && /(\.ts|\.js|\.py|\.json|\.md|\.tsx|\.jsx|\.css|\.html|bug|error|fix|refactor|review)/i.test(trimmed)) {
+        return {
+            needsTools: true,
+            category: 'code_task',
+            plan: 'Inspect the relevant files and implement the requested change',
+            complexity: trimmed.length > 120 ? 'complex' : 'moderate',
+            suggestedPersona: 'programmer',
+            source: 'heuristic',
+        };
+    }
+
     return null;
 }
 
-/**
- * Quick suitability check for adversarial mode.
- * Returns { suitable, reason, category } - if not suitable, caller should degrade to auto mode.
- */
 export async function checkAdversarialSuitability(
     api: MiMoAPI,
     userInput: string,
@@ -194,10 +185,9 @@ export async function checkAdversarialSuitability(
     }
 
     const questionPatterns = [
-        /^(什么是|为什么|怎么|如何|请问|能否|可不可以|有没有|是不是|是否)/,
+        /^(什么是|为什么|怎么|如何|能否|可不可以|有没有|是不是|是否)/,
         /^(what|why|how|can|could|is|are|do|does|will|would)\b/i,
-        /区别|差异|对比|推荐|建议|看法|觉得|认为/,
-        /\?|？$/,
+        /\?|？/,
     ];
     if (questionPatterns.some((pattern) => pattern.test(trimmed)) && trimmed.length < 100) {
         return { suitable: false, reason: 'pure question without executable output', category: 'question' };
@@ -229,19 +219,11 @@ export async function checkAdversarialSuitability(
         ]);
 
         if (!adversarialCategories.has(intent.category)) {
-            return {
-                suitable: false,
-                reason: `classified as ${intent.category}`,
-                category: intent.category,
-            };
+            return { suitable: false, reason: `classified as ${intent.category}`, category: intent.category };
         }
 
         if (intent.complexity === 'simple') {
-            return {
-                suitable: false,
-                reason: 'task is too simple for adversarial review',
-                category: intent.category,
-            };
+            return { suitable: false, reason: 'task is too simple for adversarial review', category: intent.category };
         }
 
         return { suitable: true, reason: '', category: intent.category };
@@ -257,29 +239,19 @@ export async function classifyIntent(
     signal?: AbortSignal,
 ): Promise<IntentResult> {
     const quick = quickClassifyIntent(userInput);
-    if (quick) {
-        return quick;
-    }
+    if (quick) return quick;
 
     try {
-        let result = '';
-        for (let attempt = 0; attempt < 3; attempt++) {
-            try {
-                result = await api.chatCompletion({
-                    model,
-                    messages: [
-                        { role: 'system', content: ROUTER_PROMPT },
-                        { role: 'user', content: userInput },
-                    ],
-                    max_tokens: 250,
-                    temperature: 0.1,
-                }, signal);
-                break;
-            } catch (e: any) {
-                if (attempt >= 2 || signal?.aborted) throw e;
-                await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
-            }
-        }
+        const result = await api.chatCompletion({
+            model,
+            messages: [
+                { role: 'system', content: ROUTER_PROMPT },
+                { role: 'user', content: userInput },
+            ],
+            max_tokens: 180,
+            temperature: 0,
+            stream: false,
+        }, signal);
 
         const jsonStr = result.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
         const parsed = JSON.parse(jsonStr);

@@ -92,15 +92,34 @@ export const Panels = {
                 api_key: (document.getElementById('set-apikey') as HTMLInputElement).value,
                 base_url: (document.getElementById('set-baseurl') as HTMLInputElement).value,
                 model: (document.getElementById('set-model') as HTMLInputElement).value,
+                active_provider_profile: (document.getElementById('set-active-provider-profile') as HTMLInputElement)?.value || '',
+                provider_profiles: (() => {
+                    try {
+                        return JSON.parse((document.getElementById('set-provider-profiles') as HTMLTextAreaElement)?.value || '[]');
+                    } catch {
+                        return undefined;
+                    }
+                })(),
                 temperature: parseFloat((document.getElementById('set-temperature') as HTMLInputElement).value) || 0.7,
-                max_tokens: parseInt((document.getElementById('set-maxtokens') as HTMLInputElement).value) || 8192,
+                max_tokens: Math.min(131072, Math.max(256, parseInt((document.getElementById('set-maxtokens') as HTMLInputElement).value) || 8192)),
+                command_timeout: parseInt((document.getElementById('set-command-timeout') as HTMLInputElement)?.value || '120') || 120,
+                max_output_len: parseInt((document.getElementById('set-max-output-len') as HTMLInputElement)?.value || '5000') || 5000,
                 enable_thinking: (document.getElementById('set-thinking') as HTMLInputElement).checked,
+                reasoning_effort: store.get('reasoningEffort'),
                 sandbox_enabled: (document.getElementById('set-sandbox') as HTMLInputElement).checked,
                 sandbox_image: (document.getElementById('set-sandbox-image') as HTMLInputElement).value,
                 sandbox_memory: (document.getElementById('set-sandbox-memory') as HTMLInputElement).value,
                 sandbox_cpu: parseInt((document.getElementById('set-sandbox-cpu') as HTMLInputElement).value) || 1,
                 sandbox_git_snapshot: (document.getElementById('set-sandbox-git') as HTMLInputElement)?.checked ?? true,
                 sandbox_logging: (document.getElementById('set-sandbox-logging') as HTMLInputElement)?.checked ?? true,
+                dependency_install_enabled: (document.getElementById('set-dependency-install-enabled') as HTMLInputElement)?.checked ?? true,
+                dependency_install_project_mode: (document.getElementById('set-dependency-project-mode') as HTMLSelectElement)?.value || 'auto',
+                dependency_install_system_mode: (document.getElementById('set-dependency-system-mode') as HTMLSelectElement)?.value || 'confirm',
+                dependency_install_long_timeout_sec: parseInt((document.getElementById('set-dependency-long-timeout') as HTMLInputElement)?.value || '600') || 600,
+                memory_enabled: (document.getElementById('set-memory-enabled') as HTMLInputElement)?.checked ?? true,
+                memory_learn_from_explicit_preferences: (document.getElementById('set-memory-learn') as HTMLInputElement)?.checked ?? true,
+                memory_max_items: parseInt((document.getElementById('set-memory-max-items') as HTMLInputElement)?.value || '120') || 120,
+                memory_max_injected: parseInt((document.getElementById('set-memory-max-injected') as HTMLInputElement)?.value || '8') || 8,
             });
         });
 
@@ -158,8 +177,16 @@ export const Panels = {
         (document.getElementById('set-apikey') as HTMLInputElement).value = s.api_key || '';
         (document.getElementById('set-baseurl') as HTMLInputElement).value = s.base_url || '';
         (document.getElementById('set-model') as HTMLInputElement).value = s.model || '';
+        const activeProviderProfile = document.getElementById('set-active-provider-profile') as HTMLInputElement;
+        if (activeProviderProfile) activeProviderProfile.value = s.active_provider_profile || '';
+        const providerProfiles = document.getElementById('set-provider-profiles') as HTMLTextAreaElement;
+        if (providerProfiles) providerProfiles.value = JSON.stringify(s.provider_profiles || [], null, 2);
         (document.getElementById('set-temperature') as HTMLInputElement).value = String(s.temperature ?? 0.7);
         (document.getElementById('set-maxtokens') as HTMLInputElement).value = String(s.max_tokens ?? 8192);
+        const commandTimeout = document.getElementById('set-command-timeout') as HTMLInputElement;
+        if (commandTimeout) commandTimeout.value = String(s.command_timeout ?? 120);
+        const maxOutputLen = document.getElementById('set-max-output-len') as HTMLInputElement;
+        if (maxOutputLen) maxOutputLen.value = String(s.max_output_len ?? 5000);
         (document.getElementById('set-thinking') as HTMLInputElement).checked = !!s.enable_thinking;
         (document.getElementById('set-sandbox') as HTMLInputElement).checked = !!s.sandbox_enabled;
         (document.getElementById('set-sandbox-image') as HTMLInputElement).value = s.sandbox_image || 'node:20-alpine';
@@ -169,5 +196,21 @@ export const Panels = {
         if (gitCb) gitCb.checked = s.sandbox_git_snapshot !== false;
         const logCb = document.getElementById('set-sandbox-logging') as HTMLInputElement;
         if (logCb) logCb.checked = s.sandbox_logging !== false;
+        const dependencyEnabled = document.getElementById('set-dependency-install-enabled') as HTMLInputElement;
+        if (dependencyEnabled) dependencyEnabled.checked = s.dependency_install_enabled !== false;
+        const projectMode = document.getElementById('set-dependency-project-mode') as HTMLSelectElement;
+        if (projectMode) projectMode.value = s.dependency_install_project_mode || 'auto';
+        const systemMode = document.getElementById('set-dependency-system-mode') as HTMLSelectElement;
+        if (systemMode) systemMode.value = s.dependency_install_system_mode || 'confirm';
+        const longTimeout = document.getElementById('set-dependency-long-timeout') as HTMLInputElement;
+        if (longTimeout) longTimeout.value = String(s.dependency_install_long_timeout_sec ?? 600);
+        const memoryEnabled = document.getElementById('set-memory-enabled') as HTMLInputElement;
+        if (memoryEnabled) memoryEnabled.checked = s.memory_enabled !== false;
+        const memoryLearn = document.getElementById('set-memory-learn') as HTMLInputElement;
+        if (memoryLearn) memoryLearn.checked = s.memory_learn_from_explicit_preferences !== false;
+        const memoryMaxItems = document.getElementById('set-memory-max-items') as HTMLInputElement;
+        if (memoryMaxItems) memoryMaxItems.value = String(s.memory_max_items ?? 120);
+        const memoryMaxInjected = document.getElementById('set-memory-max-injected') as HTMLInputElement;
+        if (memoryMaxInjected) memoryMaxInjected.value = String(s.memory_max_injected ?? 8);
     },
 };

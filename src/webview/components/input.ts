@@ -1,5 +1,5 @@
 /**
- * Input component — textarea, send button, mode selector, model select.
+ * Input component - textarea, send button, mode selector, model select.
  */
 import { store } from '../core/store';
 import { bus } from '../core/bus';
@@ -12,50 +12,41 @@ export const InputArea = {
         const sendBtn = document.getElementById('send') as HTMLButtonElement;
         const modelSelect = document.getElementById('model-select') as HTMLSelectElement;
         const voiceBtn = document.getElementById('voice-btn') as HTMLButtonElement;
+        const reasoningBtn = document.getElementById('reasoning-effort-btn') as HTMLButtonElement;
 
-        // ── Voice button (extension host STT via PowerShell) ──
         if (voiceBtn) {
             voiceBtn.addEventListener('click', () => {
                 if (store.get('isRecording')) {
-                    // Stop recording
                     store.set('isRecording', false);
                     voiceBtn.classList.remove('recording');
-                    voiceBtn.title = '🎤';
+                    voiceBtn.title = t('voice.input.title');
                     vscode.voiceStop();
                 } else {
-                    // Start recording
                     store.set('isRecording', true);
                     voiceBtn.classList.add('recording');
-                    voiceBtn.title = 'Click to stop';
+                    voiceBtn.title = t('voice.input.title');
                     vscode.voiceInput();
                 }
             });
         }
 
-        // ── Send button ──
         sendBtn.addEventListener('click', () => {
-            const input = document.getElementById('input') as HTMLTextAreaElement;
-            const hasText = input && input.value.trim().length > 0;
+            const inputEl = document.getElementById('input') as HTMLTextAreaElement;
+            const hasText = inputEl && inputEl.value.trim().length > 0;
             if (store.get('isBusy') && !hasText) {
-                // No text → stop the agent
                 vscode.stop();
             } else {
-                // Has text (or not busy) → send/queue
                 this.doSend();
             }
         });
 
-        // ── Keyboard ──
-        // Draft preservation: save current input when navigating to history
         let draftText = '';
 
         input.addEventListener('keydown', (e) => {
-            // Command palette navigation
             if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
-                // Don't intercept if command palette is open (handled by CommandPalette)
                 if (document.getElementById('cmd-palette')?.classList.contains('show')) return;
                 e.preventDefault();
-                this.doSend(); // doSend handles queueing if busy
+                this.doSend();
                 return;
             }
 
@@ -63,18 +54,12 @@ export const InputArea = {
                 const history = store.get('inputHistory');
                 let idx = store.get('historyIdx');
 
-                // Check if cursor is at line 1, position 0
                 const lines = input.value.substring(0, input.selectionStart).split('\n');
                 const atFirstLine = lines.length <= 1;
                 const atLineStart = lines[lines.length - 1].length === 0 || input.selectionStart === 0;
 
                 if (idx === -1 && history.length > 0) {
-                    // Currently editing new text — save draft and go to history
-                    if (!atFirstLine || !atLineStart) {
-                        // Not at top of text: move cursor up one line
-                        return; // Let default behavior handle it
-                    }
-                    // At top of text: enter history mode
+                    if (!atFirstLine || !atLineStart) return;
                     e.preventDefault();
                     draftText = input.value;
                     idx = 0;
@@ -83,10 +68,7 @@ export const InputArea = {
                     this.autoResize(input);
                     input.setSelectionRange(input.value.length, input.value.length);
                 } else if (idx >= 0 && idx < history.length - 1) {
-                    // In history mode: go to older entry
-                    if (!atFirstLine || !atLineStart) {
-                        return; // Let default behavior handle line movement
-                    }
+                    if (!atFirstLine || !atLineStart) return;
                     e.preventDefault();
                     idx++;
                     store.set('historyIdx', idx);
@@ -102,14 +84,10 @@ export const InputArea = {
                 let idx = store.get('historyIdx');
 
                 if (idx >= 0) {
-                    // Check if cursor is at last line, end position
                     const lines = input.value.substring(input.selectionStart).split('\n');
                     const atLastLine = lines.length <= 1;
                     const atLineEnd = input.selectionStart >= input.value.length;
-
-                    if (!atLastLine || !atLineEnd) {
-                        return; // Let default behavior handle line movement
-                    }
+                    if (!atLastLine || !atLineEnd) return;
 
                     e.preventDefault();
                     idx--;
@@ -117,7 +95,6 @@ export const InputArea = {
                     if (idx >= 0) {
                         input.value = history[idx];
                     } else {
-                        // Back to draft
                         input.value = draftText;
                         draftText = '';
                     }
@@ -128,23 +105,19 @@ export const InputArea = {
             }
         });
 
-        // ── Auto-resize + send/stop toggle ──
         input.addEventListener('input', () => {
             input.style.height = 'auto';
             input.style.height = Math.min(input.scrollHeight, 120) + 'px';
-            // Command palette trigger
             bus.emit('inputChanged', input.value);
-            // Toggle send/stop button when busy
-            if (store.get('isBusy')) {
-                this.updateSendButton();
-            }
+            if (store.get('isBusy')) this.updateSendButton();
         });
 
-        // ── Mode popup ──
         const modeTrigger = document.getElementById('mode-trigger')!;
         const modePopup = document.getElementById('mode-popup')!;
         const modeLabel = document.getElementById('mode-label')!;
         const getModeLabel = (mode: string): string => t(mode);
+
+        input.placeholder = t('paste.hint');
 
         modeTrigger.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -167,12 +140,22 @@ export const InputArea = {
             });
         }
 
-        // ── Model select ──
         modelSelect.addEventListener('change', () => {
             vscode.setModel(modelSelect.value);
         });
 
-        // ── Listen for state changes ──
+        if (reasoningBtn) {
+            reasoningBtn.addEventListener('click', () => {
+                const current = store.get('reasoningEffort');
+                const order = ['turbo', 'fast', 'balanced', 'deep', 'max'] as const;
+                const idx = order.indexOf(current as any);
+                const next = order[((idx >= 0 ? idx : 2) + 1) % order.length];
+                store.set('reasoningEffort', next);
+                this.updateReasoningButton();
+                vscode.setReasoningEffort(next);
+            });
+        }
+
         bus.on('modelList', (models: string[], current: string) => {
             modelSelect.innerHTML = '';
             for (const m of models) {
@@ -184,27 +167,34 @@ export const InputArea = {
             }
         });
 
-        // Voice button hidden (Windows STT quality too low, TODO: revisit with better STT)
+        bus.on('settingsData', (settings: Record<string, any>) => {
+            const effort = this.normalizeReasoningEffort(settings.reasoning_effort, settings.enable_thinking);
+            store.set('reasoningEffort', effort);
+            this.updateReasoningButton();
+        });
+
+        bus.on('langChanged', () => {
+            this.updateReasoningButton();
+        });
+
         if (voiceBtn) {
             voiceBtn.style.display = 'none';
             store.set('voiceEnabled', false);
         }
 
-        // Restore mode when webview re-resolves
-        bus.on('restoreMode', (mode: string, _label: string) => {
-            const modeLabel = document.getElementById('mode-label');
-            if (modeLabel) {
-                modeLabel.textContent = t(mode);
-                modeLabel.setAttribute('data-i18n', mode);
+        bus.on('restoreMode', (mode: string) => {
+            const label = document.getElementById('mode-label');
+            if (label) {
+                label.textContent = t(mode);
+                label.setAttribute('data-i18n', mode);
             }
             document.getElementById('input-wrapper')!.className = `mode-${mode}`;
             document.body.className = `mode-${mode}`;
-            // Update active option in popup
-            const modeOptions = document.querySelectorAll('.mode-option');
-            for (let i = 0; i < modeOptions.length; i++) {
-                modeOptions[i].classList.remove('active');
-                if ((modeOptions[i] as HTMLElement).getAttribute('data-mode') === mode) {
-                    modeOptions[i].classList.add('active');
+            const opts = document.querySelectorAll('.mode-option');
+            for (let i = 0; i < opts.length; i++) {
+                opts[i].classList.remove('active');
+                if ((opts[i] as HTMLElement).getAttribute('data-mode') === mode) {
+                    opts[i].classList.add('active');
                 }
             }
         });
@@ -212,7 +202,6 @@ export const InputArea = {
         bus.on('busy', () => this.setBusy(true));
         bus.on('idle', () => {
             this.setBusy(false);
-            // Process next queued message
             const queued = store.get('queuedMsgs');
             if (queued.length > 0) {
                 const next = queued[0];
@@ -223,6 +212,48 @@ export const InputArea = {
         bus.on('clearQueue', () => {
             store.set('queuedMsgs', []);
         });
+        bus.on('editQueuedMessage', (text: string, images: any[] | null) => {
+            input.value = text || '';
+            this.autoResize(input);
+            store.set('images', images || []);
+            bus.emit('imagesChanged');
+            input.focus();
+            input.setSelectionRange(input.value.length, input.value.length);
+            this.updateSendButton();
+        });
+        this.updateReasoningButton();
+        vscode.getSettings();
+    },
+
+    normalizeReasoningEffort(value: unknown, enableThinking?: unknown): 'turbo' | 'fast' | 'balanced' | 'deep' | 'max' {
+        if (value === 'turbo' || value === 'fast' || value === 'balanced' || value === 'deep' || value === 'max') return value;
+        if (value === 'off' || value === 'low') return 'fast';
+        if (value === 'auto' || value === 'medium') return 'balanced';
+        if (value === 'high') return 'deep';
+        return enableThinking ? 'deep' : 'balanced';
+    },
+
+    updateReasoningButton(): void {
+        const btn = document.getElementById('reasoning-effort-btn') as HTMLButtonElement | null;
+        if (!btn) return;
+        const effort = store.get('reasoningEffort');
+        const labels: Record<string, string> = {
+            turbo: t('reasoning.turbo'),
+            fast: t('reasoning.fast'),
+            balanced: t('reasoning.balanced'),
+            deep: t('reasoning.deep'),
+            max: t('reasoning.max'),
+        };
+        const titles: Record<string, string> = {
+            turbo: t('reasoning.turbo.tip'),
+            fast: t('reasoning.fast.tip'),
+            balanced: t('reasoning.balanced.tip'),
+            deep: t('reasoning.deep.tip'),
+            max: t('reasoning.max.tip'),
+        };
+        btn.textContent = `${t('reasoning.prefix')}: ${labels[effort]}`;
+        btn.setAttribute('data-effort', effort);
+        btn.title = titles[effort];
     },
 
     doSend(): void {
@@ -239,7 +270,6 @@ export const InputArea = {
         store.set('images', []);
         bus.emit('clearImages');
 
-        // Handle slash commands
         if (text.charAt(0) === '/') {
             const sp = text.indexOf(' ');
             const cmd = sp > 0 ? text.substring(1, sp) : text.substring(1);
@@ -253,11 +283,10 @@ export const InputArea = {
             return;
         }
 
-        // Queue if busy
         if (store.get('isBusy')) {
             const queued = store.get('queuedMsgs');
             store.set('queuedMsgs', [...queued, { text, images: imgs.length > 0 ? imgs : null }]);
-            vscode.system(`Message queued (#${queued.length + 1})`);
+            bus.emit('messageQueued', text, queued.length + 1);
             return;
         }
 
@@ -283,16 +312,10 @@ export const InputArea = {
         store.set('isBusy', busy);
         this.updateSendButton();
         const statusBar = document.getElementById('status-bar')!;
-        if (busy) {
-            statusBar.classList.add('active');
-        } else {
-            statusBar.classList.remove('active');
-        }
+        if (busy) statusBar.classList.add('active');
+        else statusBar.classList.remove('active');
     },
 
-    /**
-     * Update send button: show stop when busy+empty input, send when busy+text or idle.
-     */
     updateSendButton(): void {
         const sendBtn = document.getElementById('send') as HTMLButtonElement;
         const input = document.getElementById('input') as HTMLTextAreaElement;
@@ -300,15 +323,13 @@ export const InputArea = {
         const hasText = input && input.value.trim().length > 0;
 
         if (busy && !hasText) {
-            // Show stop button
             sendBtn.textContent = '';
             sendBtn.className = 'stop-btn';
-            sendBtn.title = 'Stop';
+            sendBtn.title = t('stop');
         } else {
-            // Show send button
-            sendBtn.textContent = '➡';
+            sendBtn.textContent = '▶';
             sendBtn.className = '';
-            sendBtn.title = busy ? 'Send (queued)' : 'Send';
+            sendBtn.title = busy ? t('send.queued') : t('send');
         }
     },
 };

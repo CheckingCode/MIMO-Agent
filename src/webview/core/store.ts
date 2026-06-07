@@ -33,14 +33,17 @@ export interface StoreState {
     models: string[];
     currentModel: string;
     modelCaps: { vision: boolean; tts: boolean; description: string };
+    reasoningEffort: 'turbo' | 'fast' | 'balanced' | 'deep' | 'max';
 
     // Mode
-    currentMode: 'auto' | 'polling' | 'plan' | 'adversarial';
+    currentMode: 'auto' | 'polling' | 'plan' | 'adversarial' | 'infinite';
 
     // Streaming
     streamingMsg: HTMLElement | null;
     rawHtml: string;
     lastUserMsg: { text: string; images: ImageData[] | null } | null;
+    currentTurnStartedAt: number;
+    planExecutionActive: boolean;
 
     // Images
     images: ImageData[];
@@ -79,10 +82,13 @@ class Store {
         models: [],
         currentModel: '',
         modelCaps: { vision: false, tts: false, description: '' },
+        reasoningEffort: 'balanced',
         currentMode: 'auto',
         streamingMsg: null,
         rawHtml: '',
         lastUserMsg: null,
+        currentTurnStartedAt: 0,
+        planExecutionActive: false,
         images: [],
         visionEnabled: true,
         inputHistory: [],

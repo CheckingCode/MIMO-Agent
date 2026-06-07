@@ -15,6 +15,7 @@ import { buildSystemPrompt } from './prompt';
 import { manageContext } from './context';
 import { McpManager } from './mcp';
 import { SandboxConfig } from './sandbox';
+import { DependencyInstallConfig } from './dependencyInstall';
 
 // ── Types ──
 
@@ -68,6 +69,30 @@ function filterTools(type: SubAgentType, allTools: ToolDefinition[]): ToolDefini
     return allTools.filter(t => !GENERAL_EXCLUDED.has(t.function.name));
 }
 
+type ReasoningEffort = 'turbo' | 'fast' | 'balanced' | 'deep' | 'max';
+
+function getReasoningProfile(value?: ReasoningEffort, enableThinking?: boolean): {
+    tokenMultiplier: number;
+    roundMultiplier: number;
+    temperature?: number;
+    topP?: number;
+    thinking?: 'disabled' | 'enabled';
+} {
+    const effort = value || (enableThinking ? 'deep' : 'balanced');
+    switch (effort) {
+        case 'turbo':
+            return { tokenMultiplier: 0.45, roundMultiplier: 0.45, temperature: 0.2, topP: 0.8, thinking: 'disabled' };
+        case 'fast':
+            return { tokenMultiplier: 0.7, roundMultiplier: 0.7, temperature: 0.4, topP: 0.9, thinking: 'disabled' };
+        case 'deep':
+            return { tokenMultiplier: 1.3, roundMultiplier: 1.35, temperature: 0.55, thinking: 'enabled' };
+        case 'max':
+            return { tokenMultiplier: 1.8, roundMultiplier: 2.0, temperature: 0.35, topP: 0.9, thinking: 'enabled' };
+        default:
+            return { tokenMultiplier: 1, roundMultiplier: 1 };
+    }
+}
+
 // ── Sub-Agent Runner ──
 
 export async function runSubAgent(
@@ -83,12 +108,15 @@ export async function runSubAgent(
         commandTimeout: number;
         sandbox?: SandboxConfig;
         enableThinking: boolean;
+        reasoningEffort?: ReasoningEffort;
+        dependencyInstall?: Partial<DependencyInstallConfig>;
     },
     events: SubAgentEvents = {},
     signal?: AbortSignal,
 ): Promise<SubAgentResult> {
     const t0 = Date.now();
-    const maxRounds = options.maxRounds ?? 20;
+    const effortProfile = getReasoningProfile(config.reasoningEffort, config.enableThinking);
+    const maxRounds = Math.max(3, Math.round((options.maxRounds ?? 20) * effortProfile.roundMultiplier));
     const model = options.model || 'mimo-v2.5-pro';
     const cwd = options.worktree || workspace;
 
@@ -167,17 +195,17 @@ Rules:
                 { role: 'system' as const, content: systemPrompt },
                 ...managed,
             ],
-            max_tokens: config.maxTokens,
-            temperature: config.temperature,
-            top_p: config.topP,
+            max_tokens: Math.max(256, Math.min(131072, Math.round(config.maxTokens * effortProfile.tokenMultiplier))),
+            temperature: effortProfile.temperature ?? config.temperature,
+            top_p: effortProfile.topP ?? config.topP,
             stream_options: { include_usage: true },
         };
         if (tools.length > 0) {
             params.tools = tools;
             params.tool_choice = 'auto';
         }
-        if (!config.enableThinking) {
-            params.extra_body = { thinking: { type: 'disabled' } };
+        if (effortProfile.thinking) {
+            params.extra_body = { thinking: { type: effortProfile.thinking } };
         }
 
         let content: string;
@@ -229,6 +257,8 @@ Rules:
                     config.maxOutputLen,
                     config.commandTimeout,
                     config.sandbox,
+                    undefined,
+                    config.dependencyInstall,
                 );
 
             const elapsed = (Date.now() - toolT0) / 1000;

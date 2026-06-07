@@ -10,6 +10,7 @@ require('./test-context');
 require('./test-markdown');
 require('./test-personas');
 require('./test-safety');
+require('./test-dependency-install');
 
 console.log('\n  All tests completed.');
 finalSummary();

@@ -17,6 +17,7 @@ import { buildSystemPrompt } from './prompt';
 import { manageContext } from './context';
 import { McpManager } from './mcp';
 import { SandboxConfig } from './sandbox';
+import { DependencyInstallConfig } from './dependencyInstall';
 
 // ── Types ──
 
@@ -84,6 +85,30 @@ function filterTools(type: 'explore' | 'general', allTools: ToolDefinition[]): T
     return allTools.filter(t => !GENERAL_EXCLUDED.has(t.function.name));
 }
 
+type ReasoningEffort = 'turbo' | 'fast' | 'balanced' | 'deep' | 'max';
+
+function getReasoningProfile(value?: ReasoningEffort, enableThinking?: boolean): {
+    tokenMultiplier: number;
+    roundMultiplier: number;
+    temperature?: number;
+    topP?: number;
+    thinking?: 'disabled' | 'enabled';
+} {
+    const effort = value || (enableThinking ? 'deep' : 'balanced');
+    switch (effort) {
+        case 'turbo':
+            return { tokenMultiplier: 0.45, roundMultiplier: 0.45, temperature: 0.2, topP: 0.8, thinking: 'disabled' };
+        case 'fast':
+            return { tokenMultiplier: 0.7, roundMultiplier: 0.7, temperature: 0.4, topP: 0.9, thinking: 'disabled' };
+        case 'deep':
+            return { tokenMultiplier: 1.3, roundMultiplier: 1.35, temperature: 0.55, thinking: 'enabled' };
+        case 'max':
+            return { tokenMultiplier: 1.8, roundMultiplier: 2.0, temperature: 0.35, topP: 0.9, thinking: 'enabled' };
+        default:
+            return { tokenMultiplier: 1, roundMultiplier: 1 };
+    }
+}
+
 // ── Single task executor ──
 
 async function executeTask(
@@ -100,13 +125,16 @@ async function executeTask(
         commandTimeout: number;
         sandbox?: SandboxConfig;
         enableThinking: boolean;
+        reasoningEffort?: ReasoningEffort;
+        dependencyInstall?: Partial<DependencyInstallConfig>;
     },
     signal?: AbortSignal,
     previousContext?: string,
 ): Promise<TaskResult> {
     const t0 = Date.now();
     const model = task.model || 'mimo-v2.5-pro';
-    const maxRounds = 20; // Cap per-task to prevent runaway
+    const effortProfile = getReasoningProfile(config.reasoningEffort, config.enableThinking);
+    const maxRounds = Math.max(4, Math.round(20 * effortProfile.roundMultiplier));
     const label = task.label || task.task.substring(0, 40);
 
     const typeHint = task.type === 'explore'
@@ -188,16 +216,16 @@ Rules:
                 { role: 'system' as const, content: systemPrompt },
                 ...managed,
             ],
-            max_tokens: config.maxTokens,
-            temperature: config.temperature,
-            top_p: config.topP,
+            max_tokens: Math.max(256, Math.min(131072, Math.round(config.maxTokens * effortProfile.tokenMultiplier))),
+            temperature: effortProfile.temperature ?? config.temperature,
+            top_p: effortProfile.topP ?? config.topP,
         };
         if (tools.length > 0) {
             params.tools = tools;
             params.tool_choice = 'auto';
         }
-        if (!config.enableThinking) {
-            params.extra_body = { thinking: { type: 'disabled' } };
+        if (effortProfile.thinking) {
+            params.extra_body = { thinking: { type: effortProfile.thinking } };
         }
 
         let content: string;
@@ -248,6 +276,8 @@ Rules:
                 : await executeTool(
                     tc.function.name, args, workspace,
                     config.maxOutputLen, config.commandTimeout, config.sandbox,
+                    undefined,
+                    config.dependencyInstall,
                 );
 
             messages.push({ role: 'tool', tool_call_id: tc.id, content: toolResult });
@@ -279,6 +309,8 @@ export async function executeWorkflow(
         commandTimeout: number;
         sandbox?: SandboxConfig;
         enableThinking: boolean;
+        reasoningEffort?: ReasoningEffort;
+        dependencyInstall?: Partial<DependencyInstallConfig>;
     },
     events: WorkflowEvents = {},
     signal?: AbortSignal,

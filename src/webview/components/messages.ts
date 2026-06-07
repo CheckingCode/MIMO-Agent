@@ -5,15 +5,42 @@ import { store, ImageData } from '../core/store';
 import { bus } from '../core/bus';
 import { vscode } from '../core/vscode';
 import { escapeHtml, createElement } from '../utils/dom';
-import { parseTodoItems, renderTaskChecklist } from './taskChecklist';
 import { getWelcomePair, t } from '../core/i18n';
+import {
+    EditedFileInfo as MessageEditedFileInfo,
+    WorkflowUiState as MessageWorkflowUiState,
+    computeDiff as computeMessageDiff,
+    createDiffCard as createMessageDiffCard,
+    createExecuteCommandCard,
+    createToolLine,
+    createUserBubble,
+    enhanceTaskChecklists as enhanceMessageTaskChecklists,
+    filterReasoningNoise as filterMessageReasoningNoise,
+    formatTokenCount as formatMessageTokenCount,
+    getFileLink as getMessageFileLink,
+    getFilePath as getMessageFilePath,
+    getLineInfo as getMessageLineInfo,
+    getToolColor as getMessageToolColor,
+    getToolLabel as getMessageToolLabel,
+    installUserBubbleCollapse,
+    reasoningStoreLimit,
+    renderEditDiff as renderMessageEditDiff,
+    renderGitDiff as renderMessageGitDiff,
+    renderThinkingBlock as renderMessageThinkingBlock,
+    setCopyButtonState as setMessageCopyButtonState,
+    setLazyToolOutput as setMessageLazyToolOutput,
+    setupCodeBlockCopy,
+    smartScroll as smartMessageScroll,
+    stripRawToolCalls as stripMessageRawToolCalls,
+    dedupReasoning as dedupMessageReasoning,
+    toolIcon as messageToolIcon,
+    toolSummary as messageToolSummary,
+} from './messages/index';
 
 // ── Helpers ──
 
 function formatTokenCount(n: number): string {
-    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-    return String(n);
+    return formatMessageTokenCount(n);
 }
 
 /**
@@ -23,17 +50,39 @@ function formatTokenCount(n: number): string {
 function isNearBottom(el: HTMLElement, threshold = 120): boolean {
     return el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
 }
+let pendingScrollFrame = 0;
 function smartScroll(el: HTMLElement): void {
-    if (isNearBottom(el)) {
-        el.scrollTop = el.scrollHeight;
-    }
+    smartMessageScroll(el);
 }
+
+function copyIconMarkup(): string {
+    return '<span class="copy-icon" aria-hidden="true"></span>';
+}
+
+function setCopyButtonState(btn: HTMLElement, copied: boolean): void {
+    setMessageCopyButtonState(btn, copied);
+}
+
+const REASONING_PREVIEW_CHARS = 700;
+const REASONING_STORE_CHARS = 12000;
+const REASONING_DEDUP_INTERVAL_MS = 1500;
+const WORKFLOW_UPDATE_INTERVAL_MS = 400;
 
 interface EditedFileInfo {
     path: string;
     action: string;
     added: number;
     removed: number;
+}
+
+interface WorkflowUiState {
+    card: HTMLElement;
+    phases: Array<{ title: string; mode: string; tasks: Array<{ label: string; result?: any }> }>;
+    totalTasks: number;
+    completedTasks: number;
+    startedAt: number;
+    lastRenderedAt: number;
+    ended: boolean;
 }
 
 // Tool card helpers
@@ -61,72 +110,11 @@ const READONLY_TOOLS = new Set([
 ]);
 
 function toolIcon(name: string): string {
-    if (name.startsWith('mcp_')) return 'MCP';
-    return TOOL_ICONS[name] || '?';
+    return messageToolIcon(name);
 }
 
 function toolSummary(name: string, args: any): string {
-    if (!args || typeof args !== 'object') return '';
-    // MCP tools: show server name + tool name
-    if (name.startsWith('mcp_')) {
-        const parts = name.split('_');
-        const server = parts[1] || 'unknown';
-        const tool = parts.slice(2).join('_');
-        return `[${server}] ${tool}`;
-    }
-    switch (name) {
-        case 'read_file': {
-            let summary = args.path || '';
-            if (args.offset || args.limit) {
-                const start = (args.offset || 0) + 1;
-                const end = args.limit ? start + args.limit - 1 : '...';
-                summary += ` [L${start}-${end}]`;
-            }
-            return summary;
-        }
-        case 'write_file': return (args.path || '') + (args.content ? ` (${args.content.length} chars)` : '');
-        case 'edit_file': return args.path || '';
-        case 'list_directory': return args.path || '.';
-        case 'search_files': return `"${args.pattern || ''}" in ${args.path || '.'}`;
-        case 'execute_command': return args.command || '';
-        case 'fetch_url': return args.url || '';
-        case 'glob_files': return `${args.pattern || ''} in ${args.path || '.'}`;
-        case 'delete_file': return args.path || '';
-        case 'move_file': return `${args.source || ''} -> ${args.destination || ''}`;
-        case 'copy_file': return `${args.source || ''} -> ${args.destination || ''}`;
-        case 'get_file_info': return args.path || '';
-        case 'git_status': return args.path || 'workspace';
-        case 'git_diff': return (args.staged ? 'staged' : 'unstaged') + (args.file ? ` ${args.file}` : '');
-        case 'git_log': return `${args.count || 10} commits`;
-        case 'git_commit': return `"${(args.message || '').substring(0, 40)}"`;
-        case 'git_push': return (args.remote || 'origin') + (args.branch ? ` ${args.branch}` : '');
-        case 'git_pull': return (args.remote || 'origin') + (args.branch ? ` ${args.branch}` : '');
-        case 'web_search': return args.query || '';
-        case 'browser_open': return args.url || '';
-        case 'browser_click': return args.selector || '';
-        case 'browser_type': return `${args.selector || ''} -> "${(args.text || '').substring(0, 30)}"`;
-        case 'browser_screenshot': return args.path || 'page';
-        case 'browser_get_content': return 'page content';
-        case 'browser_close': return '';
-        case 'spawn_subagent': return `${args.type || 'general'}: ${(args.task || '').substring(0, 50)}`;
-        case 'git_worktree_add': return args.branch || '';
-        case 'git_worktree_list': return 'all worktrees';
-        case 'git_worktree_remove': return args.path || '';
-        case 'read_notebook': return args.path || '';
-        case 'edit_notebook_cell': return `${args.path || ''} cell ${args.index}`;
-        case 'insert_notebook_cell': return `${args.path || ''} at ${args.index ?? 'end'}`;
-        case 'delete_notebook_cell': return `${args.path || ''} cell ${args.index}`;
-        case 'desktop_screenshot': return args.windowTitle || 'full screen';
-        case 'desktop_windows': return 'list all windows';
-        case 'desktop_focus': return args.windowTitle || '';
-        case 'desktop_type': return (args.text || '').substring(0, 30);
-        case 'desktop_key': return args.key || '';
-        case 'desktop_click': return `(${args.x}, ${args.y})`;
-        case 'desktop_mouse_move': return `(${args.x}, ${args.y})`;
-        case 'desktop_drag': return `(${args.x1},${args.y1}) -> (${args.x2},${args.y2})`;
-        case 'desktop_launch': return args.appName || '';
-        default: return JSON.stringify(args).substring(0, 60);
-    }
+    return messageToolSummary(name, args);
 }
 
 export const Messages = {
@@ -161,6 +149,34 @@ export const Messages = {
             const clone = source.cloneNode(true) as HTMLElement;
             clone.className = 'msg msg-user sticky-user-clone';
             clone.querySelectorAll('button').forEach(btn => btn.remove());
+            const sourceCopy = source.querySelector('.msg-copy') as HTMLButtonElement | null;
+            const copyBtn = createElement('button', 'msg-copy sticky-copy') as HTMLButtonElement;
+            setCopyButtonState(copyBtn, false);
+            copyBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                sourceCopy?.click();
+                setCopyButtonState(copyBtn, true);
+                window.setTimeout(() => setCopyButtonState(copyBtn, false), 1400);
+            });
+            clone.appendChild(copyBtn);
+            if (source.classList.contains('collapsible')) {
+                const expandBtn = createElement('button', 'expand-toggle sticky-expand') as HTMLButtonElement;
+                const syncExpandLabel = () => {
+                    expandBtn.textContent = source.classList.contains('expanded') ? '收起' : '展开';
+                    clone.classList.toggle('expanded', source.classList.contains('expanded'));
+                };
+                syncExpandLabel();
+                expandBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const original = source.querySelector('.expand-toggle') as HTMLButtonElement | null;
+                    if (original) original.click();
+                    else source.classList.toggle('expanded');
+                    syncExpandLabel();
+                    requestAnimationFrame(syncHeight);
+                });
+                clone.appendChild(expandBtn);
+                clone.classList.add('collapsible');
+            }
             stickyPrompt.replaceChildren(clone);
             stickyPrompt.classList.remove('hidden');
             const syncHeight = () => {
@@ -200,11 +216,24 @@ export const Messages = {
 
         const scheduleStickyPromptUpdate = () => {
             if (stickyFrame) return;
-            stickyFrame = requestAnimationFrame(updateStickyPrompt);
+            const streamingActive = !!store.get('streamingMsg');
+            const delay = streamingActive ? 250 : 0;
+            window.setTimeout(() => {
+                if (stickyFrame) return;
+                stickyFrame = requestAnimationFrame(updateStickyPrompt);
+            }, delay);
         };
 
         messagesDiv.addEventListener('scroll', scheduleStickyPromptUpdate, { passive: true });
-        new MutationObserver(scheduleStickyPromptUpdate).observe(messagesDiv, { childList: true });
+        new MutationObserver((mutations) => {
+            const shouldUpdate = mutations.some((mutation) =>
+                Array.from(mutation.addedNodes).some((node) =>
+                    node instanceof HTMLElement &&
+                    (node.classList.contains('msg-user') || node.classList.contains('msg-assistant') || node.classList.contains('msg-error'))
+                )
+            );
+            if (shouldUpdate) scheduleStickyPromptUpdate();
+        }).observe(messagesDiv, { childList: true });
         requestAnimationFrame(updateStickyPrompt);
 
         // Code block copy (event delegation)
@@ -251,14 +280,18 @@ export const Messages = {
         // Listen for messages from host
         bus.on('userMessage', (text: string, images?: ImageData[] | null) => this.addUserMessage(text, images));
         bus.on('streamHtml', (html: string) => this.handleStream(html));
+        bus.on('assistantUpdate', (html: string) => this.handleAssistantUpdate(html));
+        bus.on('finalAnswer', (html: string) => this.handleFinalAnswer(html));
+        bus.on('streamSegmentEnd', () => this.commitStreamSegment());
         bus.on('reasoning', (token: string) => this.handleReasoning(token));
         bus.on('toolCallStart', (name: string, args: any) => this.addToolCard(name, args));
         bus.on('toolCallEnd', (name: string, result: string, isError: boolean, elapsed: number) => this.handleToolCallEnd(name, result, isError, elapsed));
         bus.on('roundStart', (round: number) => this.handleRoundStart(round));
-        bus.on('done', () => this.handleDone());
+        bus.on('done', (_response?: string, elapsedSec?: number) => this.handleDone(elapsedSec));
         bus.on('error', (error: string) => this.handleError(error));
         bus.on('system', (text: string) => this.addSystemMessage(text));
         bus.on('clearMessages', () => this.clearMessages());
+        bus.on('historyRender', (turns: any[]) => this.renderHistoryTurns(turns));
         bus.on('welcomeUpdate', (desc: string, hint: string) => this.updateWelcome(desc, hint));
         bus.on('tokenUsage', (usage: { promptTokens: number; completionTokens: number; totalTokens: number }) => this.handleTokenUsage(usage));
         bus.on('conversationUsage', (usage: { totalTokens: number; callCount: number }) => this.handleConversationUsage(usage));
@@ -283,12 +316,29 @@ export const Messages = {
         bus.on('messageQueued', (text: string, queueLength: number) => this.showQueuedMessage(text, queueLength));
         bus.on('queueProcessed', (remaining: number) => this.updateQueueDisplay(remaining));
         bus.on('clearQueue', () => this.clearQueueDisplay());
+        bus.on('langChanged', () => this.localizeQueueDisplay());
+        bus.on('renderFlush', () => smartScroll(messagesDiv));
+        bus.on('fileOpenResult', (msg: any) => this.handleFileOpenResult(msg));
     },
 
     // ── User message ──
     addUserMessage(text: string, images?: ImageData[] | null): void {
         const messagesDiv = document.getElementById('messages')!;
         store.set('lastUserMsg', { text, images: images || null });
+        store.set('currentTurnStartedAt', Date.now());
+
+        const delegatedBubble = createUserBubble(text, images, 'msg msg-user');
+        const hasDelegatedVisibleMessages = Array.from(messagesDiv.children)
+            .some(child => !(child as HTMLElement).classList.contains('sticky-user-preview'));
+        if (hasDelegatedVisibleMessages) {
+            delegatedBubble.style.marginTop = '20px';
+        }
+        messagesDiv.appendChild(delegatedBubble);
+        smartScroll(messagesDiv);
+        installUserBubbleCollapse(delegatedBubble, images, text);
+        store.set('streamingMsg', null);
+        store.set('rawHtml', '');
+        return;
 
         const u = createElement('div', 'msg msg-user');
         // Add spacing before user message if there are previous messages
@@ -319,7 +369,7 @@ export const Messages = {
 
         // Copy button (appears on hover)
         const copyBtn = createElement('button', 'msg-copy');
-        copyBtn.textContent = 'Copy';
+        setCopyButtonState(copyBtn, false);
         copyBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             // Copy text
@@ -330,9 +380,8 @@ export const Messages = {
                 fullText += (textToCopy ? '\n' : '') + images.map(img => `[Image: ${img.name}]`).join('\n');
             }
             navigator.clipboard.writeText(fullText).then(() => {
-                copyBtn.textContent = 'Copied!';
-                copyBtn.classList.add('copied');
-                setTimeout(() => { copyBtn.textContent = 'Copy'; copyBtn.classList.remove('copied'); }, 2000);
+                setCopyButtonState(copyBtn, true);
+                setTimeout(() => setCopyButtonState(copyBtn, false), 1600);
             }).catch(() => {});
         });
         u.appendChild(copyBtn);
@@ -374,7 +423,18 @@ export const Messages = {
             if (lbl) lbl.textContent = 'Thought';
             // Show the toggle when thinking is finalized
             const toggle = dots[i].parentElement as HTMLElement | null;
-            if (toggle) toggle.style.display = '';
+            const block = toggle?.nextElementSibling as HTMLElement | null;
+            if (block?.classList.contains('thinking-block')) {
+                (block as any)._thinkingDone = true;
+                this.renderThinkingBlock(block, true);
+                block.classList.remove('show');
+                toggle?.classList.remove('open');
+            }
+            if (toggle) {
+                toggle.style.display = '';
+                const parent = toggle.closest('.msg-assistant') as HTMLElement | null;
+                if (parent) (parent as any)._activeThinkingBlock = null;
+            }
         }
     },
 
@@ -405,23 +465,56 @@ export const Messages = {
         // before the next round's reasoning tokens.
 
         store.set('rawHtml', html);
-        const el = streamingMsg.querySelector('.md-content') || streamingMsg;
+        let el = streamingMsg.querySelector('.md-content:not([data-stream-finalized="true"])') as HTMLElement | null;
+        if (!el) {
+            el = createElement('div', 'md-content');
+            streamingMsg.appendChild(el);
+        }
+        if ((el as any)._lastStreamHtml === html) return;
+        (el as any)._lastStreamHtml = html;
         // Post-process: replace task-checklist blocks with enhanced component
         el.innerHTML = this.enhanceTaskChecklists(this.stripRawToolCalls(html));
         smartScroll(messagesDiv);
     },
 
+    commitStreamSegment(): void {
+        const streamingMsg = store.get('streamingMsg');
+        if (!streamingMsg) return;
+        const el = streamingMsg.querySelector('.md-content:not([data-stream-finalized="true"])') as HTMLElement | null;
+        if (!el) return;
+        if (!el.textContent?.trim() && !el.querySelector('*')) {
+            el.remove();
+            return;
+        }
+        el.setAttribute('data-stream-finalized', 'true');
+        el.classList.add('md-content-final');
+        store.set('rawHtml', '');
+    },
+
     // ── Enhance task checklists ──
+    appendFixedAssistantSegment(html: string, kind: 'update' | 'final'): void {
+        this.handleStream(html || '');
+        this.commitStreamSegment();
+        const streamingMsg = store.get('streamingMsg');
+        const finalized = streamingMsg?.querySelector('.md-content-final:last-of-type') as HTMLElement | null;
+        if (finalized) finalized.classList.add(`md-content-${kind}`);
+        if (kind === 'final') {
+            this._markThinkingDone();
+        }
+        const messagesDiv = document.getElementById('messages')!;
+        smartScroll(messagesDiv);
+    },
+
+    handleAssistantUpdate(html: string): void {
+        this.appendFixedAssistantSegment(html, 'update');
+    },
+
+    handleFinalAnswer(html: string): void {
+        this.appendFixedAssistantSegment(html, 'final');
+    },
+
     enhanceTaskChecklists(html: string): string {
-        // Replace <div class="task-checklist">...</div> blocks with enhanced component
-        return html.replace(
-            /<div class="task-checklist">([\s\S]*?)<\/div>\s*<\/div>/g,
-            (_: string, inner: string) => {
-                const items = parseTodoItems(inner);
-                if (items.length === 0) return '';
-                return renderTaskChecklist(items);
-            }
-        );
+        return enhanceMessageTaskChecklists(html);
     },
 
     /**
@@ -430,13 +523,13 @@ export const Messages = {
      * sometimes output <tool_call> tags anyway when tool calling fails.
      */
     stripRawToolCalls(html: string): string {
-        return html.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '')
-            .replace(/<tool_call>[\s\S]*$/gi, '');
+        return stripMessageRawToolCalls(html);
     },
 
     // ── Reasoning/thinking ──
     handleReasoning(token: string): void {
-        const messagesDiv = document.getElementById('messages')!;
+        token = this.filterReasoningNoise(token);
+        if (!token) return;
         let streamingMsg = store.get('streamingMsg');
 
         if (!streamingMsg) {
@@ -447,30 +540,23 @@ export const Messages = {
             store.set('rawHtml', '');
         }
 
-        // Remove spinner
         const oldSpinner = streamingMsg.querySelector('.spinner');
         if (oldSpinner) oldSpinner.remove();
 
-        // Find the LAST thinking block that is NOT marked as done.
-        // If none exists (first round, or previous round was completed),
-        // create a new block for this round's reasoning.
-        // NOTE: We do NOT mark dots as done here — that happens when
-        // a tool call starts, response text arrives, or done is received.
-        const existingBlocks = streamingMsg.querySelectorAll('.thinking-block');
-        let thinkBlock: HTMLElement | null = null;
-        for (let i = existingBlocks.length - 1; i >= 0; i--) {
-            const block = existingBlocks[i];
-            const dot = block.previousElementSibling?.querySelector('.thinking-dot');
-            if (dot && !dot.classList.contains('done')) {
-                // Found an active (not done) thinking block — continue accumulating
-                thinkBlock = block;
-                break;
-            }
+        let thinkBlock = (streamingMsg as any)._activeThinkingBlock as HTMLElement | null;
+        const activeDot = thinkBlock?.previousElementSibling?.querySelector('.thinking-dot');
+        if (!thinkBlock || (thinkBlock as any)._thinkingDone || activeDot?.classList.contains('done')) {
+            thinkBlock = null;
         }
 
         if (!thinkBlock) {
             thinkBlock = createElement('div', 'thinking-block');
             (thinkBlock as any)._reasoningText = '';
+            (thinkBlock as any)._reasoningTrimmed = false;
+            (thinkBlock as any)._lastDedupAt = 0;
+            (thinkBlock as any)._dedupedText = '';
+            (thinkBlock as any)._lastRenderedText = '';
+            (thinkBlock as any)._thinkingDone = false;
 
             const toggle = createElement('div', 'thinking-toggle');
             const dot = createElement('span', 'thinking-dot');
@@ -479,46 +565,103 @@ export const Messages = {
             lbl.textContent = 'Thinking...';
             toggle.appendChild(lbl);
             const arrow = createElement('span', 'arrow');
-            arrow.innerHTML = '▸';
+            arrow.textContent = '>';
             toggle.appendChild(arrow);
-            toggle.addEventListener('click', function (this: HTMLElement) {
+            toggle.addEventListener('click', () => {
                 thinkBlock!.classList.toggle('show');
-                this.classList.toggle('open');
+                toggle.classList.toggle('open');
+                this.renderThinkingBlock(thinkBlock!, thinkBlock!.classList.contains('show'));
             });
 
-            // Append at the end of the message, then keep .md-content at the bottom.
-            // This creates the natural interleaving:
-            //   Round 1: [thinking-1] → [tool-1] [tool-2] → [md-content]
-            //   Round 2: [thinking-1] → [tool-1] [tool-2] → [thinking-2] → [tool-3] → [md-content]
             streamingMsg.appendChild(toggle);
             streamingMsg.appendChild(thinkBlock);
-            const mdContent = streamingMsg.querySelector('.md-content');
-            if (mdContent) streamingMsg.appendChild(mdContent); // keep md-content at the bottom
+            const mdContent = streamingMsg.querySelector('.md-content:not([data-stream-finalized="true"])');
+            if (mdContent) streamingMsg.appendChild(mdContent);
+            (streamingMsg as any)._activeThinkingBlock = thinkBlock;
         }
 
-        (thinkBlock as any)._reasoningText += token;
+        let nextReasoning = ((thinkBlock as any)._reasoningText || '') + token;
+        if (nextReasoning.length > REASONING_STORE_CHARS) {
+            nextReasoning = nextReasoning.slice(-REASONING_STORE_CHARS);
+            (thinkBlock as any)._reasoningTrimmed = true;
+            (thinkBlock as any)._dedupedText = '';
+        }
+        (thinkBlock as any)._reasoningText = nextReasoning;
+        this.renderThinkingBlock(thinkBlock, false, false);
+    },
 
-        // Dedup: collapse repeated short phrases (e.g. model stuck in a loop)
-        let displayText = (thinkBlock as any)._reasoningText;
-        displayText = this._dedupReasoning(displayText);
+    filterReasoningNoise(text: string): string {
+        if (!text) return '';
+        const noisyPatterns = [
+            /\[Context:\s*[^\]]+\]/gi,
+            /\[Progress\][^\[]*/gi,
+            /\[Soft budget reached\][^\[]*/gi,
+            /\[Stop guard\][^\[]*/gi,
+            /compressing with summarization\.?\s*x?\s*\d*/gi,
+            /sliding window\.?\s*x?\s*\d*/gi,
+            /The user wants to continue implementing[^.\n]*(?:\.|\n)?/gi,
+        ];
+        let out = text;
+        for (const pattern of noisyPatterns) out = out.replace(pattern, '');
+        return out.replace(/\s{3,}/g, ' ');
+    },
 
-        // Detect loop warning from agent and add visual indicator
-        if (displayText.includes('⚠️ 检测到推理循环')) {
+    renderThinkingBlock(thinkBlock: HTMLElement, forceFull = false, replayHint = false): void {
+        const rawText = (thinkBlock as any)._reasoningText || '';
+        const toggle = thinkBlock.previousElementSibling as HTMLElement | null;
+        if (rawText.length <= 30) {
+            if (toggle) toggle.style.display = 'none';
+            return;
+        }
+        const now = Date.now();
+        if (!forceFull && !replayHint) {
+            const lastAt = (thinkBlock as any)._lastRenderedAt || 0;
+            if (now - lastAt < 350) {
+                if (!(thinkBlock as any)._renderTimer) {
+                    (thinkBlock as any)._renderTimer = window.setTimeout(() => {
+                        (thinkBlock as any)._renderTimer = 0;
+                        this.renderThinkingBlock(thinkBlock, false, false);
+                    }, 350 - (now - lastAt));
+                }
+                return;
+            }
+            (thinkBlock as any)._lastRenderedAt = now;
+        }
+
+        const expanded = forceFull || thinkBlock.classList.contains('show');
+        let displayText = rawText;
+        if (expanded) {
+            const prefix = (thinkBlock as any)._reasoningTrimmed ? '[Earlier thinking trimmed for responsiveness]\n\n' : '';
+            if (
+                forceFull ||
+                !(thinkBlock as any)._dedupedText ||
+                now - ((thinkBlock as any)._lastDedupAt || 0) > REASONING_DEDUP_INTERVAL_MS
+            ) {
+                (thinkBlock as any)._dedupedText = prefix + this._dedupReasoning(rawText);
+                (thinkBlock as any)._lastDedupAt = now;
+            }
+            displayText = (thinkBlock as any)._dedupedText;
+        } else {
+            const prefix = (thinkBlock as any)._reasoningTrimmed ? '[Thinking trimmed]\n' : '';
+            displayText = rawText.length > REASONING_PREVIEW_CHARS
+                ? `${prefix}... ${rawText.slice(-REASONING_PREVIEW_CHARS)}`
+                : `${prefix}${rawText.slice(-REASONING_PREVIEW_CHARS)}`;
+        }
+
+        if (/loop|recovery/i.test(displayText)) {
             thinkBlock.classList.add('reasoning-loop-warn');
         }
 
-        if (displayText.length > 30) {
+        if ((thinkBlock as any)._lastRenderedText !== displayText) {
             thinkBlock.textContent = displayText;
-            const prevToggle = thinkBlock.previousElementSibling as HTMLElement;
-            prevToggle.style.display = '';
-            // During replay, full reasoning arrives at once — auto-expand the block
-            // (during live streaming, it stays expanded naturally as tokens stream in)
-            if (token.length > 100 && !thinkBlock.classList.contains('show')) {
-                thinkBlock.classList.add('show');
-                prevToggle.classList.add('open');
-            }
-        } else {
-            (thinkBlock.previousElementSibling as HTMLElement).style.display = 'none';
+            (thinkBlock as any)._lastRenderedText = displayText;
+            if (toggle) toggle.style.display = '';
+        }
+
+        if (replayHint && !thinkBlock.classList.contains('show')) {
+            thinkBlock.classList.add('show');
+            toggle?.classList.add('open');
+            this.renderThinkingBlock(thinkBlock, true);
         }
     },
 
@@ -528,6 +671,7 @@ export const Messages = {
      * and collapses it to "×N" notation.
      */
     _dedupReasoning(text: string): string {
+        return dedupMessageReasoning(text);
         // Pass 1: Match 3+ consecutive identical multi-line blocks (each line ≤ 200 chars)
         let result = text.replace(
             /((?:[^\n]{1,200}\n?){1,3})\1{2,}/g,
@@ -562,12 +706,19 @@ export const Messages = {
     addToolCard(name: string, args: any): void {
         // Mark thinking as done — tool execution means reasoning for this round is complete
         this._markThinkingDone();
+        this.markLiveProgressToolStart(name, args);
 
         // Append to the current streaming assistant message so tool cards
         // interleave with thinking blocks (not floating at #messages level)
         const streamingMsg = store.get('streamingMsg');
         const messagesDiv = document.getElementById('messages')!;
         const targetDiv = streamingMsg || messagesDiv;
+        const delegatedCard = name === 'execute_command'
+            ? createExecuteCommandCard(name, args)
+            : createToolLine(name, args);
+        targetDiv.appendChild(delegatedCard);
+        smartScroll(messagesDiv);
+        return;
 
         // execute_command → card-style layout with IN/OUT
         if (name === 'execute_command') {
@@ -609,19 +760,24 @@ export const Messages = {
 
         // Build clickable file link
         const filePath = this.getFilePath(args);
+        const url = typeof args?.url === 'string' && /^https?:\/\//i.test(args.url) ? args.url : '';
         const lineInfo = this.getLineInfo(name, args);
-        const displayPath = filePath ? (lineInfo ? `${filePath} ${lineInfo}` : filePath) : summary;
+        const displayPath = filePath ? (lineInfo ? `${filePath} ${lineInfo}` : filePath) : (url || summary);
+        const linkClass = url ? 'tool-link url-link' : 'tool-link';
 
         card.innerHTML = `<span class="tool-label" style="color:${color}">${label}</span>` +
-            `<span class="tool-path"><a class="tool-link" href="#">${escapeHtml(displayPath)}</a></span>` +
+            `<span class="tool-path"><a class="${linkClass}" href="${url ? escapeHtml(url) : '#'}">${escapeHtml(displayPath)}</a></span>` +
             `<span class="tool-time"></span>`;
 
-        // Click link to open file in VSCode
+        // Click link to open files in VSCode or URLs externally.
         const link = card.querySelector('.tool-link');
         if (!link) return;
         link.addEventListener('click', (e) => {
+            e.preventDefault();
             e.stopPropagation();
-            if (filePath) {
+            if (url) {
+                vscode.post({ type: 'openUrl', url });
+            } else if (filePath) {
                 vscode.post({ type: 'openFile', path: filePath, line: args.offset ? args.offset + 1 : undefined });
             }
         });
@@ -691,6 +847,7 @@ export const Messages = {
         const allTools = searchRoot.querySelectorAll('.tool-line, .tool-card');
         const last = allTools[allTools.length - 1] as HTMLElement | null;
         if (!last) return;
+        this.markLiveProgressToolEnd(name, isError, elapsed);
 
         last.setAttribute('data-status', isError ? 'error' : 'success');
 
@@ -730,7 +887,7 @@ export const Messages = {
                 const outLabel = createElement('span', 'tool-card-section-label');
                 outLabel.textContent = 'OUT';
                 const outContent = createElement('span', 'tool-card-section-content');
-                outContent.textContent = result || '(no output)';
+                this.setLazyToolOutput(outContent, result || '(no output)');
                 outSection.appendChild(outLabel);
                 outSection.appendChild(outContent);
                 body.appendChild(outSection);
@@ -742,6 +899,83 @@ export const Messages = {
         }
 
         // Don't clear streamingMsg - allow thinking to continue across tool calls
+    },
+
+    setLazyToolOutput(el: HTMLElement, text: string): void {
+        const limit = 1200;
+        if (text.length <= limit) {
+            el.textContent = text;
+            return;
+        }
+        const preview = text.slice(0, limit);
+        el.textContent = `${preview}\n\n... output truncated in view (${text.length} chars). Click to load full output.`;
+        el.classList.add('lazy-tool-output');
+        let loaded = false;
+        el.addEventListener('click', () => {
+            if (loaded) return;
+            el.textContent = text;
+            loaded = true;
+            el.classList.remove('lazy-tool-output');
+        });
+    },
+
+    ensureLiveProgressCard(): HTMLElement | null {
+        if (!store.get('planExecutionActive')) return null;
+        const messagesDiv = document.getElementById('messages')!;
+        let card = document.querySelector('.live-progress-card[data-active="true"]') as HTMLElement | null;
+        if (card) return card;
+        card = createElement('div', 'live-progress-card');
+        card.setAttribute('data-active', 'true');
+        card.innerHTML =
+            `<div class="live-progress-header">` +
+            `<span class="live-progress-title">Execution Progress</span>` +
+            `<span class="live-progress-count">0/0</span>` +
+            `</div><div class="live-progress-items"></div>`;
+        messagesDiv.appendChild(card);
+        smartScroll(messagesDiv);
+        return card;
+    },
+
+    liveProgressLabel(name: string, args: any): string {
+        const summary = toolSummary(name, args);
+        return (summary ? `${name}: ${summary}` : name).slice(0, 180);
+    },
+
+    markLiveProgressToolStart(name: string, args: any): void {
+        const card = this.ensureLiveProgressCard();
+        if (!card) return;
+        const list = card.querySelector('.live-progress-items') as HTMLElement | null;
+        if (!list) return;
+        const item = createElement('div', 'live-progress-item running');
+        item.setAttribute('data-tool', name);
+        item.innerHTML =
+            `<span class="live-progress-check"></span>` +
+            `<span class="live-progress-text">${escapeHtml(this.liveProgressLabel(name, args))}</span>` +
+            `<span class="live-progress-state">running</span>`;
+        list.appendChild(item);
+        this.updateLiveProgressCount(card);
+    },
+
+    markLiveProgressToolEnd(name: string, isError: boolean, elapsed: number): void {
+        const card = this.ensureLiveProgressCard();
+        if (!card) return;
+        const running = Array.from(card.querySelectorAll<HTMLElement>('.live-progress-item.running'));
+        const item = running.reverse().find(el => el.getAttribute('data-tool') === name) || running[0];
+        if (!item) return;
+        item.classList.remove('running');
+        item.classList.add(isError ? 'error' : 'done');
+        const check = item.querySelector('.live-progress-check') as HTMLElement | null;
+        const state = item.querySelector('.live-progress-state') as HTMLElement | null;
+        if (check) check.textContent = isError ? '!' : '✓';
+        if (state) state.textContent = isError ? 'error' : `${elapsed.toFixed(1)}s`;
+        this.updateLiveProgressCount(card);
+    },
+
+    updateLiveProgressCount(card: HTMLElement): void {
+        const total = card.querySelectorAll('.live-progress-item').length;
+        const done = card.querySelectorAll('.live-progress-item.done').length;
+        const count = card.querySelector('.live-progress-count') as HTMLElement | null;
+        if (count) count.textContent = `${done}/${total}`;
     },
 
     createDiffCard(args: any): HTMLElement | null {
@@ -989,25 +1223,29 @@ export const Messages = {
     handleRoundStart(round: number): void {
         if (round <= 1) return;
         const messagesDiv = document.getElementById('messages')!;
+        const streamingMsg = store.get('streamingMsg');
         const mk = createElement('div', 'round-marker');
         mk.innerHTML = `<span>Round ${round}</span>`;
-        messagesDiv.appendChild(mk);
+        (streamingMsg || messagesDiv).appendChild(mk);
     },
 
-    handleDone(): void {
+    handleDone(elapsedSec?: number): void {
+        this.commitStreamSegment();
         // Mark all thinking dots as done
         this._markThinkingDone();
 
         // Collapse all execution details into a drawer, leaving final answer visible below.
-        this.compactExecutionDetails();
+        this.compactExecutionDetails(elapsedSec);
 
         store.set('streamingMsg', null);
         store.set('rawHtml', '');
+        document.querySelectorAll<HTMLElement>('.live-progress-card[data-active="true"]').forEach(card => card.setAttribute('data-active', 'false'));
+        store.set('planExecutionActive', false);
         const messagesDiv = document.getElementById('messages')!;
         smartScroll(messagesDiv);
     },
 
-    compactExecutionDetails(): void {
+    compactExecutionDetails(elapsedSec?: number): void {
         const streamingMsg = store.get('streamingMsg');
         if (!streamingMsg || streamingMsg.classList.contains('execution-compacted')) return;
 
@@ -1019,32 +1257,42 @@ export const Messages = {
                 el.classList.contains('tool-card') ||
                 el.classList.contains('diff-card') ||
                 el.classList.contains('workflow-card') ||
+                el.classList.contains('live-progress-card') ||
                 el.classList.contains('round-marker');
         }) as HTMLElement[];
 
-        const finalContent = streamingMsg.querySelector('.md-content') as HTMLElement | null;
+        const mdContents = Array.from(streamingMsg.querySelectorAll('.md-content')) as HTMLElement[];
+        const finalContent = [...mdContents]
+            .reverse()
+            .find(el => !!el.textContent?.trim() || !!el.querySelector('*')) || null;
         if (detailNodes.length === 0) return;
 
         const editedFiles = this.collectEditedFiles(streamingMsg);
         const toolCards = detailNodes.filter(el => el.classList.contains('tool-line') || el.classList.contains('tool-card'));
-        const thinkingBlocks = detailNodes.filter(el => el.classList.contains('thinking-block'));
-        const workflowCards = detailNodes.filter(el => el.classList.contains('workflow-card'));
         const usage = store.get('tokenUsage');
-        const totalElapsed = toolCards.reduce((sum, card) => {
+        const startedTokenTotal = (streamingMsg as any)._startedTokenTotal as number | undefined;
+        const messageTokens = Math.max(0, usage.total - (startedTokenTotal || 0));
+        const toolElapsed = toolCards.reduce((sum, card) => {
             const el = card.querySelector('.tool-time, .tool-card-time, .tool-elapsed');
             const sec = parseFloat(el?.textContent || '0');
             return sum + (isNaN(sec) ? 0 : sec);
         }, 0);
+        const startedAt = (streamingMsg as any)._startedAt as number | undefined;
+        const turnStartedAt = store.get('currentTurnStartedAt');
+        const totalElapsed = typeof elapsedSec === 'number' && elapsedSec > 0
+            ? elapsedSec
+            : (turnStartedAt ? Math.max(0, (Date.now() - turnStartedAt) / 1000) : (startedAt ? Math.max(0, (Date.now() - startedAt) / 1000) : toolElapsed));
+        const metaHtml = [
+            totalElapsed > 0 ? `<span class="execution-meta">${this.formatDuration(totalElapsed)}</span>` : '',
+            messageTokens > 0 ? `<span class="execution-meta">${formatTokenCount(messageTokens)} tokens</span>` : '',
+        ].filter(Boolean).join('');
 
         const drawer = createElement('div', 'execution-drawer');
         const header = createElement('button', 'execution-drawer-header');
         header.type = 'button';
         header.innerHTML =
-            `<span class="execution-title">Processed ${this.formatDuration(totalElapsed)}</span>` +
-            `<span class="execution-meta">${toolCards.length} tools</span>` +
-            (thinkingBlocks.length > 0 ? `<span class="execution-meta">${thinkingBlocks.length} thoughts</span>` : '') +
-            (workflowCards.length > 0 ? `<span class="execution-meta">${workflowCards.length} workflows</span>` : '') +
-            (usage.calls > 0 ? `<span class="execution-meta">${formatTokenCount(usage.total)} tokens</span>` : '') +
+            `<span class="execution-title">Processed</span>` +
+            metaHtml +
             `<span class="execution-chevron">&rsaquo;</span>`;
 
         const body = createElement('div', 'execution-drawer-body');
@@ -1103,16 +1351,20 @@ export const Messages = {
     renderEditedFilesSummary(files: EditedFileInfo[]): HTMLElement {
         const totalAdded = files.reduce((sum, f) => sum + f.added, 0);
         const totalRemoved = files.reduce((sum, f) => sum + f.removed, 0);
+        const totalChanged = totalAdded + totalRemoved;
+        const changeText = totalChanged === 1 ? '1 line changed' : `${totalChanged} lines changed`;
         const box = createElement('div', 'edited-files-summary');
-        const rows = files.map(f =>
-            `<div class="edited-file-row">` +
-            `<span class="edited-file-action">${escapeHtml(f.action)}</span>` +
-            `<span class="edited-file-path">${escapeHtml(f.path)}</span>` +
-            `<span class="edited-file-stats"><span class="diff-stats-add">+${f.added}</span> <span class="diff-stats-del">-${f.removed}</span></span>` +
-            `</div>`
-        ).join('');
+        const rows = files.map(f => {
+            const changed = f.added + f.removed;
+            const label = changed === 1 ? '1 line' : `${changed} lines`;
+            return `<div class="edited-file-row">` +
+                `<span class="edited-file-action">${escapeHtml(f.action)}</span>` +
+                `<span class="edited-file-path">${escapeHtml(f.path)}</span>` +
+                `<span class="edited-file-stats">${label} <span class="diff-stats-add">+${f.added}</span> <span class="diff-stats-del">-${f.removed}</span></span>` +
+                `</div>`;
+        }).join('');
         box.innerHTML =
-            `<div class="edited-files-header">Changed Files <span>${files.length} files</span> <span class="diff-stats-add">+${totalAdded}</span> <span class="diff-stats-del">-${totalRemoved}</span></div>` +
+            `<div class="edited-files-header">Changed Files <span>${files.length} files</span> <span>${changeText}</span> <span class="diff-stats-add">+${totalAdded}</span> <span class="diff-stats-del">-${totalRemoved}</span></div>` +
             `<div class="edited-files-list">${rows}</div>`;
         return box;
     },
@@ -1143,9 +1395,250 @@ export const Messages = {
         smartScroll(messagesDiv);
         store.set('streamingMsg', null);
         store.set('rawHtml', '');
+        document.querySelectorAll<HTMLElement>('.live-progress-card[data-active="true"]').forEach(card => card.setAttribute('data-active', 'false'));
+        store.set('planExecutionActive', false);
     },
 
     // ── Token usage per call ──
+    renderHistoryTurns(turns: any[]): void {
+        const messagesDiv = document.getElementById('messages')!;
+        store.set('streamingMsg', null);
+        store.set('rawHtml', '');
+        store.set('lastUserMsg', null);
+
+        const allTurns = turns || [];
+        let index = 0;
+        const renderBatch = () => {
+            const end = Math.min(index + 12, allTurns.length);
+            for (; index < end; index++) {
+                this.renderHistoryTurn(allTurns[index], messagesDiv);
+            }
+            if (index < allTurns.length) {
+                requestAnimationFrame(renderBatch);
+            } else {
+                smartScroll(messagesDiv);
+            }
+        };
+        renderBatch();
+    },
+
+    renderHistoryTurn(turn: any, messagesDiv: HTMLElement): void {
+            const user = turn.user || {};
+            this.renderHistoryUserMessage(user.text || '', user.images || null);
+
+            if (!turn.assistantHtml) return;
+            const msg = createElement('div', 'msg msg-assistant history-message');
+            const meta = turn.meta || {};
+            if (meta.hasDetails) {
+                const drawer = createElement('div', 'execution-drawer');
+                const header = createElement('button', 'execution-drawer-header');
+                header.type = 'button';
+                header.innerHTML = [
+                    `<span class="execution-title">Processed</span>`,
+                    meta.elapsedSec ? `<span class="execution-meta">${this.formatDuration(Number(meta.elapsedSec))}</span>` : '',
+                    meta.tokens ? `<span class="execution-meta">${formatTokenCount(Number(meta.tokens))} tokens</span>` : '',
+                    `<span class="execution-chevron">&rsaquo;</span>`,
+                ].filter(Boolean).join('');
+                drawer.appendChild(header);
+                const body = createElement('div', 'execution-drawer-body');
+                body.appendChild(this.renderHistoryProcessOverview(meta.details || []));
+                body.appendChild(this.renderHistoryExecutionDetails(meta.details || []));
+                drawer.appendChild(body);
+                header.addEventListener('click', () => {
+                    drawer.classList.toggle('open');
+                });
+                msg.appendChild(drawer);
+            }
+
+            const content = createElement('div', 'md-content');
+            content.innerHTML = this.enhanceTaskChecklists(this.stripRawToolCalls(turn.assistantHtml || ''));
+            msg.appendChild(content);
+            messagesDiv.appendChild(msg);
+    },
+
+    renderHistoryProcessOverview(details: any[]): HTMLElement {
+        const wrap = createElement('div', 'history-process-overview');
+        const list = Array.isArray(details) ? details : [];
+        const thoughts = list.filter(d => d?.type === 'reasoning' && String(d.body || '').trim());
+        const tools = list.filter(d => d?.type === 'tool');
+        const errors = tools.filter(d => d?.isError);
+
+        const thoughtPreview = thoughts
+            .map(d => this.previewHistoryDetail(d, 220))
+            .find(Boolean);
+
+        const stats = createElement('div', 'history-process-stats');
+        stats.innerHTML = [
+            thoughts.length ? `<span class="history-process-pill thought">${thoughts.length} Thought</span>` : '',
+            tools.length ? `<span class="history-process-pill tool">${tools.length} Tools</span>` : '',
+            errors.length ? `<span class="history-process-pill error">${errors.length} Error</span>` : '',
+        ].filter(Boolean).join('');
+        if (stats.innerHTML) wrap.appendChild(stats);
+
+        if (thoughtPreview) {
+            const thought = createElement('div', 'history-thought-preview');
+            thought.innerHTML =
+                `<span class="history-thought-label">Thought</span>` +
+                `<span class="history-thought-text">${escapeHtml(thoughtPreview)}</span>`;
+            wrap.appendChild(thought);
+        }
+
+        if (tools.length > 0) {
+            const toolRow = createElement('div', 'history-tool-chips');
+            const shown = tools.slice(0, 10);
+            const counts = new Map<string, number>();
+            for (const tool of shown) {
+                const name = String(tool.title || 'tool');
+                counts.set(name, (counts.get(name) || 0) + 1);
+            }
+            for (const [name, count] of counts) {
+                const chip = createElement('span', `history-tool-chip${errors.some(d => d.title === name && d.isError) ? ' error' : ''}`);
+                chip.textContent = `${this.getToolLabel(name) || name}${count > 1 ? ` x${count}` : ''}`;
+                toolRow.appendChild(chip);
+            }
+            if (tools.length > shown.length) {
+                const more = createElement('span', 'history-tool-chip muted');
+                more.textContent = `+${tools.length - shown.length}`;
+                toolRow.appendChild(more);
+            }
+            wrap.appendChild(toolRow);
+        }
+
+        if (!wrap.children.length) {
+            const empty = createElement('div', 'history-detail-empty');
+            empty.textContent = 'No process summary was saved for this turn.';
+            wrap.appendChild(empty);
+        }
+        return wrap;
+    },
+
+    previewHistoryDetail(detail: any, maxLen = 120): string {
+        const text = String(detail?.body || '')
+            .replace(/\[reasoning compacted for context\]/gi, '')
+            .replace(/\[reasoning omitted for context\]/gi, '')
+            .replace(/\[Earlier reasoning trimmed[^\]]*\]/gi, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        if (!text) return '';
+        return text.length > maxLen ? `${text.slice(0, maxLen).trim()}...` : text;
+    },
+
+    renderHistoryExecutionDetails(details: any[]): HTMLElement {
+        const wrap = createElement('div', 'execution-details history-execution-details');
+        if (!details || details.length === 0) {
+            const empty = createElement('div', 'history-detail-empty');
+            empty.textContent = 'No process details were saved for this turn.';
+            wrap.appendChild(empty);
+            return wrap;
+        }
+
+        for (const detail of details) {
+            const item = createElement('details', `history-detail history-detail-${detail.type || 'item'}`) as HTMLDetailsElement;
+            const summary = createElement('summary', 'history-detail-summary');
+            const rawTitle = String(detail.title || detail.type || 'detail');
+            const title = escapeHtml(detail.type === 'tool' ? (this.getToolLabel(rawTitle) || rawTitle) : rawTitle);
+            const elapsed = Number(detail.elapsedSec || 0);
+            const preview = this.previewHistoryDetail(detail, 110);
+            summary.innerHTML =
+                `<span class="history-detail-title">${title}</span>` +
+                (preview ? `<span class="history-detail-preview">${escapeHtml(preview)}</span>` : '') +
+                (elapsed > 0 ? `<span class="history-detail-time">${this.formatDuration(elapsed)}</span>` : '');
+            const body = createElement('pre', 'history-detail-body');
+            const bodyText = String(detail.body || '').trim() || '(empty)';
+            body.textContent = bodyText.length > 600 ? 'Open to load output...' : bodyText;
+            (item as any)._lazyBodyLoaded = bodyText.length <= 600;
+            item.addEventListener('toggle', () => {
+                if (item.open && !(item as any)._lazyBodyLoaded) {
+                    body.textContent = bodyText;
+                    (item as any)._lazyBodyLoaded = true;
+                }
+            });
+            if (detail.isError) item.classList.add('history-detail-error');
+            item.appendChild(summary);
+            item.appendChild(body);
+            wrap.appendChild(item);
+        }
+        return wrap;
+    },
+
+    renderHistoryUserMessage(text: string, images?: ImageData[] | null): void {
+        const messagesDiv = document.getElementById('messages')!;
+        const delegatedBubble = createUserBubble(text, images, 'msg msg-user history-message');
+        const hasDelegatedVisibleMessages = Array.from(messagesDiv.children)
+            .some(child => !(child as HTMLElement).classList.contains('sticky-user-preview'));
+        if (hasDelegatedVisibleMessages) {
+            delegatedBubble.style.marginTop = '20px';
+        }
+        messagesDiv.appendChild(delegatedBubble);
+        installUserBubbleCollapse(delegatedBubble, images, text);
+        return;
+
+        const u = createElement('div', 'msg msg-user history-message');
+
+        const hasVisibleMessages = Array.from(messagesDiv.children)
+            .some(child => !(child as HTMLElement).classList.contains('sticky-user-preview'));
+        if (hasVisibleMessages) {
+            u.style.marginTop = '20px';
+        }
+
+        if (images && images.length > 0) {
+            const imgRow = createElement('div');
+            imgRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-bottom:2px';
+            for (let i = 0; i < images.length; i++) {
+                const img = createElement('img', 'msg-img') as HTMLImageElement;
+                img.src = images[i].dataUrl;
+                img.title = `#${i + 1} ${images[i].name}`;
+                img.style.cssText = 'height:40px;width:auto;border-radius:4px;cursor:pointer;vertical-align:middle';
+                img.addEventListener('click', (e) => { e.stopPropagation(); bus.emit('showOverlay', images[i].dataUrl); });
+                imgRow.appendChild(img);
+            }
+            u.appendChild(imgRow);
+        }
+
+        if (text) {
+            const textDiv = createElement('div', 'text-content');
+            textDiv.textContent = text;
+            u.appendChild(textDiv);
+        }
+
+        const copyBtn = createElement('button', 'msg-copy');
+        setCopyButtonState(copyBtn, false);
+        copyBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            let fullText = text || '';
+            if (images && images.length > 0) {
+                fullText += (fullText ? '\n' : '') + images.map(img => `[Image: ${img.name}]`).join('\n');
+            }
+            navigator.clipboard.writeText(fullText).then(() => {
+                setCopyButtonState(copyBtn, true);
+                setTimeout(() => setCopyButtonState(copyBtn, false), 1600);
+            }).catch(() => {});
+        });
+        u.appendChild(copyBtn);
+
+        messagesDiv.appendChild(u);
+
+        // Collapse toggle for long messages — same logic as real-time messages
+        requestAnimationFrame(() => {
+            const textDiv = u.querySelector('.text-content');
+            const lineHeight = 1.5 * 13;
+            const maxHeight = lineHeight * 3 + 16;
+            const shouldCollapse = textDiv && (textDiv.scrollHeight > maxHeight + 10 || (images && images.length > 0 && text));
+
+            if (shouldCollapse) {
+                const expandBtn = createElement('button', 'expand-toggle');
+                expandBtn.textContent = '展开 ▼';
+                expandBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    u.classList.toggle('expanded');
+                    expandBtn.textContent = u.classList.contains('expanded') ? '收起 ▲' : '展开 ▼';
+                });
+                u.appendChild(expandBtn);
+                u.classList.add('collapsible');
+            }
+        });
+    },
+
     handleTokenUsage(usage: { promptTokens: number; completionTokens: number; totalTokens: number }): void {
         // Update store
         const prev = store.get('tokenUsage');
@@ -1176,106 +1669,144 @@ export const Messages = {
     },
 
     // ── Workflow rendering ──
+    getWorkflowState(): WorkflowUiState | null {
+        const streamingMsg = store.get('streamingMsg') as any;
+        return streamingMsg?._workflowState || null;
+    },
+
+    ensureWorkflowPhase(state: WorkflowUiState, phaseIndex: number): { title: string; mode: string; tasks: Array<{ label: string; result?: any }> } {
+        while (state.phases.length <= phaseIndex) {
+            state.phases.push({ title: `Phase ${state.phases.length + 1}`, mode: 'sequential', tasks: [] });
+        }
+        return state.phases[phaseIndex];
+    },
+
+    renderWorkflowSummary(state: WorkflowUiState, force = false): void {
+        const now = Date.now();
+        if (!force && now - state.lastRenderedAt < WORKFLOW_UPDATE_INTERVAL_MS) return;
+        state.lastRenderedAt = now;
+        const progressEl = state.card.querySelector('.workflow-progress') as HTMLElement | null;
+        if (!progressEl) return;
+        const elapsed = this.formatDuration(Math.max(0, (now - state.startedAt) / 1000));
+        const usage = store.get('tokenUsage');
+        const tokenText = usage.total > 0 ? `${formatTokenCount(usage.total)} tokens` : '0 tokens';
+        const current = state.ended ? 'done' : `${state.completedTasks}/${state.totalTasks || '?'} running`;
+        progressEl.textContent = `${tokenText} | ${elapsed || '0.0s'} | ${current}`;
+    },
+
+    renderWorkflowDetails(state: WorkflowUiState): void {
+        const phasesDiv = state.card.querySelector('.workflow-phases') as HTMLElement | null;
+        if (!phasesDiv || (phasesDiv as any)._renderedDetails) return;
+        phasesDiv.replaceChildren();
+        state.phases.forEach((phase, phaseIndex) => {
+            const phaseDiv = createElement('div', 'workflow-phase');
+            phaseDiv.setAttribute('data-phase', String(phaseIndex));
+            phaseDiv.innerHTML = `<div class="workflow-phase-header">` +
+                `<span class="workflow-phase-title">Phase ${phaseIndex + 1}: ${escapeHtml(phase.title)}</span>` +
+                `<span class="workflow-phase-mode">${escapeHtml(phase.mode)}</span>` +
+                `</div><div class="workflow-tasks"></div>`;
+            const tasksDiv = phaseDiv.querySelector('.workflow-tasks') as HTMLElement;
+            phase.tasks.forEach((task) => {
+                const taskDiv = createElement('div', `workflow-task${task.result?.error ? ' task-error' : ''}`);
+                const status = task.result ? (task.result.error ? 'error' : 'done') : 'running';
+                const elapsed = task.result?.elapsed ? `${(task.result.elapsed / 1000).toFixed(1)}s` : '';
+                taskDiv.innerHTML = `<span class="workflow-task-status">${status}</span>` +
+                    `<span class="workflow-task-label">${escapeHtml(task.label)}</span>` +
+                    `<span class="workflow-task-time">${elapsed}</span>`;
+                tasksDiv.appendChild(taskDiv);
+            });
+            phasesDiv.appendChild(phaseDiv);
+        });
+        (phasesDiv as any)._renderedDetails = true;
+    },
+
     handleWorkflowStart(totalPhases: number, totalTasks: number): void {
+        let streamingMsg = store.get('streamingMsg');
         const messagesDiv = document.getElementById('messages')!;
+        if (!streamingMsg) {
+            streamingMsg = this.createAssistantMsg();
+            const mc = createElement('div', 'md-content');
+            streamingMsg.appendChild(mc);
+            store.set('streamingMsg', streamingMsg);
+            store.set('rawHtml', '');
+        }
+
         const card = createElement('div', 'workflow-card');
         card.setAttribute('data-phase-count', String(totalPhases));
+        card.setAttribute('data-task-count', String(totalTasks));
         card.innerHTML = `<div class="workflow-header">` +
-            `<div class="workflow-title">⚡ Workflow <span class="workflow-progress">0/${totalTasks} tasks</span></div>` +
+            `<div class="workflow-title">Workflow <span class="workflow-progress">0 tokens | 0.0s | 0/${totalTasks} running</span></div>` +
             `</div><div class="workflow-phases"></div>`;
-        messagesDiv.appendChild(card);
-        this.makeCardCollapsible(card, '.tool-header', false);
+        streamingMsg.appendChild(card);
+        const mdContent = streamingMsg.querySelector('.md-content');
+        if (mdContent) streamingMsg.appendChild(mdContent);
+        const state: WorkflowUiState = {
+            card,
+            phases: [],
+            totalTasks,
+            completedTasks: 0,
+            startedAt: Date.now(),
+            lastRenderedAt: 0,
+            ended: false,
+        };
+        (streamingMsg as any)._workflowState = state;
+        card.querySelector('.workflow-header')?.addEventListener('click', () => {
+            card.classList.toggle('expanded');
+            if (card.classList.contains('expanded')) this.renderWorkflowDetails(state);
+        });
+        this.renderWorkflowSummary(state, true);
         smartScroll(messagesDiv);
     },
 
-    handleWorkflowPhaseStart(phaseIndex: number, title: string, mode: string, taskCount: number): void {
-        const card = document.querySelector('.workflow-card:last-of-type');
-        if (!card) return;
-        const phasesDiv = card.querySelector('.workflow-phases');
-        if (!phasesDiv) return;
-
-        const modeIcon = mode === 'parallel' ? '⚡' : '➡';
-        const phaseDiv = createElement('div', 'workflow-phase');
-        phaseDiv.setAttribute('data-phase', String(phaseIndex));
-        phaseDiv.innerHTML = `<div class="workflow-phase-header">` +
-            `<span class="workflow-phase-icon">${modeIcon}</span>` +
-            `<span class="workflow-phase-title">Phase ${phaseIndex + 1}: ${escapeHtml(title)}</span>` +
-            `<span class="workflow-phase-mode">${mode}</span>` +
-            `<span class="workflow-phase-status">running...</span>` +
-            `</div><div class="workflow-tasks"></div>`;
-        phasesDiv.appendChild(phaseDiv);
-        card.classList.add('expanded');
-        const messagesDiv = document.getElementById('messages')!;
-        smartScroll(messagesDiv);
+    handleWorkflowPhaseStart(phaseIndex: number, title: string, mode: string, _taskCount: number): void {
+        const state = this.getWorkflowState();
+        if (!state) return;
+        const phase = this.ensureWorkflowPhase(state, phaseIndex);
+        phase.title = title;
+        phase.mode = mode;
+        this.renderWorkflowSummary(state);
     },
 
     handleWorkflowTaskStart(phaseIndex: number, taskIndex: number, label: string): void {
-        const phaseDiv = document.querySelector(`.workflow-phase[data-phase="${phaseIndex}"]`);
-        if (!phaseDiv) return;
-        const tasksDiv = phaseDiv.querySelector('.workflow-tasks');
-        if (!tasksDiv) return;
-
-        const taskDiv = createElement('div', 'workflow-task');
-        taskDiv.setAttribute('data-task', `${phaseIndex}-${taskIndex}`);
-        taskDiv.innerHTML = `<span class="workflow-task-status">⏳</span>` +
-            `<span class="workflow-task-label">${escapeHtml(label)}</span>` +
-            `<span class="workflow-task-time"></span>`;
-        tasksDiv.appendChild(taskDiv);
-        const messagesDiv = document.getElementById('messages')!;
-        smartScroll(messagesDiv);
+        const state = this.getWorkflowState();
+        if (!state) return;
+        const phase = this.ensureWorkflowPhase(state, phaseIndex);
+        phase.tasks[taskIndex] = { label };
+        this.renderWorkflowSummary(state);
     },
 
     handleWorkflowTaskEnd(phaseIndex: number, taskIndex: number, result: any): void {
-        const taskDiv = document.querySelector(`.workflow-task[data-task="${phaseIndex}-${taskIndex}"]`);
-        if (!taskDiv) return;
-
-        const status = result.error ? '❌' : '✅';
-        const statusEl = taskDiv.querySelector('.workflow-task-status');
-        if (statusEl) statusEl.textContent = status;
-        const timeEl = taskDiv.querySelector('.workflow-task-time');
-        if (timeEl) timeEl.textContent = `${(result.elapsed / 1000).toFixed(1)}s · ${result.toolCalls} tools`;
-
-        if (result.error) taskDiv.classList.add('task-error');
-
-        // Update global progress counter
-        const card = document.querySelector('.workflow-card:last-of-type');
-        if (card) {
-            const done = card.querySelectorAll('.workflow-task .workflow-task-status').length;
-            const total = parseInt(card.getAttribute('data-task-count') || '0');
-            if (total > 0) {
-                const progressEl = card.querySelector('.workflow-progress');
-                if (progressEl) progressEl.textContent = `${done}/${total} tasks`;
-            }
-        }
-
-        const messagesDiv = document.getElementById('messages')!;
-        smartScroll(messagesDiv);
+        const state = this.getWorkflowState();
+        if (!state) return;
+        const phase = this.ensureWorkflowPhase(state, phaseIndex);
+        const current = phase.tasks[taskIndex] || { label: `Task ${taskIndex + 1}` };
+        if (!current.result) state.completedTasks++;
+        current.result = result;
+        phase.tasks[taskIndex] = current;
+        const phasesDiv = state.card.querySelector('.workflow-phases') as HTMLElement | null;
+        if (phasesDiv) (phasesDiv as any)._renderedDetails = false;
+        this.renderWorkflowSummary(state);
     },
 
-    handleWorkflowPhaseEnd(phaseIndex: number, _result: any): void {
-        const phaseDiv = document.querySelector(`.workflow-phase[data-phase="${phaseIndex}"]`);
-        if (!phaseDiv) return;
-        const statusEl = phaseDiv.querySelector('.workflow-phase-status');
-        if (statusEl) statusEl.textContent = '✅ done';
-        phaseDiv.classList.add('phase-done');
+    handleWorkflowPhaseEnd(_phaseIndex: number, _result: any): void {
+        const state = this.getWorkflowState();
+        if (state) this.renderWorkflowSummary(state);
     },
 
     handleWorkflowEnd(result: any): void {
-        const card = document.querySelector('.workflow-card:last-of-type');
-        if (!card) return;
-
-        const totalTasks = result.phases.reduce((s: number, p: any) => s + p.results.length, 0);
-        card.setAttribute('data-task-count', String(totalTasks));
-
-        const progressEl = card.querySelector('.workflow-progress');
-        if (progressEl) progressEl.textContent = `${totalTasks} tasks · ${result.totalToolCalls} tools · ${(result.elapsed / 1000).toFixed(1)}s`;
-
-        card.classList.add('expanded');
-        const messagesDiv = document.getElementById('messages')!;
-        smartScroll(messagesDiv);
+        const state = this.getWorkflowState();
+        if (!state) return;
+        state.ended = true;
+        if (result?.phases) {
+            state.totalTasks = result.phases.reduce((sum: number, phase: any) => sum + (phase.results?.length || 0), 0);
+            state.completedTasks = state.totalTasks;
+        }
+        this.renderWorkflowSummary(state, true);
+        if (state.card.classList.contains('expanded')) this.renderWorkflowDetails(state);
+        smartScroll(document.getElementById('messages')!);
     },
 
-    // ── Edit preview with Accept/Reject ──
+    // Edit preview with Accept/Reject
     renderEditPreviewCard(previewId: string, filePath: string, oldText: string, newText: string, matchCount: number): void {
         const messagesDiv = document.getElementById('messages')!;
         const card = createElement('div', 'tool-card edit-preview-card expanded');
@@ -1466,42 +1997,39 @@ export const Messages = {
         const card = createElement('div', 'plan-confirm-card');
 
         card.innerHTML = `
-            <div class="plan-confirm-header">📋 计划已就绪</div>
-            <div class="plan-confirm-desc">计划已生成，请在右侧编辑器中阅读后确认。</div>
+            <div class="plan-confirm-header">Plan Ready</div>
+            <div class="plan-confirm-desc">The plan has been generated. Review it in the editor before confirming.</div>
             <div class="plan-confirm-actions-row">
-                <button class="plan-confirm-btn plan-open-btn" id="plan-open-btn">📄 在编辑器中打开</button>
+                <button class="plan-confirm-btn plan-open-btn" id="plan-open-btn">Open in editor</button>
             </div>
             <div class="plan-confirm-modify">
-                <input type="text" class="plan-modify-input" id="plan-modify-input" placeholder="修改建议（可选）：如'增加测试步骤'、'简化方案'" />
+                <input type="text" class="plan-modify-input" id="plan-modify-input" placeholder="Optional feedback, e.g. add tests or simplify the plan" />
             </div>
             <div class="plan-confirm-actions">
-                <button class="plan-confirm-btn plan-accept-btn" id="plan-accept-btn">✅ 确认执行</button>
-                <button class="plan-confirm-btn plan-modify-btn" id="plan-modify-btn">📝 修改后执行</button>
-                <button class="plan-confirm-btn plan-reject-btn" id="plan-reject-btn">❌ 重新规划</button>
+                <button class="plan-confirm-btn plan-accept-btn" id="plan-accept-btn">Confirm and run</button>
+                <button class="plan-confirm-btn plan-modify-btn" id="plan-modify-btn">Revise then run</button>
+                <button class="plan-confirm-btn plan-reject-btn" id="plan-reject-btn">Replan</button>
             </div>
         `;
         messagesDiv.appendChild(card);
         this.makeCardCollapsible(card, '.plan-confirm-header', false);
         smartScroll(messagesDiv);
 
-        // Wire up buttons
         const openBtn = card.querySelector('#plan-open-btn') as HTMLButtonElement;
         const acceptBtn = card.querySelector('#plan-accept-btn') as HTMLButtonElement;
         const rejectBtn = card.querySelector('#plan-reject-btn') as HTMLButtonElement;
         const modifyBtn = card.querySelector('#plan-modify-btn') as HTMLButtonElement;
         const modifyInput = card.querySelector('#plan-modify-input') as HTMLInputElement;
 
-        // Open plan in split editor
         if (planPath) {
-            openBtn.addEventListener('click', () => {
+            const openPlan = () => {
                 vscode.openFileBeside(planPath);
-                openBtn.textContent = '📄 已打开';
+                openBtn.textContent = 'Opening...';
                 openBtn.disabled = true;
-            });
-            // Auto-open on first show
-            vscode.openFileBeside(planPath);
-            openBtn.textContent = '📄 已打开';
-            openBtn.disabled = true;
+                (openBtn as any)._openPath = planPath;
+            };
+            openBtn.addEventListener('click', openPlan);
+            openPlan();
         } else {
             openBtn.style.display = 'none';
         }
@@ -1517,13 +2045,14 @@ export const Messages = {
 
         acceptBtn.addEventListener('click', () => {
             disableAll();
-            acceptBtn.textContent = '✅ 已确认，执行中...';
+            acceptBtn.textContent = 'Confirmed, running...';
+            store.set('planExecutionActive', true);
             vscode.post({ type: 'planConfirm' });
         });
 
         rejectBtn.addEventListener('click', () => {
             disableAll();
-            rejectBtn.textContent = '❌ 已拒绝';
+            rejectBtn.textContent = 'Rejected';
             vscode.post({ type: 'planReject' });
         });
 
@@ -1531,18 +2060,33 @@ export const Messages = {
             const feedback = modifyInput.value.trim();
             if (!feedback) {
                 modifyInput.focus();
-                modifyInput.placeholder = '请输入修改建议后点击此按钮';
+                modifyInput.placeholder = 'Enter feedback before revising';
                 return;
             }
             disableAll();
-            modifyBtn.textContent = '📝 修改中...';
+            modifyBtn.textContent = 'Revising...';
             vscode.post({ type: 'planModify', feedback });
         });
 
-        // Allow Enter key to submit modification
         modifyInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !modifyBtn.disabled) {
                 modifyBtn.click();
+            }
+        });
+    },
+
+    handleFileOpenResult(msg: any): void {
+        const path = String(msg?.path || '');
+        const buttons = document.querySelectorAll<HTMLButtonElement>('.plan-open-btn');
+        buttons.forEach((btn) => {
+            if ((btn as any)._openPath !== path) return;
+            if (msg.ok) {
+                btn.textContent = 'Opened';
+                btn.disabled = true;
+            } else {
+                btn.textContent = 'Open in editor';
+                btn.disabled = false;
+                btn.title = String(msg.error || 'Open failed');
             }
         });
     },
@@ -1825,58 +2369,103 @@ export const Messages = {
 
     // ── Message Queue ──
 
+    formatQueueTitle(count: number): string {
+        return `${t('queue.waiting')} (${count})`;
+    },
+
+    localizeQueueDisplay(): void {
+        const inputArea = document.getElementById('input-area');
+        const container = inputArea?.querySelector('.msg-queue-container') as HTMLElement | null;
+        if (!container) return;
+        const items = container.querySelectorAll('.msg-queue-item');
+        const title = container.querySelector('.queue-title');
+        if (title) title.textContent = this.formatQueueTitle(items.length);
+        container.querySelectorAll<HTMLButtonElement>('.queue-item-edit').forEach(btn => {
+            btn.textContent = t('queue.edit');
+            btn.title = t('queue.edit');
+        });
+        container.querySelectorAll<HTMLButtonElement>('.queue-item-del').forEach(btn => {
+            btn.title = t('remove');
+            btn.setAttribute('aria-label', t('remove'));
+        });
+        container.querySelectorAll<HTMLElement>('.queue-img-badge').forEach(badge => {
+            const count = badge.getAttribute('data-count') || '';
+            badge.textContent = `+${count} ${t('queue.image.short')}`;
+        });
+    },
+
     showQueuedMessage(text: string, queueLength: number): void {
-        const messagesDiv = document.getElementById('messages')!;
-        let container = messagesDiv.querySelector('.msg-queue-container') as HTMLElement;
+        const inputArea = document.getElementById('input-area')!;
+        let container = inputArea.querySelector('.msg-queue-container') as HTMLElement;
 
         // Create container if not exists
         if (!container) {
             container = createElement('div', 'msg msg-queue-container');
             const header = createElement('div', 'msg-queue-header');
-            header.innerHTML = `<span class="queue-icon">⏳</span><span class="queue-title">排队中</span>`;
+            header.innerHTML = `<span class="queue-icon">Q</span><span class="queue-title">${escapeHtml(this.formatQueueTitle(queueLength))}</span>`;
             container.appendChild(header);
             const list = createElement('div', 'msg-queue-list');
             container.appendChild(list);
-            messagesDiv.appendChild(container);
+            inputArea.prepend(container);
         }
 
         // Add item to list
         const list = container.querySelector('.msg-queue-list')!;
         const idx = list.children.length;
         const item = createElement('div', 'msg-queue-item');
+        const images = store.get('queuedMsgs')[idx]?.images || null;
+        const imageBadge = images && images.length > 0 ? `<span class="queue-img-badge" data-count="${images.length}">+${images.length} ${escapeHtml(t('queue.image.short'))}</span>` : '';
         item.innerHTML = `<span class="queue-item-num">#${idx + 1}</span>` +
             `<span class="queue-item-text">${escapeHtml(text.length > 80 ? text.substring(0, 80) + '...' : text)}</span>` +
-            `<button class="queue-item-del" title="移除">✕</button>`;
-        // Delete button handler
-        item.querySelector('.queue-item-del')!.addEventListener('click', () => {
-            // Remove from store
-            const queued = store.get('queuedMsgs');
-            if (idx < queued.length) {
-                store.set('queuedMsgs', queued.filter((_: any, i: number) => i !== idx));
-            }
-            item.remove();
-            // Re-number remaining items
+            imageBadge +
+            `<button class="queue-item-edit" title="${escapeHtml(t('queue.edit'))}">${escapeHtml(t('queue.edit'))}</button>` +
+            `<button class="queue-item-del" title="${escapeHtml(t('remove'))}" aria-label="${escapeHtml(t('remove'))}">x</button>`;
+        const refreshQueueItems = () => {
             const items = list.querySelectorAll('.msg-queue-item');
             for (let i = 0; i < items.length; i++) {
                 const num = items[i].querySelector('.queue-item-num');
                 if (num) num.textContent = `#${i + 1}`;
             }
-            // Remove container if empty
+            const title = container.querySelector('.queue-title');
+            if (title) title.textContent = this.formatQueueTitle(items.length);
             if (items.length === 0) container.remove();
+        };
+        const getCurrentIndex = () => Array.from(list.children).indexOf(item);
+        item.querySelector('.queue-item-edit')!.addEventListener('click', () => {
+            const queued = store.get('queuedMsgs');
+            const currentIdx = getCurrentIndex();
+            const target = queued[currentIdx];
+            if (!target) return;
+            store.set('queuedMsgs', queued.filter((_: any, i: number) => i !== currentIdx));
+            bus.emit('editQueuedMessage', target.text, target.images || null);
+            item.remove();
+            refreshQueueItems();
+        });
+        // Delete button handler
+        item.querySelector('.queue-item-del')!.addEventListener('click', () => {
+            // Remove from store
+            const queued = store.get('queuedMsgs');
+            const currentIdx = getCurrentIndex();
+            if (currentIdx >= 0 && currentIdx < queued.length) {
+                store.set('queuedMsgs', queued.filter((_: any, i: number) => i !== currentIdx));
+            }
+            item.remove();
+            refreshQueueItems();
         });
         list.appendChild(item);
-        smartScroll(messagesDiv);
+        const title = container.querySelector('.queue-title');
+        if (title) title.textContent = this.formatQueueTitle(list.children.length);
     },
 
     updateQueueDisplay(remaining: number): void {
-        const messagesDiv = document.getElementById('messages')!;
-        const container = messagesDiv.querySelector('.msg-queue-container');
+        const inputArea = document.getElementById('input-area')!;
+        const container = inputArea.querySelector('.msg-queue-container');
         if (!container) return;
         if (remaining === 0) {
             container.remove();
         } else {
             const title = container.querySelector('.queue-title');
-            if (title) title.textContent = `排队中 (${remaining})`;
+            if (title) title.textContent = this.formatQueueTitle(remaining);
             // Remove first item (it was just processed)
             const list = container.querySelector('.msg-queue-list');
             if (list && list.children.length > 0) {
@@ -1893,8 +2482,8 @@ export const Messages = {
     },
 
     clearQueueDisplay(): void {
-        const messagesDiv = document.getElementById('messages')!;
-        const container = messagesDiv.querySelector('.msg-queue-container');
+        const inputArea = document.getElementById('input-area')!;
+        const container = inputArea.querySelector('.msg-queue-container');
         if (container) container.remove();
     },
 
@@ -1919,6 +2508,8 @@ export const Messages = {
     createAssistantMsg(): HTMLElement {
         const messagesDiv = document.getElementById('messages')!;
         const div = createElement('div', 'msg msg-assistant');
+        (div as any)._startedAt = Date.now();
+        (div as any)._startedTokenTotal = store.get('tokenUsage').total || 0;
         const sp = createElement('span', 'spinner');
         div.appendChild(sp);
         messagesDiv.appendChild(div);

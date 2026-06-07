@@ -183,6 +183,15 @@ function compressToolResult(content: string, maxChars: number): string {
     return truncated + `\n... (${removed} chars truncated to save context)`;
 }
 
+function compressReasoningContent(content: string, maxChars: number): string {
+    if (!content) return '';
+    const clean = content.replace(/\s+/g, ' ').trim();
+    if (clean.length <= maxChars) return clean;
+    const head = clean.slice(0, Math.floor(maxChars * 0.35));
+    const tail = clean.slice(-Math.floor(maxChars * 0.55));
+    return `[reasoning compacted for context]\n${head}\n...\n${tail}`;
+}
+
 /**
  * Compress messages in-place:
  * - Truncate large tool results
@@ -199,11 +208,13 @@ function compressMessages(messages: ChatMessage[], config: ContextConfig, keepRe
             }
         }
 
-        // Remove reasoning_content from old messages ONLY if they don't have tool_calls
-        // MiMo API requires full reasoning_content for messages with tool_calls
+        // Compact old reasoning. For messages with tool calls, keep the field present
+        // because some OpenAI-compatible APIs expect it in the replayed assistant message.
         const isRecent = i >= messages.length - keepRecent;
-        if (!isRecent && msg.reasoning_content && !msg.tool_calls?.length) {
-            (msg as any).reasoning_content = '[reasoning omitted for context]';
+        if (!isRecent && msg.reasoning_content) {
+            (msg as any).reasoning_content = msg.tool_calls?.length
+                ? compressReasoningContent(msg.reasoning_content, 900)
+                : '[reasoning omitted for context]';
         }
     }
 }

@@ -14,7 +14,7 @@ let settingsProvider: SettingsProvider;
 export function activate(context: vscode.ExtensionContext) {
     const config = loadConfig();
 
-    // Ensure ~/.mimo/ directory exists (for settings, skills, history, etc.)
+    // Ensure ~/.mimo/ directory exists
     const mimoHome = path.join(os.homedir(), '.mimo');
     if (!fs.existsSync(mimoHome)) {
         fs.mkdirSync(mimoHome, { recursive: true });
@@ -22,14 +22,12 @@ export function activate(context: vscode.ExtensionContext) {
 
     if (!config.apiKey) {
         vscode.window.showWarningMessage(
-            'MiMo: API key not set. Configure "mimo.apiKey" in settings or set MIMO_API_KEY environment variable.',
+            'MiMo: API key not set. Configure in Settings or set MIMO_API_KEY environment variable.',
         );
     }
 
-    // Create agent (with context for conversation persistence)
+    // Create agent synchronously (it's needed for commands)
     agent = new MiMoAgent(config, context.extensionPath, context);
-
-    // Create chat provider (manages WebviewPanel lifecycle)
     chatProvider = new ChatViewProvider(context.extensionUri, agent);
     settingsProvider = new SettingsProvider(context.extensionUri, agent);
 
@@ -42,7 +40,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(
         vscode.commands.registerCommand('mimo-agent.newChat', () => {
-            chatProvider.show(true); // forceNew = true: always create a new panel
+            chatProvider.show(true);
         }),
     );
 
@@ -125,8 +123,6 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {
-    // Cleanup MCP connections and browser
     agent?.dispose();
-    // Fire-and-forget browser cleanup (best-effort on deactivation)
     import('./browser').then(m => m.browserClose()).catch(() => {});
 }

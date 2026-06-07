@@ -27,10 +27,6 @@
   <strong>🇨🇳 中文</strong> | <a href="#-english">🇬🇧 English</a> | <a href="#-changelog">📋 Changelog</a>
 </p>
 
-<p align="center">
-  <img src="assets/readme-hero.svg" alt="MiMo AI coding assistant preview" width="920">
-</p>
-
 ---
 
 ## 🌟 推荐仓库
@@ -41,10 +37,6 @@
 [![Star](https://img.shields.io/badge/Star-支持%20MiMo-yellow?style=for-the-badge&logo=github)](https://github.com/YSP0Github/MIMO-Agent/stargazers)
 
 欢迎 Star、Fork 或提交 Issue。你的 Star 能帮助更多开发者发现 MiMo，也会鼓励项目持续改进。
-
-<p align="center">
-  <img src="assets/readme-workflow.svg" alt="MiMo reads context, uses tools, verifies work, and recovers tasks" width="920">
-</p>
 
 ---
 
@@ -140,7 +132,7 @@
 | `api.base_url` | API 端点地址 | `https://token-plan-cn.xiaomimimo.com/v1` |
 | `api.model` | 默认模型 | `mimo-v2.5-pro` |
 | `agent.max_tokens` | 最大 Token 数 | `8192` |
-| `agent.max_rounds` / `mimo.maxRounds` | 最大工具调用轮次 | `100` |
+| `agent.max_rounds` / `mimo.maxRounds` | 最大工具调用轮次，`0` 表示不限轮次 | `0` |
 | `agent.temperature` | 温度（越高越随机） | `0.7` |
 | `agent.enable_thinking` / `mimo.enableThinking` | 是否启用 MiMo thinking | `false` |
 | `sandbox.mode` | 沙箱模式 (`safe` / `docker`) | `safe` |
@@ -237,10 +229,6 @@ MIT License
 
 ---
 
-<p align="center">
-  <img src="assets/readme-hero.svg" alt="MiMo AI coding assistant preview" width="920">
-</p>
-
 ## 🌟 Recommended Repository
 
 If you want an AI coding assistant that can read code, edit files, run commands, review changes, and recover interrupted tasks inside VS Code, this repository is worth watching:
@@ -249,10 +237,6 @@ If you want an AI coding assistant that can read code, edit files, run commands,
 [![Star](https://img.shields.io/badge/Star-Support%20MiMo-yellow?style=for-the-badge&logo=github)](https://github.com/YSP0Github/MIMO-Agent/stargazers)
 
 Stars, forks, and issues are welcome. A Star helps more developers discover MiMo and supports ongoing improvements.
-
-<p align="center">
-  <img src="assets/readme-workflow.svg" alt="MiMo reads context, uses tools, verifies work, and recovers tasks" width="920">
-</p>
 
 ---
 
@@ -348,7 +332,7 @@ Press `Ctrl+Shift+P` and type `MiMo: New Chat Window`, or use `MiMo: Open Chat` 
 | `api.base_url` | API endpoint URL | `https://token-plan-cn.xiaomimimo.com/v1` |
 | `api.model` | Default model | `mimo-v2.5-pro` |
 | `agent.max_tokens` | Max output tokens | `8192` |
-| `agent.max_rounds` / `mimo.maxRounds` | Max tool-calling rounds | `100` |
+| `agent.max_rounds` / `mimo.maxRounds` | Max tool-calling rounds; `0` means unlimited | `0` |
 | `agent.temperature` | Temperature (higher = more random) | `0.7` |
 | `agent.enable_thinking` / `mimo.enableThinking` | Enable MiMo thinking mode | `false` |
 | `sandbox.mode` | Sandbox mode (`safe` / `docker`) | `safe` |
@@ -423,6 +407,60 @@ MIT License
 <p align="center">
   <a href="#">🇨🇳 中文</a> | <a href="#-english">🇬🇧 English</a> | <strong>📋 Changelog</strong>
 </p>
+
+### v1.5.2
+- 🔧 修复发布包缺少运行时依赖导致 `command 'mimo-agent.chat' not found` 的问题 / Fixed missing runtime dependencies in published VSIX
+- ⚡ 推理模式切换不再在聊天区显示多余的确认消息 / Reasoning mode switch no longer shows redundant confirmation
+
+### v1.5.0
+- ✨ 新增自动补全门控，复杂任务必须有工作区证据或验证状态才能结束 / Added auto completion gate for complex tasks
+- 📊 新增轻量级 agent trace 日志（`~/.mimo/traces/*.jsonl`）/ Added agent trace logging
+- 🔧 新增 provider profile 存储，支持多 API 配置切换 / Added provider profile storage
+- ⚙️ 设置界面支持 active provider profile 和快速预设（MiMo、DeepSeek、OpenAI）/ Settings UI supports provider profiles with quick presets
+- 🔒 强化系统提示补全契约：编辑后验证、报告验证状态 / Strengthened system prompt completion contract
+
+### v1.4.9
+- ✨ 新增依赖安装策略（项目依赖自动安装、系统软件需确认）/ Added dependency install policy
+- ⚙️ 设置界面新增依赖安装控制项 / Added dependency install controls to settings UI
+- 🔧 安装超时状态清晰报告 / Clear timeout reporting for installs
+- 🌍 启动时刷新 webview 默认语言，中文界面即时生效 / Refreshed default webview language on startup
+
+### v1.4.8
+- 🔧 强化连接恢复、移除预工具轮次超时、过滤泄露的 tool-call 标签 / Hardened connection recovery
+- ⚡ 收紧 Auto 路由、上下文压缩和重试节奏，减少卡顿与假死感 / Tightened Auto routing and context compression
+- 🌍 修复中文模式下输入框、模式切换与历史按钮文案跟随问题 / Fixed Chinese mode UI text issues
+- 📝 重写历史记录展示路径，直接渲染最终 transcript / Rewrote history replay to render final transcript directly
+- 🧵 精简 Processed 折叠头，仅保留处理时间与 token 使用量 / Simplified Processed header
+- 🧠 为长任务新增滚动上下文自动压缩记忆 / Added rolling context compression for long tasks
+- 🧭 修复 Infinite 模式误用 Auto 短流程提示的问题 / Fixed Infinite mode misusing Auto prompt
+- 🔍 为 Infinite 增加复杂任务完成门，缺少探索或验证证据时继续推进 / Added completion gate for Infinite mode
+
+### v1.4.7
+- 🌍 修复中文模式下模型切换提示未跟随语言的问题 / Fixed model switch prompt not following language
+
+### v1.4.6
+- 🌍 修复中文模式下模型切换提示仍显示英文的问题 / Fixed model switch prompt showing English in Chinese mode
+
+### v1.4.5
+- 🔧 修复历史记录回放时思考状态无法收口、一直转圈的问题 / Fixed thinking state stuck spinning during history replay
+- ⚡ 优化历史消息回放的 done 事件补齐逻辑 / Improved done event补全 for history replay
+
+### v1.4.4
+- 🌍 补全模式国际化文案，新增 Infinite 模式中文显示 / Completed mode i18n, added Infinite mode Chinese text
+- 🔗 统一语言切换按钮文本 / Unified language switch button text
+
+### v1.4.3
+- 🔧 移除冗余 activationEvents / Removed redundant activationEvents
+- ⚡ 优化扩展激活性能 / Optimized extension activation performance
+
+### v1.4.2
+- 🔧 修复推理循环恢复机制 / Fixed reasoning loop recovery mechanism
+- 🛡️ 新增三级循环恢复 / Added three-tier loop recovery
+- 🌍 修复设置页面多语言 / Fixed settings page multi-language support
+
+### v1.4.1
+- 🔧 修复图标不显示问题 / Fixed icon not displaying issue
+- 🔗 更新仓库链接 / Updated repository links
 
 ### v1.4.0
 - ✨ 设置界面支持多语言 / Settings page supports multi-language

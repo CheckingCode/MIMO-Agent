@@ -205,6 +205,7 @@ export class HistoryManager {
             if (m.role === 'assistant') {
                 copy.reasoning_content = m.reasoning_content || '';
                 if (m.tool_calls) copy.tool_calls = m.tool_calls;
+                if (m._elapsedSec !== undefined) copy._elapsedSec = m._elapsedSec;
             }
 
             if (m.role === 'tool') {

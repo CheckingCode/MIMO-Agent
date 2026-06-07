@@ -105,6 +105,10 @@ export const vscode = {
         api.postMessage({ type: 'saveSettings', settings });
     },
 
+    setReasoningEffort(reasoning_effort: 'turbo' | 'fast' | 'balanced' | 'deep' | 'max'): void {
+        api.postMessage({ type: 'saveSettings', settings: { reasoning_effort }, silent: true });
+    },
+
     skillList(): void {
         api.postMessage({ type: 'skillList' });
     },

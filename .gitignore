@@ -1,4 +1,7 @@
 out/
 node_modules/
 *.vsix
+releases/
 .vscode-test/
+pptx_extracted/
+html_output/

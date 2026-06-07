@@ -1,5 +1,5 @@
-/**
- * MiMo Agent Webview — Entry Point
+﻿/**
+ * MiMo Agent Webview 閳?Entry Point
  *
  * Initializes all components and registers the message handler
  * that dispatches host messages to the store and event bus.
@@ -14,11 +14,126 @@ import { InputArea } from './components/input';
 import { Panels } from './components/panels';
 import { CommandPalette } from './components/commandPalette';
 import { ImageUpload } from './components/imageUpload';
-import { setLang, getWelcomePair } from './core/i18n';
+import { setLang, getWelcomePair, t } from './core/i18n';
 
 let activeReplayId = 0;
 
-// ── Initialize welcome text ──
+type QueuedWebviewMessage = Record<string, any> & { type: string };
+
+class RenderQueue {
+    private timer: ReturnType<typeof setTimeout> | undefined;
+    private frame = 0;
+    private reasoningBuffer = '';
+    private latestStreamHtml: string | undefined;
+    private latestStatus: string | undefined;
+    private pending: QueuedWebviewMessage[] = [];
+
+    enqueue(msg: QueuedWebviewMessage): void {
+        switch (msg.type) {
+            case 'reasoning':
+                this.reasoningBuffer += msg.token || '';
+                break;
+            case 'streamHtml':
+                this.latestStreamHtml = msg.html || '';
+                break;
+            case 'assistantUpdate':
+            case 'finalAnswer':
+                this.latestStreamHtml = undefined;
+                this.pending.push(msg);
+                break;
+            case 'status':
+                this.latestStatus = msg.text || '';
+                break;
+            case 'workflowTaskStart':
+            case 'workflowTaskEnd':
+            case 'workflowPhaseStart':
+            case 'workflowPhaseEnd':
+            case 'workflowStart':
+            case 'workflowEnd':
+            case 'toolCallStart':
+            case 'toolCallEnd':
+                this.pending.push(msg);
+                break;
+            default:
+                this.flush();
+                this.dispatch(msg);
+                return;
+        }
+        this.schedule();
+    }
+
+    flush(): void {
+        if (this.timer) {
+            clearTimeout(this.timer);
+            this.timer = undefined;
+        }
+        if (this.frame) {
+            cancelAnimationFrame(this.frame);
+            this.frame = 0;
+        }
+
+        const reasoning = this.reasoningBuffer;
+        const streamHtml = this.latestStreamHtml;
+        const status = this.latestStatus;
+        const events = this.pending.splice(0);
+        this.reasoningBuffer = '';
+        this.latestStreamHtml = undefined;
+        this.latestStatus = undefined;
+
+        if (reasoning) bus.emit('reasoning', reasoning);
+        for (const evt of events) this.dispatch(evt);
+        if (streamHtml !== undefined) bus.emit('streamHtml', streamHtml);
+        if (status !== undefined) {
+            store.set('statusText', status);
+            const el = document.getElementById('status-text');
+            if (el) el.textContent = status;
+        }
+        bus.emit('renderFlush');
+    }
+
+    private schedule(): void {
+        if (this.timer || this.frame) return;
+        this.timer = setTimeout(() => {
+            this.timer = undefined;
+            this.frame = requestAnimationFrame(() => {
+                this.frame = 0;
+                this.flush();
+            });
+        }, 280);
+    }
+
+    private dispatch(msg: QueuedWebviewMessage): void {
+        switch (msg.type) {
+            case 'userMessage': bus.emit('userMessage', msg.text, msg.images); break;
+            case 'streamHtml': bus.emit('streamHtml', msg.html); break;
+            case 'assistantUpdate': bus.emit('assistantUpdate', msg.html); break;
+            case 'finalAnswer': bus.emit('finalAnswer', msg.html); break;
+            case 'reasoning': bus.emit('reasoning', msg.token); break;
+            case 'toolCallStart': bus.emit('toolCallStart', msg.name, msg.args); break;
+            case 'toolCallEnd': bus.emit('toolCallEnd', msg.name, msg.result, msg.isError, msg.elapsed); break;
+            case 'roundStart': bus.emit('roundStart', msg.round); break;
+            case 'done': bus.emit('done', msg.response, msg.elapsedSec); break;
+            case 'error': bus.emit('error', msg.error); break;
+            case 'system': bus.emit('system', msg.text); break;
+            case 'systemI18n': bus.emit('system', t(msg.key)); break;
+            case 'clearMessages': bus.emit('clearMessages'); break;
+            case 'busy': bus.emit('busy'); break;
+            case 'idle': bus.emit('idle'); break;
+            case 'workflowStart': bus.emit('workflowStart', msg.totalPhases, msg.totalTasks); break;
+            case 'workflowPhaseStart': bus.emit('workflowPhaseStart', msg.phaseIndex, msg.title, msg.mode, msg.taskCount); break;
+            case 'workflowTaskStart': bus.emit('workflowTaskStart', msg.phaseIndex, msg.taskIndex, msg.label); break;
+            case 'workflowTaskEnd': bus.emit('workflowTaskEnd', msg.phaseIndex, msg.taskIndex, msg.result); break;
+            case 'workflowPhaseEnd': bus.emit('workflowPhaseEnd', msg.phaseIndex, msg.result); break;
+            case 'workflowEnd': bus.emit('workflowEnd', msg.result); break;
+            default:
+                bus.emit(msg.type, msg);
+        }
+    }
+}
+
+const renderQueue = new RenderQueue();
+
+// 閳光偓閳光偓 Initialize welcome text 閳光偓閳光偓
 function initWelcome(): void {
     const desc = document.querySelector('.welcome-desc');
     const hint = document.querySelector('.welcome-hint');
@@ -30,7 +145,7 @@ function initWelcome(): void {
     hint.innerHTML = pair.hint;
 }
 
-// ── Initialize components ──
+// 閳光偓閳光偓 Initialize components 閳光偓閳光偓
 
 function init(): void {
     console.log('[MiMo] initializing components...');
@@ -41,18 +156,21 @@ function init(): void {
     Panels.mount();
     CommandPalette.mount();
     ImageUpload.mount();
+    setLang('zh');
+    const langBtn = document.getElementById('btn-lang');
+    if (langBtn) langBtn.textContent = 'EN';
 
-    // ── Initialize welcome text with random variant ──
+    // 閳光偓閳光偓 Initialize welcome text with random variant 閳光偓閳光偓
     initWelcome();
 
-    // ── Register message handler from extension host ──
+    // 閳光偓閳光偓 Register message handler from extension host 閳光偓閳光偓
 
     window.addEventListener('message', (e: MessageEvent) => {
         const msg = e.data;
         if (!msg || !msg.type) return;
 
         switch (msg.type) {
-            // ── Tab management ──
+            // 閳光偓閳光偓 Tab management 閳光偓閳光偓
             case 'tabList':
                 store.set('tabs', msg.tabs);
                 store.set('activeTabId', msg.activeId);
@@ -63,44 +181,64 @@ function init(): void {
                 // No-op for now
                 break;
 
-            // ── Messages ──
+            // 閳光偓閳光偓 Messages 閳光偓閳光偓
             case 'userMessage':
-                bus.emit('userMessage', msg.text, msg.images);
+                renderQueue.enqueue(msg);
                 break;
 
             case 'streamHtml':
-                bus.emit('streamHtml', msg.html);
+                renderQueue.enqueue(msg);
+                break;
+
+            case 'assistantUpdate':
+                renderQueue.enqueue(msg);
+                break;
+
+            case 'finalAnswer':
+                renderQueue.enqueue(msg);
+                break;
+
+            case 'streamSegmentEnd':
+                renderQueue.flush();
+                bus.emit('streamSegmentEnd');
                 break;
 
             case 'reasoning':
-                bus.emit('reasoning', msg.token);
+                renderQueue.enqueue(msg);
                 break;
 
             case 'toolCallStart':
-                bus.emit('toolCallStart', msg.name, msg.args);
+                renderQueue.enqueue(msg);
                 break;
 
             case 'toolCallEnd':
-                bus.emit('toolCallEnd', msg.name, msg.result, msg.isError, msg.elapsed);
+                renderQueue.enqueue(msg);
                 break;
 
             case 'roundStart':
-                bus.emit('roundStart', msg.round);
+                renderQueue.enqueue(msg);
                 break;
 
             case 'done':
-                bus.emit('done', msg.response);
+                renderQueue.flush();
+                bus.emit('done', msg.response, msg.elapsedSec);
                 break;
 
             case 'error':
+                renderQueue.flush();
                 bus.emit('error', msg.error);
                 break;
 
             case 'system':
-                bus.emit('system', msg.text);
+                renderQueue.enqueue(msg);
+                break;
+
+            case 'systemI18n':
+                renderQueue.enqueue(msg);
                 break;
 
             case 'clearMessages':
+                renderQueue.flush();
                 bus.emit('clearMessages');
                 break;
 
@@ -108,19 +246,28 @@ function init(): void {
                 activeReplayId = msg.replayId || activeReplayId + 1;
                 break;
 
+            case 'historyRender':
+                if (msg.replayId && msg.replayId !== activeReplayId) break;
+                bus.emit('historyRender', msg.turns || []);
+                break;
+
+            case 'fileOpenResult':
+                bus.emit('fileOpenResult', msg);
+                break;
+
             case 'replayBatch':
                 if (msg.replayId && msg.replayId !== activeReplayId) break;
                 // Three-phase replay for correct ordering:
-                // Phase 1: Process lightweight events (tool cards, markers, reasoning) — chunked with yields
-                // Phase 2: Process heavy streamHtml events (pre-rendered markdown) — one per frame
-                // Phase 3: Fire 'done' events — AFTER all streamHtml, so streamingMsg is intact
+                // Phase 1: Process lightweight events (tool cards, markers, reasoning) 閳?chunked with yields
+                // Phase 2: Process heavy streamHtml events (pre-rendered markdown) 閳?one per frame
+                // Phase 3: Fire 'done' events 閳?AFTER all streamHtml, so streamingMsg is intact
                 if (msg.events && Array.isArray(msg.events)) {
                     const lightEvents: any[] = [];
-                    const heavyEvents: any[] = [];
+                    let latestHeavyEvent: any | undefined;
                     const doneEvents: any[] = [];
                     for (const evt of msg.events) {
                         if (evt.type === 'streamHtml') {
-                            heavyEvents.push(evt);
+                            latestHeavyEvent = evt;
                         } else if (evt.type === 'done') {
                             doneEvents.push(evt);
                         } else {
@@ -128,7 +275,7 @@ function init(): void {
                         }
                     }
 
-                    // Phase 1: Lightweight events — chunked to avoid blocking UI
+                    // Phase 1: Lightweight events 閳?chunked to avoid blocking UI
                     // Process 15 events per frame (each triggers DOM manipulation)
                     const CHUNK_SIZE = 15;
                     let lightIdx = 0;
@@ -136,49 +283,34 @@ function init(): void {
                         if (msg.replayId && msg.replayId !== activeReplayId) return;
                         const end = Math.min(lightIdx + CHUNK_SIZE, lightEvents.length);
                         for (let i = lightIdx; i < end; i++) {
-                            const evt = lightEvents[i];
-                            switch (evt.type) {
-                                case 'userMessage': bus.emit('userMessage', evt.text, evt.images); break;
-                                case 'reasoning': bus.emit('reasoning', evt.token); break;
-                                case 'toolCallStart': bus.emit('toolCallStart', evt.name, evt.args); break;
-                                case 'toolCallEnd': bus.emit('toolCallEnd', evt.name, evt.result, evt.isError, evt.elapsed); break;
-                                case 'roundStart': bus.emit('roundStart', evt.round); break;
-                            }
+                            renderQueue.enqueue(lightEvents[i]);
                         }
+                        renderQueue.flush();
                         lightIdx = end;
                         if (lightIdx < lightEvents.length) {
                             requestAnimationFrame(processLightChunk);
                         } else {
-                            // Phase 1 done — start Phase 2
+                            // Phase 1 done 閳?start Phase 2
                             processHeavyPhase2();
                         }
                     };
 
-                    // Phase 2: Heavy streamHtml events — one per frame
+                    // Phase 2: Heavy streamHtml events 閳?one per frame
                     const processHeavyPhase2 = () => {
-                        if (heavyEvents.length === 0) {
-                            fireDone();
-                            return;
+                        if (msg.replayId && msg.replayId !== activeReplayId) return;
+                        if (latestHeavyEvent) {
+                            renderQueue.enqueue(latestHeavyEvent);
+                            renderQueue.flush();
                         }
-                        let hIdx = 0;
-                        const processOne = () => {
-                            if (msg.replayId && msg.replayId !== activeReplayId) return;
-                            if (hIdx >= heavyEvents.length) {
-                                fireDone();
-                                return;
-                            }
-                            bus.emit('streamHtml', heavyEvents[hIdx].html);
-                            hIdx++;
-                            requestAnimationFrame(processOne);
-                        };
-                        requestAnimationFrame(processOne);
+                        fireDone();
                     };
 
                     // Phase 3: Fire done events
                     const fireDone = () => {
                         if (msg.replayId && msg.replayId !== activeReplayId) return;
+                        renderQueue.flush();
                         for (const evt of doneEvents) {
-                            bus.emit('done', evt.response);
+                            bus.emit('done', evt.response, evt.elapsedSec);
                         }
                     };
 
@@ -190,7 +322,7 @@ function init(): void {
                 }
                 break;
 
-            // ── Status ──
+            // 閳光偓閳光偓 Status 閳光偓閳光偓
             case 'busy':
                 bus.emit('busy');
                 break;
@@ -200,11 +332,10 @@ function init(): void {
                 break;
 
             case 'status':
-                store.set('statusText', msg.text);
-                document.getElementById('status-text')!.textContent = msg.text;
+                renderQueue.enqueue(msg);
                 break;
 
-            // ── Model ──
+            // 閳光偓閳光偓 Model 閳光偓閳光偓
             case 'modelList':
                 store.set('models', msg.models || []);
                 store.set('currentModel', msg.current);
@@ -226,13 +357,13 @@ function init(): void {
                 break;
 
             case 'modelSwitched':
-                // Auto-switched model (e.g., pro → v2.5 for vision)
+                // Auto-switched model for chat or image support.
                 store.set('currentModel', msg.model);
                 bus.emit('modelList', store.get('models'), msg.model);
-                bus.emit('system', `Model auto-switched to ${msg.model} for image support`);
+                bus.emit('system', `${t('model.switched')} ${msg.model} ${t(msg.reason === 'image' ? 'model.image.support' : 'model.chat.support')}`);
                 break;
 
-            // ── History ──
+            // 閳光偓閳光偓 History 閳光偓閳光偓
             case 'historyList':
                 store.set('historyItems', msg.items || []);
                 bus.emit('historyList', msg.items || []);
@@ -247,18 +378,18 @@ function init(): void {
                 bus.emit('exportResult', msg.format, msg.content, msg.title);
                 break;
 
-            // ── Settings ──
+            // 閳光偓閳光偓 Settings 閳光偓閳光偓
             case 'settingsData':
                 store.set('settingsData', msg.settings || {});
                 bus.emit('settingsData', msg.settings || {});
                 break;
 
-            // ── Skills ──
+            // 閳光偓閳光偓 Skills 閳光偓閳光偓
             case 'skillList':
                 bus.emit('skillList', msg.skills || []);
                 break;
 
-            // ── Token Usage ──
+            // 閳光偓閳光偓 Token Usage 閳光偓閳光偓
             case 'tokenUsage':
                 bus.emit('tokenUsage', msg.usage);
                 break;
@@ -267,7 +398,7 @@ function init(): void {
                 bus.emit('conversationUsage', msg.usage);
                 break;
 
-            // ── Edit Preview ──
+            // 閳光偓閳光偓 Edit Preview 閳光偓閳光偓
             case 'editPreview':
                 bus.emit('editPreview', msg.previewId, msg.path, msg.oldText, msg.newText, msg.matchCount);
                 break;
@@ -280,27 +411,27 @@ function init(): void {
                 bus.emit('askUser', msg.previewId, msg.question, msg.options);
                 break;
 
-            // ── Workflow ──
+            // 閳光偓閳光偓 Workflow 閳光偓閳光偓
             case 'workflowStart':
-                bus.emit('workflowStart', msg.totalPhases, msg.totalTasks);
+                renderQueue.enqueue(msg);
                 break;
             case 'workflowPhaseStart':
-                bus.emit('workflowPhaseStart', msg.phaseIndex, msg.title, msg.mode, msg.taskCount);
+                renderQueue.enqueue(msg);
                 break;
             case 'workflowTaskStart':
-                bus.emit('workflowTaskStart', msg.phaseIndex, msg.taskIndex, msg.label);
+                renderQueue.enqueue(msg);
                 break;
             case 'workflowTaskEnd':
-                bus.emit('workflowTaskEnd', msg.phaseIndex, msg.taskIndex, msg.result);
+                renderQueue.enqueue(msg);
                 break;
             case 'workflowPhaseEnd':
-                bus.emit('workflowPhaseEnd', msg.phaseIndex, msg.result);
+                renderQueue.enqueue(msg);
                 break;
             case 'workflowEnd':
-                bus.emit('workflowEnd', msg.result);
+                renderQueue.enqueue(msg);
                 break;
 
-            // ── Adversarial Mode ──
+            // 閳光偓閳光偓 Adversarial Mode 閳光偓閳光偓
             case 'adversarialTurn':
                 bus.emit('adversarialTurn', msg.persona, msg.name, msg.icon, msg.phase, msg.content, msg.iteration);
                 break;
@@ -311,7 +442,7 @@ function init(): void {
                 bus.emit('adversarialToolEnd', msg.persona, msg.toolName, msg.result, msg.isError, msg.elapsed);
                 break;
 
-            // ── Message Queue ──
+            // 閳光偓閳光偓 Message Queue 閳光偓閳光偓
             case 'messageQueued':
                 bus.emit('messageQueued', msg.text, msg.queueLength);
                 break;
@@ -322,7 +453,7 @@ function init(): void {
                 bus.emit('clearQueue');
                 break;
 
-            // ── Plan Mode ──
+            // 閳光偓閳光偓 Plan Mode 閳光偓閳光偓
             case 'planReady':
                 bus.emit('planReady', msg.planContent, msg.planPath);
                 break;
@@ -334,8 +465,14 @@ function init(): void {
                 setLang(msg.lang);
                 // Update lang toggle button text
                 const langBtn = document.getElementById('btn-lang');
-                if (langBtn) langBtn.textContent = msg.lang === 'zh' ? 'EN' : 'ZH';
+                if (langBtn) langBtn.textContent = msg.lang === 'zh' ? 'EN' : '中';
+                bus.emit('langChanged');
                 break;
+            case 'modeSwitched': {
+                const key = `mode.${msg.mode}.desc`;
+                bus.emit('system', t(key));
+                break;
+            }
             case 'voiceResult':
                 // Stop recording animation
                 const voiceBtn2 = document.getElementById('voice-btn');
@@ -359,12 +496,12 @@ function init(): void {
         }
     });
 
-    // ── Signal ready to extension host ──
+    // 閳光偓閳光偓 Signal ready to extension host 閳光偓閳光偓
     console.log('[MiMo] sending ready...');
     vscode.ready();
 }
 
-// ── Bootstrap with error handling ──
+// 閳光偓閳光偓 Bootstrap with error handling 閳光偓閳光偓
 
 try {
     init();

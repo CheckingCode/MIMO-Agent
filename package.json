@@ -2,8 +2,9 @@
   "name": "mimo-agent",
   "displayName": "MiMo",
   "description": "AI coding agent powered by Xiaomi MiMo LLM",
-  "version": "1.4.0",
+  "version": "1.5.3",
   "publisher": "mimo-agent",
+  "icon": "assets/mimo-agent-icon.png",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -29,15 +30,23 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-username/mimo-agent-vscode"
+    "url": "https://github.com/YSP0Github/MIMO-Agent"
   },
   "bugs": {
-    "url": "https://github.com/your-username/mimo-agent-vscode/issues"
+    "url": "https://github.com/YSP0Github/MIMO-Agent/issues"
   },
-  "homepage": "https://github.com/your-username/mimo-agent-vscode#readme",
+  "homepage": "https://github.com/YSP0Github/MIMO-Agent#readme",
   "license": "MIT",
-  "activationEvents": [],
   "main": "./out/extension.js",
+  "activationEvents": [
+    "onCommand:mimo-agent.chat",
+    "onCommand:mimo-agent.clear",
+    "onCommand:mimo-agent.newChat",
+    "onCommand:mimo-agent.settings",
+    "onCommand:mimo-agent.explain",
+    "onCommand:mimo-agent.review",
+    "onCommand:mimo-agent.refactor"
+  ],
   "contributes": {
     "commands": [
       {
@@ -155,8 +164,72 @@
         },
         "mimo.maxRounds": {
           "type": "number",
-          "default": 100,
-          "description": "Max tool-calling rounds"
+          "default": 0,
+          "description": "Max tool-calling rounds. Use 0 for unlimited; stall and loop guards still apply."
+        },
+        "mimo.context.autoCompress": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically compress older conversation context into a concise summary before the context window is exhausted"
+        },
+        "mimo.context.summarizeAtPercent": {
+          "type": "number",
+          "default": 70,
+          "minimum": 30,
+          "maximum": 95,
+          "description": "Context usage percentage that triggers automatic summarization"
+        },
+        "mimo.context.summarizeAtMessages": {
+          "type": "number",
+          "default": 48,
+          "minimum": 16,
+          "maximum": 200,
+          "description": "Message count that can trigger rolling summarization for long autonomous runs"
+        },
+        "mimo.context.keepRecentMessages": {
+          "type": "number",
+          "default": 18,
+          "minimum": 8,
+          "maximum": 80,
+          "description": "Number of recent raw messages kept after automatic context compression"
+        },
+        "mimo.context.maxSummaryTokens": {
+          "type": "number",
+          "default": 1200,
+          "minimum": 400,
+          "maximum": 4000,
+          "description": "Maximum output tokens for the rolling context summary"
+        },
+        "mimo.dependencyInstall.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable dependency install policy for execute_command"
+        },
+        "mimo.dependencyInstall.projectMode": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "confirm",
+            "disabled"
+          ],
+          "description": "How MiMo handles project dependency installs such as npm install or pip install"
+        },
+        "mimo.dependencyInstall.systemMode": {
+          "type": "string",
+          "default": "confirm",
+          "enum": [
+            "confirm",
+            "disabled"
+          ],
+          "description": "How MiMo handles system software installs such as winget install, choco install, brew install, or apt install"
+        },
+        "mimo.dependencyInstall.longTimeoutSec": {
+          "type": "number",
+          "default": 600,
+          "minimum": 60,
+          "maximum": 3600,
+          "description": "Timeout in seconds for recognized dependency installation commands"
         },
         "mimo.adversarial.maxIterations": {
           "type": "number",

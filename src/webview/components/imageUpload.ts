@@ -85,15 +85,13 @@ export const ImageUpload = {
             store.set('images', []);
             this.renderPreviews();
         });
+        bus.on('imagesChanged', () => {
+            this.renderPreviews();
+        });
 
         // Model capabilities
         bus.on('modelCaps', (caps: { vision: boolean }) => {
             store.set('visionEnabled', caps.vision);
-            if (!caps.vision && store.get('images').length > 0) {
-                store.set('images', []);
-                this.renderPreviews();
-                bus.emit('system', 'Image input disabled: current model does not support vision');
-            }
         });
     },
 

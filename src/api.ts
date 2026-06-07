@@ -12,6 +12,8 @@ export interface ChatMessage {
     _toolName?: string;
     /** Replay metadata — elapsed seconds for history display */
     _toolElapsed?: number;
+    /** Replay metadata - wall-clock elapsed seconds for a user turn */
+    _elapsedSec?: number;
 }
 
 export interface ContentPart {
@@ -63,6 +65,41 @@ function createAbortError(message = 'Aborted'): Error {
     const error = new Error(message);
     error.name = 'AbortError';
     return error;
+}
+
+function parseRetryAfterMs(message: string): number | null {
+    const match = message.match(/retry-after[:\s]+(\d+)/i);
+    if (!match) return null;
+    return Math.max(0, Number(match[1]) * 1000);
+}
+
+function isRetryableStreamError(error: any): boolean {
+    const message = String(error?.message || error || '');
+    if (/AbortError|Aborted/i.test(error?.name || message)) return false;
+    if (/\b(408|409|425|429|500|502|503|504)\b/.test(message)) return true;
+    return /Request timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|socket hang up|fetch failed|unexpected end of data|aborted before complete/i.test(message);
+}
+
+function retryDelayMs(error: any, attempt: number): number {
+    const retryAfter = parseRetryAfterMs(String(error?.message || ''));
+    if (retryAfter !== null) return Math.min(retryAfter, 30_000);
+    const base = Math.min(1_500 * Math.pow(2, attempt), 15_000);
+    const jitter = Math.floor(Math.random() * 750);
+    return base + jitter;
+}
+
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+        if (signal?.aborted) {
+            reject(createAbortError());
+            return;
+        }
+        const timer = setTimeout(resolve, ms);
+        signal?.addEventListener('abort', () => {
+            clearTimeout(timer);
+            reject(createAbortError());
+        }, { once: true });
+    });
 }
 
 /**
@@ -147,7 +184,7 @@ export class MiMoAPI {
         callbacks: StreamCallbacks,
         signal?: AbortSignal,
     ): Promise<{ content: string; toolCalls: ToolCall[]; reasoningContent: string; usage: TokenUsage | null }> {
-        const maxRetries = 3;
+        const maxRetries = 4;
         let lastError: Error | null = null;
 
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -155,15 +192,12 @@ export class MiMoAPI {
                 return await this.doChatCompletionsStream(params, callbacks, signal);
             } catch (e: any) {
                 lastError = e;
-                // Retry on 429 (rate limit), 5xx (server errors), and 400 with truncation
-                const isRetryable = e.message?.includes('429') || /\b5\d{2}\b/.test(e.message || '') || e.message?.includes('unexpected end of data');
-                if (!isRetryable || signal?.aborted || attempt >= maxRetries) {
+                if (!isRetryableStreamError(e) || signal?.aborted || attempt >= maxRetries) {
                     throw e;
                 }
-                // Exponential backoff: 2s, 4s, 8s
-                const delay = Math.min(2000 * Math.pow(2, attempt), 15000);
-                callbacks.onToken?.(`\n[Rate limited, retrying in ${delay / 1000}s...]\n`);
-                await new Promise(r => setTimeout(r, delay));
+                const delay = retryDelayMs(e, attempt);
+                callbacks.onReasoning?.(`\n[Connection recovery ${attempt + 1}/${maxRetries}: ${String(e.message || e).slice(0, 120)}. Retrying in ${(delay / 1000).toFixed(1)}s.]\n`);
+                await abortableDelay(delay, signal);
             }
         }
         throw lastError || new Error('Max retries exceeded');

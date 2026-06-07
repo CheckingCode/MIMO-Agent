@@ -5,6 +5,17 @@ import * as os from 'os';
 import { SandboxConfig, DEFAULT_SANDBOX_CONFIG } from './sandbox';
 import { McpServerConfig } from './mcp';
 
+const MAX_MODEL_TOKENS = 131072;
+
+type ProviderProfileSetting = {
+    id: string;
+    name: string;
+    base_url: string;
+    model: string;
+    api_key: string;
+    models: string[];
+};
+
 export interface MiMoConfig {
     apiKey: string;
     baseUrl: string;
@@ -15,6 +26,7 @@ export interface MiMoConfig {
     temperature: number;
     topP: number;
     enableThinking: boolean;
+    reasoningEffort: 'turbo' | 'fast' | 'balanced' | 'deep' | 'max';
     maxOutputLen: number;
     commandTimeout: number;
     workspace: string;
@@ -26,6 +38,30 @@ export interface MiMoConfig {
         reviewDimensions: string[];
         enableVerification: boolean;
         convergenceThreshold: number;
+    };
+    infinite: {
+        maxRounds: number;
+        hardMultiplier: number;
+        stallLimit: number;
+    };
+    context: {
+        autoCompress: boolean;
+        summarizeAtPercent: number;
+        summarizeAtMessages: number;
+        keepRecentMessages: number;
+        maxSummaryTokens: number;
+    };
+    memory: {
+        enabled: boolean;
+        learnFromExplicitPreferences: boolean;
+        maxItems: number;
+        maxInjected: number;
+    };
+    dependencyInstall: {
+        enabled: boolean;
+        projectMode: 'auto' | 'confirm' | 'disabled';
+        systemMode: 'confirm' | 'disabled';
+        longTimeoutSec: number;
     };
     /** Raw settings from ~/.mimo/settings.json (for hooks, etc.) */
     settings: Record<string, any>;
@@ -65,17 +101,27 @@ export function loadConfig(): MiMoConfig {
         || process.env.OPENAI_MODEL
         || cfg.get<string>('model')
         || 'mimo-v2.5-pro';
+    const providerProfiles = sanitizeProviderProfiles(settings?.api?.provider_profiles);
+    const activeProviderProfile = sanitizeString(settings?.api?.active_provider_profile, 80)
+        || inferActiveProviderProfile(settings?.api?.base_url || baseUrl, providerProfiles);
 
     return {
         apiKey,
         baseUrl: baseUrl.replace(/\/+$/, ''),
         model,
         models: settings?.api?.models || [],
-        maxTokens: settings?.agent?.max_tokens ?? cfg.get<number>('maxTokens') ?? 8192,
-        maxRounds: settings?.agent?.max_rounds ?? cfg.get<number>('maxRounds') ?? 100,
+        maxTokens: Math.min(
+            MAX_MODEL_TOKENS,
+            Math.max(256, settings?.agent?.max_tokens ?? cfg.get<number>('maxTokens') ?? 8192),
+        ),
+        maxRounds: settings?.agent?.max_rounds ?? cfg.get<number>('maxRounds') ?? 0,
         temperature: settings?.agent?.temperature ?? cfg.get<number>('temperature') ?? 0.7,
         topP: settings?.agent?.top_p ?? 0.95,
         enableThinking: settings?.agent?.enable_thinking ?? cfg.get<boolean>('enableThinking') ?? false,
+        reasoningEffort: sanitizeReasoningEffort(
+            settings?.agent?.reasoning_effort
+            ?? (settings?.agent?.enable_thinking === true ? 'deep' : settings?.agent?.enable_thinking === false ? 'fast' : 'balanced'),
+        ),
         maxOutputLen: settings?.safety?.max_output_len ?? 5000,
         commandTimeout: settings?.safety?.command_timeout ?? 120,
         workspace,
@@ -103,8 +149,113 @@ export function loadConfig(): MiMoConfig {
             convergenceThreshold: cfg.get<number>('adversarial.convergenceThreshold')
                 ?? settings?.adversarial?.convergence_threshold ?? 2,
         },
+        infinite: {
+            maxRounds: cfg.get<number>('infinite.maxRounds')
+                ?? settings?.infinite?.max_rounds ?? 300,
+            hardMultiplier: cfg.get<number>('infinite.hardMultiplier')
+                ?? settings?.infinite?.hard_multiplier ?? 2,
+            stallLimit: cfg.get<number>('infinite.stallLimit')
+                ?? settings?.infinite?.stall_limit ?? 5,
+        },
+        context: {
+            autoCompress: cfg.get<boolean>('context.autoCompress')
+                ?? settings?.context?.auto_compress ?? true,
+            summarizeAtPercent: Math.max(30, Math.min(95,
+                cfg.get<number>('context.summarizeAtPercent')
+                ?? settings?.context?.summarize_at_percent ?? 70,
+            )),
+            summarizeAtMessages: Math.max(16, Math.min(200,
+                cfg.get<number>('context.summarizeAtMessages')
+                ?? settings?.context?.summarize_at_messages ?? 48,
+            )),
+            keepRecentMessages: Math.max(8, Math.min(80,
+                cfg.get<number>('context.keepRecentMessages')
+                ?? settings?.context?.keep_recent_messages ?? 18,
+            )),
+            maxSummaryTokens: Math.max(400, Math.min(4000,
+                cfg.get<number>('context.maxSummaryTokens')
+                ?? settings?.context?.max_summary_tokens ?? 1200,
+            )),
+        },
+        memory: {
+            enabled: settings?.memory?.enabled ?? cfg.get<boolean>('memory.enabled') ?? true,
+            learnFromExplicitPreferences: settings?.memory?.learn_from_explicit_preferences ?? true,
+            maxItems: Math.max(10, Math.min(500, settings?.memory?.max_items ?? 120)),
+            maxInjected: Math.max(0, Math.min(20, settings?.memory?.max_injected ?? 8)),
+        },
+        dependencyInstall: {
+            enabled: cfg.get<boolean>('dependencyInstall.enabled')
+                ?? settings?.dependency_install?.enabled ?? true,
+            projectMode: sanitizeDependencyProjectMode(
+                cfg.get<string>('dependencyInstall.projectMode')
+                ?? settings?.dependency_install?.project_mode,
+            ),
+            systemMode: sanitizeDependencySystemMode(
+                cfg.get<string>('dependencyInstall.systemMode')
+                ?? settings?.dependency_install?.system_mode,
+            ),
+            longTimeoutSec: Math.max(60, Math.min(3600,
+                cfg.get<number>('dependencyInstall.longTimeoutSec')
+                ?? settings?.dependency_install?.long_timeout_sec ?? 600,
+            )),
+        },
         settings,
     };
+}
+
+function sanitizeString(value: unknown, maxLen: number): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    return value.replace(/\x00/g, '').trim().slice(0, maxLen) || undefined;
+}
+
+function sanitizeProviderProfiles(input: unknown): ProviderProfileSetting[] {
+    if (!Array.isArray(input)) return [];
+    return input
+        .map((profile): ProviderProfileSetting | undefined => {
+            if (!profile || typeof profile !== 'object') return undefined;
+            const raw = profile as Record<string, unknown>;
+            const id = sanitizeString(raw.id, 80);
+            const name = sanitizeString(raw.name, 120) || id || '';
+            const baseUrl = sanitizeString(raw.base_url, 2048);
+            const model = sanitizeString(raw.model, 128);
+            const apiKey = sanitizeString(raw.api_key, 4096);
+            const models = Array.isArray(raw.models)
+                ? raw.models.map(v => sanitizeString(v, 128)).filter((v): v is string => !!v).slice(0, 100)
+                : undefined;
+            if (!id || !baseUrl || !/^https?:\/\//i.test(baseUrl)) return undefined;
+            return {
+                id,
+                name,
+                base_url: baseUrl.replace(/\/+$/, ''),
+                model: model || '',
+                api_key: apiKey || '',
+                models: models || [],
+            };
+        })
+        .filter((v): v is ProviderProfileSetting => !!v)
+        .slice(0, 50);
+}
+
+function inferActiveProviderProfile(baseUrl: string, profiles: ProviderProfileSetting[]): string {
+    const normalized = (baseUrl || '').replace(/\/+$/, '').toLowerCase();
+    const found = profiles.find(p => String(p.base_url || '').replace(/\/+$/, '').toLowerCase() === normalized);
+    return found?.id || '';
+}
+
+function sanitizeDependencyProjectMode(value: unknown): 'auto' | 'confirm' | 'disabled' {
+    return value === 'confirm' || value === 'disabled' ? value : 'auto';
+}
+
+function sanitizeDependencySystemMode(value: unknown): 'confirm' | 'disabled' {
+    return value === 'disabled' ? 'disabled' : 'confirm';
+}
+
+function sanitizeReasoningEffort(value: unknown): 'turbo' | 'fast' | 'balanced' | 'deep' | 'max' {
+    if (value === 'turbo' || value === 'fast' || value === 'balanced' || value === 'deep' || value === 'max') return value;
+    if (value === 'off' || value === 'low') return 'fast';
+    if (value === 'auto' || value === 'medium') return 'balanced';
+    if (value === 'high') return 'deep';
+    return 'balanced';
 }
 
 /**
@@ -159,15 +310,20 @@ export function saveSetting(dotPath: string, value: any): boolean {
  */
 export function getSettingsPanel(): Record<string, any> {
     const s = readSettings();
+    const providerProfiles = sanitizeProviderProfiles(s?.api?.provider_profiles);
     return {
         api_key: s?.api?.api_key || s?.api?.apiKey || '',
         base_url: s?.api?.base_url || 'https://token-plan-cn.xiaomimimo.com/v1',
         model: s?.api?.model || 'mimo-v2.5-pro',
         models: s?.api?.models || [],
-        max_tokens: s?.agent?.max_tokens ?? 8192,
+        active_provider_profile: sanitizeString(s?.api?.active_provider_profile, 80)
+            || inferActiveProviderProfile(s?.api?.base_url || '', providerProfiles),
+        provider_profiles: providerProfiles,
+        max_tokens: Math.min(MAX_MODEL_TOKENS, Math.max(256, s?.agent?.max_tokens ?? 8192)),
         temperature: s?.agent?.temperature ?? 0.7,
         top_p: s?.agent?.top_p ?? 0.95,
         enable_thinking: s?.agent?.enable_thinking ?? false,
+        reasoning_effort: sanitizeReasoningEffort(s?.agent?.reasoning_effort ?? (s?.agent?.enable_thinking ? 'deep' : 'fast')),
         max_output_len: s?.safety?.max_output_len ?? 5000,
         command_timeout: s?.safety?.command_timeout ?? 120,
         sandbox_enabled: s?.sandbox?.enabled ?? false,
@@ -178,5 +334,13 @@ export function getSettingsPanel(): Record<string, any> {
         sandbox_git_snapshot: s?.sandbox?.git_snapshot ?? true,
         sandbox_logging: s?.sandbox?.logging ?? true,
         sandbox_network_disabled: s?.sandbox?.network_disabled ?? true,
+        dependency_install_enabled: s?.dependency_install?.enabled ?? true,
+        dependency_install_project_mode: sanitizeDependencyProjectMode(s?.dependency_install?.project_mode),
+        dependency_install_system_mode: sanitizeDependencySystemMode(s?.dependency_install?.system_mode),
+        dependency_install_long_timeout_sec: Math.max(60, Math.min(3600, s?.dependency_install?.long_timeout_sec ?? 600)),
+        memory_enabled: s?.memory?.enabled ?? true,
+        memory_learn_from_explicit_preferences: s?.memory?.learn_from_explicit_preferences ?? true,
+        memory_max_items: Math.max(10, Math.min(500, s?.memory?.max_items ?? 120)),
+        memory_max_injected: Math.max(0, Math.min(20, s?.memory?.max_injected ?? 8)),
     };
 }

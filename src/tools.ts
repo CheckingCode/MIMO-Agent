@@ -4,6 +4,12 @@ import { exec } from 'child_process';
 import { ToolDefinition } from './api';
 import { isCommandSafe, isPathSafe, isSensitiveFile, resolvePath, checkSSRF, checkUrlSSRF } from './safety';
 import { SandboxConfig, DEFAULT_SANDBOX_CONFIG, sandboxExec, formatSandboxResult, safeModeExec, gitAutoSnapshot, gitRollback } from './sandbox';
+import {
+    DependencyInstallConfig,
+    DependencyInstallDecision,
+    decideDependencyInstall,
+    dependencyInstallNeedsNetwork,
+} from './dependencyInstall';
 import { browserOpen, browserClick, browserType, browserScreenshot, browserGetContent, browserClose } from './browser';
 import { desktopScreenshot, desktopWindows, desktopFocus, desktopType, desktopKey, desktopClick, desktopMouseMove, desktopDrag, desktopLaunch } from './desktop';
 
@@ -99,7 +105,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         type: 'function',
         function: {
             name: 'execute_command',
-            description: 'Execute a shell command. Use for git, npm, tests, builds, etc. Returns stdout and stderr.',
+            description: 'Execute a shell command. Use for git, package managers, tests, builds, etc. Dependency install commands follow the configured install policy: project dependencies may run with an extended timeout, while system software installs require user confirmation or are blocked.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -260,6 +266,7 @@ export async function executeTool(
     timeout: number,
     sandboxConfig?: SandboxConfig,
     mode?: string,
+    dependencyInstallConfig?: Partial<DependencyInstallConfig>,
 ): Promise<string> {
     try {
         // Only polling mode requires confirmation for destructive operations
@@ -287,7 +294,7 @@ export async function executeTool(
             case 'edit_file': return await toolEditFile(args, workspace);
             case 'list_directory': return await toolListDirectory(args, workspace);
             case 'search_files': return await toolSearchFiles(args, workspace, maxOutput);
-            case 'execute_command': return await toolExecuteCommand(args, workspace, timeout, maxOutput, sandboxConfig, mode);
+            case 'execute_command': return await toolExecuteCommand(args, workspace, timeout, maxOutput, sandboxConfig, mode, dependencyInstallConfig);
             case 'fetch_url': return await toolFetchUrl(args);
             case 'glob_files': return await toolGlobFiles(args, workspace);
             // Extended file operations
@@ -372,9 +379,12 @@ function validateFilePath(filePath: string): { valid: boolean; reason?: string }
         return { valid: false, reason: '文件路径包含控制字符' };
     }
 
-    // Windows illegal characters
-    if (process.platform === 'win32' && /[<>:"|?*]/.test(filePath)) {
-        return { valid: false, reason: '文件路径包含 Windows 非法字符: < > : " | ? *' };
+    // Windows illegal characters (exclude drive letter colon, e.g. G:\)
+    if (process.platform === 'win32') {
+        const pathToCheck = /^[A-Za-z]:/.test(filePath) ? filePath.slice(2) : filePath;
+        if (/[<>:"|?*]/.test(pathToCheck)) {
+            return { valid: false, reason: '文件路径包含 Windows 非法字符: < > : " | ? *' };
+        }
     }
 
     // Path length limit
@@ -849,29 +859,135 @@ function searchFilesFallback(
     return results.length ? results.join('\n') : 'No matches found';
 }
 
-async function toolExecuteCommand(args: Record<string, any>, workspace: string, timeout: number, maxOutput: number, sandboxConfig?: SandboxConfig, mode?: string): Promise<string> {
-    const safety = isCommandSafe(args.command, workspace);
+function formatDependencyInstallBlocked(decision: DependencyInstallDecision, command: string): string {
+    return [
+        'Dependency install blocked.',
+        `Kind: ${decision.kind}`,
+        `Reason: ${decision.reason}`,
+        `Command: ${command}`,
+    ].join('\n');
+}
+
+function formatDependencyInstallResult(
+    decision: DependencyInstallDecision,
+    command: string,
+    code: number,
+    timedOut: boolean,
+    output: string,
+): string {
+    const status = timedOut
+        ? `timed out after ${decision.timeoutSec}s`
+        : code === 0
+            ? 'completed'
+            : `completed with exit code ${code}`;
+    const action = timedOut
+        ? '\nAction: retry with a longer timeout, check network/proxy, or install manually.'
+        : '';
+    return [
+        `Dependency install: ${status}`,
+        `Kind: ${decision.kind}`,
+        `Command: ${command}`,
+        `Timeout: ${decision.timeoutSec}s${action}`,
+        '',
+        output,
+    ].join('\n');
+}
+
+async function confirmDependencyInstallPrompt(decision: DependencyInstallDecision, command: string): Promise<boolean> {
+    try {
+        const vscode = require('vscode');
+        const kindLabel = decision.kind === 'system-dependency'
+            ? 'System software install'
+            : 'Project dependency install';
+        const confirm = await vscode.window.showWarningMessage(
+            [
+                `${kindLabel} requires confirmation.`,
+                '',
+                `Reason: ${decision.reason}`,
+                `Command: ${command}`,
+                `Timeout: ${decision.timeoutSec}s`,
+            ].join('\n'),
+            { modal: decision.kind === 'system-dependency' },
+            'Install',
+            'Cancel',
+        );
+        return confirm === 'Install';
+    } catch {
+        return false;
+    }
+}
+
+async function confirmSafetyCommand(reason: string, command: string): Promise<boolean> {
+    try {
+        const vscode = require('vscode');
+        const confirm = await vscode.window.showWarningMessage(
+            `${reason}\n\nCommand: ${command}`,
+            'Execute',
+            'Cancel',
+        );
+        return confirm === 'Execute';
+    } catch {
+        return true;
+    }
+}
+
+async function toolExecuteCommand(
+    args: Record<string, any>,
+    workspace: string,
+    timeout: number,
+    maxOutput: number,
+    sandboxConfig?: SandboxConfig,
+    mode?: string,
+    dependencyInstallConfig?: Partial<DependencyInstallConfig>,
+): Promise<string> {
+    const command = String(args.command || '');
+    const safety = isCommandSafe(command, workspace);
     if (safety.blocked) return `Safety: ${safety.reason}`;
     // Needs confirmation in polling mode
     if (safety.needsConfirm && mode === 'polling') {
         try {
             const vscode = require('vscode');
             const confirm = await vscode.window.showWarningMessage(
-                `${safety.reason}\n\n命令: ${args.command}`,
+                `${safety.reason}\n\n命令: ${command}`,
                 '执行', '取消'
             );
             if (confirm !== '执行') return `已取消: ${safety.reason}`;
         } catch { /* not in VSCode context, proceed */ }
     }
 
-    const timeoutSec = Math.ceil((args.timeout || timeout));
+    const baseTimeoutSec = Math.ceil((args.timeout || timeout));
+    const dependencyDecision = decideDependencyInstall(command, baseTimeoutSec, dependencyInstallConfig);
+    if (!dependencyDecision.allowed) {
+        return formatDependencyInstallBlocked(dependencyDecision, command);
+    }
+    if (dependencyDecision.needsConfirm) {
+        const confirmed = await confirmDependencyInstallPrompt(dependencyDecision, command);
+        if (!confirmed) {
+            return `Dependency install canceled: ${dependencyDecision.reason}\nCommand: ${command}`;
+        }
+    }
+
+    const timeoutSec = dependencyDecision.timeoutSec;
+
+    if (
+        dependencyInstallNeedsNetwork(dependencyDecision.kind) &&
+        sandboxConfig?.enabled &&
+        sandboxConfig.mode === 'docker'
+    ) {
+        return [
+            'Dependency install blocked: Docker sandbox runs dependency commands with network disabled.',
+            `Kind: ${dependencyDecision.kind}`,
+            `Command: ${command}`,
+            'Action: disable Docker sandbox for this trusted workspace, preinstall dependencies outside the sandbox, or run the install manually.',
+        ].join('\n');
+    }
 
     // Layer 1: Docker sandbox (if enabled and available)
     if (sandboxConfig?.enabled && sandboxConfig.mode === 'docker') {
         try {
             const { isDockerAvailable } = require('./sandbox');
             if (await isDockerAvailable()) {
-                const result = await sandboxExec(args.command, workspace, {
+                const result = await sandboxExec(command, workspace, {
                     ...sandboxConfig,
                     timeoutSec,
                 }, maxOutput);
@@ -891,11 +1007,17 @@ async function toolExecuteCommand(args: Record<string, any>, workspace: string, 
     };
 
     try {
-        const result = await safeModeExec(args.command, workspace, timeoutSec, maxOutput, effectiveConfig);
+        const result = await safeModeExec(command, workspace, timeoutSec, maxOutput, effectiveConfig);
         let output = result.stdout.trim();
         if (result.stderr?.trim()) output += `\n[stderr] ${result.stderr.trim()}`;
         if (!output) output = '(no output)';
         if (result.code !== 0) output += `\n[exit code: ${result.code}]`;
+        if (result.timedOut) {
+            output += `\n[timeout: command exceeded ${timeoutSec}s]`;
+        }
+        if (dependencyDecision.kind !== 'none') {
+            output = formatDependencyInstallResult(dependencyDecision, command, result.code, !!result.timedOut, output);
+        }
         return output;
     } catch (e: any) {
         return `Execution failed: ${e.message}`;
