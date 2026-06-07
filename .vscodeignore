@@ -19,3 +19,7 @@ MODES_ANALYSIS.md
 build-webview.mjs
 releases/
 assets/readme-*.svg
+html_output/**
+pptx_extracted/**
+Now-I-have-a-comprehensive-view-of-the-e-*.md
+*_2026-06-07T17-33-15.md
