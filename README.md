@@ -408,6 +408,15 @@ MIT License
   <a href="#">🇨🇳 中文</a> | <a href="#-english">🇬🇧 English</a> | <strong>📋 Changelog</strong>
 </p>
 
+### v1.5.4
+- ✨ 新增回合叙述系统：每轮开始时展示任务复杂度、轮次预算、停滞状态与模式提示 / Added round narration system showing task complexity, budget, stall status, and mode hints
+- ✨ 增强工具动作描述：可读标签如“读取 src/agent.ts”、“搜索 pattern” / Enhanced tool action descriptions with human-readable labels
+- ✨ 新增结构化进度跟踪：完成数、错误数、无进展数、进展工具数、只读成功数 / Added structured progress tracking per round
+- ✨ 引入模块化 webview 消息组件（ChatBubble、CodeBlock、DiffView、StreamingRenderer、ThinkingBlock、ToolCard）/ Introduced modular webview message components
+- ⚡ 改进 Agent 停滞检测：只读成功按工具调用计数而非布尔值 / Improved stall detection: read-only success counts individual tool calls
+- 🔧 重构 webview 消息模块为独立组件文件 / Refactored webview messages into separate component files
+- 🎨 增强聊天 UI 样式（思考块、工具卡片、diff 视图）/ Enhanced chat UI styles
+
 ### v1.5.2
 - 🔧 修复发布包缺少运行时依赖导致 `command 'mimo-agent.chat' not found` 的问题 / Fixed missing runtime dependencies in published VSIX
 - ⚡ 推理模式切换不再在聊天区显示多余的确认消息 / Reasoning mode switch no longer shows redundant confirmation

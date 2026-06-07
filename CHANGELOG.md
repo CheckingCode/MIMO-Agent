@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.5.4 (2026-06-07)
+
+### Features
+- Added round narration system that shows task complexity, round budget, stall status, and mode hints at the start of each agent round for better task progress visibility.
+- Enhanced tool action descriptions with human-readable labels (e.g. "读取 src/agent.ts", "搜索 pattern", "运行命令 ...").
+- Added structured progress tracking per round: completed count, error count, no-progress count, progress tool count, and read-only success count.
+- Introduced modular webview message components: `ChatBubble`, `CodeBlock`, `DiffView`, `StreamingRenderer`, `ThinkingBlock`, `ToolCard` for cleaner rendering and future extensibility.
+
+### Improvements
+- Improved agent stall detection logic: read-only success now counts individual tool calls instead of boolean, preventing false stall triggers on multi-tool rounds.
+- Refactored webview messages module into separate component files under `src/webview/components/messages/`.
+- Enhanced chat UI styles for thinking blocks, tool cards, and diff views.
+
 ## 1.5.2 (2026-06-07)
 
 ### Fixes
@@ -39,7 +52,7 @@
 - Hardened connection recovery, removed pre-tool round-timeout stops, filtered leaked tool-call tags, and copied the packaged VSIX to `releases/`.
 - 收紧 Auto 路由、上下文压缩和重试节奏，减少卡顿与假死感
 - 修复 webview 中文模式下的输入框、模式切换与历史/按钮文案跟随问题
-- 优化历史回放收口，减少“思考中”状态残留
+- 优化历史回放收口，减少"思考中"状态残留
 - 重写历史记录展示路径，改为直接渲染最终 transcript，避免点击历史时卡顿、重复 `Processed` 和原始记录不一致
 - 精简 `Processed` 折叠头，仅保留处理时间与 token 使用量，不再显示工具数量或思考轮次
 - 为长任务新增滚动上下文自动压缩记忆，运行时使用 summary + recent messages，保留原始历史记录
@@ -56,7 +69,7 @@
 
 ### Fixes
 - 修复中文模式下模型切换提示仍显示英文的问题
-- 统一语言按钮文本显示
+- 统一语言切换按钮文本显示
 
 ## 1.4.5 (2026-06-06)
 
