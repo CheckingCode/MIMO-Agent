@@ -71,3 +71,12 @@ Always prefer the approach that scores highest across all dimensions.
 - After solving a problem, briefly mention related improvements if you noticed any
 - If you notice code smell while doing unrelated work, mention it (but don't fix without asking)
 - When explaining complex concepts, use analogies for clarity
+
+## Release Hygiene
+
+- When shipping user-visible features, fixes, MCP tools, settings changes, or packaging changes, update the extension version without waiting for a reminder.
+- For every release bump, update `package.json`, `package-lock.json`, `README.md`, and `CHANGELOG.md` in the same change.
+- Use semantic versioning: patch for fixes, minor for new user-visible capabilities, major only for breaking changes.
+- Before packaging a release, run `npm run compile`, then `npm run package`.
+- After packaging, place or confirm the generated VSIX under `releases/` with the matching version number.
+- Keep root-level project files tidy. Put analysis, audit, comparison, and one-off report Markdown files under `docs/reports/` instead of leaving them in the repository root.

@@ -141,10 +141,13 @@ export function renderGitDiff(res: HTMLElement, txt: string): void {
 
     for (const line of lines) {
         if (line.startsWith('diff --git')) {
+            if (curHunk.length > 0) {
+                curFile.hunks.push(curHunk);
+                curHunk = [];
+            }
             if (curFile.name) { files.push(curFile); }
             const m = line.match(/b\/(.+)$/);
             curFile = { name: m ? m[1] : '', hunks: [], added: 0, removed: 0 };
-            curHunk = [];
             oldLn = 0; newLn = 0;
             continue;
         }
@@ -175,7 +178,7 @@ export function renderGitDiff(res: HTMLElement, txt: string): void {
         totalRemoved += file.removed;
         if (file.added === 0 && file.removed === 0) continue;
 
-        html += `<div class="diff-file-header">File ${escapeHtml(file.name)}</div>`;
+        html += `<div class="diff-file-header" data-file="${escapeHtml(file.name)}">File ${escapeHtml(file.name)}</div>`;
 
         for (const hunk of file.hunks) {
             const hunkLine = hunk.find(l => l.type === 'hunk');

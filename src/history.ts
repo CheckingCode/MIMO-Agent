@@ -1,14 +1,15 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
 import { ChatMessage, ContentPart } from './api';
 import { atomicWriteSync } from './utils/fileLock';
+import { workspaceDataPath, workspaceWindowDataPath } from './workspaceData';
 
 export interface HistoryEntry {
     id: string;
     title: string;
     timestamp: string;
     model: string;
+    modelEndpointId?: string;
     messageCount: number;
 }
 
@@ -21,7 +22,7 @@ export interface HistoryConversation extends HistoryEntry {
 }
 
 /**
- * Lightweight index file (~/.mimo/history/index.json) that stores only metadata
+ * Lightweight index file that stores only metadata
  * for all conversations. This avoids reading every full JSON file just to list entries.
  */
 interface HistoryIndex {
@@ -35,10 +36,13 @@ export class HistoryManager {
     /** IDs deleted in this session — excluded during index merge to prevent re-addition from disk */
     private _deletedIds = new Set<string>();
 
-    constructor() {
-        this.historyDir = path.join(os.homedir(), '.mimo', 'history');
+    constructor(workspace = process.cwd(), _windowSessionId?: string) {
+        // Saved history is workspace-level so it survives debug restarts.
+        // Live agent state remains window-isolated in memory/token/conversation storage.
+        this.historyDir = workspaceDataPath(workspace, 'history');
         this.indexPath = path.join(this.historyDir, 'index.json');
         this.ensureDir();
+        this.migrateWindowScopedHistory(workspace);
     }
 
     private ensureDir(): void {
@@ -48,7 +52,82 @@ export class HistoryManager {
     }
 
     private filePath(id: string): string {
+        if (!this.isSafeId(id)) {
+            throw new Error('Invalid history id');
+        }
         return path.join(this.historyDir, `${id}.json`);
+    }
+
+    private isSafeId(id: string): boolean {
+        return typeof id === 'string' && /^[A-Za-z0-9_-]{1,120}$/.test(id);
+    }
+
+    private migrateWindowScopedHistory(workspace: string): void {
+        const markerPath = path.join(this.historyDir, '.window-history-migrated');
+        if (fs.existsSync(markerPath)) return;
+
+        const windowsDir = workspaceDataPath(workspace, 'windows');
+        const MAX_WINDOWS = 16;
+        const MAX_FILES_PER_WINDOW = 60;
+        const MAX_TOTAL_FILES = 200;
+        let copied = 0;
+
+        try {
+            if (!fs.existsSync(windowsDir)) {
+                atomicWriteSync(markerPath, new Date().toISOString());
+                return;
+            }
+
+            const windows = fs.readdirSync(windowsDir)
+                .map(name => {
+                    const historyPath = workspaceWindowDataPath(workspace, name, 'history');
+                    try {
+                        return { name, historyPath, mtime: fs.statSync(historyPath).mtimeMs };
+                    } catch {
+                        return null;
+                    }
+                })
+                .filter((entry): entry is { name: string; historyPath: string; mtime: number } => !!entry)
+                .sort((a, b) => b.mtime - a.mtime)
+                .slice(0, MAX_WINDOWS);
+
+            for (const win of windows) {
+                if (copied >= MAX_TOTAL_FILES) break;
+                const files = fs.readdirSync(win.historyPath)
+                    .filter(f => f.endsWith('.json') && f !== 'index.json')
+                    .map(name => {
+                        const sourcePath = path.join(win.historyPath, name);
+                        try {
+                            return { name, sourcePath, mtime: fs.statSync(sourcePath).mtimeMs };
+                        } catch {
+                            return null;
+                        }
+                    })
+                    .filter((entry): entry is { name: string; sourcePath: string; mtime: number } => !!entry)
+                    .sort((a, b) => b.mtime - a.mtime)
+                    .slice(0, MAX_FILES_PER_WINDOW);
+
+                for (const file of files) {
+                    if (copied >= MAX_TOTAL_FILES) break;
+                    const targetPath = path.join(this.historyDir, file.name);
+                    if (fs.existsSync(targetPath)) continue;
+                    try {
+                        fs.copyFileSync(file.sourcePath, targetPath);
+                        copied++;
+                    } catch { /* skip files that cannot be migrated */ }
+                }
+            }
+
+            if (copied > 0) {
+                this._index = null;
+                this.loadIndex();
+            }
+            atomicWriteSync(markerPath, new Date().toISOString());
+        } catch {
+            try {
+                atomicWriteSync(markerPath, new Date().toISOString());
+            } catch { /* ignore marker write errors */ }
+        }
     }
 
     // ── Index management ──
@@ -75,6 +154,7 @@ export class HistoryManager {
                             title: (entry as any).title || 'Untitled',
                             timestamp: (entry as any).timestamp || '',
                             model: (entry as any).model || '',
+                            modelEndpointId: (entry as any).modelEndpointId || '',
                             messageCount: (entry as any).messageCount || 0,
                         };
                     }
@@ -109,6 +189,7 @@ export class HistoryManager {
                             title: data.title || 'Untitled',
                             timestamp: data.timestamp || '',
                             model: data.model || '',
+                            modelEndpointId: data.modelEndpointId || '',
                             messageCount: data.messageCount || 0,
                         };
                     }
@@ -164,6 +245,26 @@ export class HistoryManager {
         return content.filter(p => p.type === 'text').map(p => p.text || '').join('');
     }
 
+    private trimText(text: string, maxChars: number): string {
+        if (!text || text.length <= maxChars) return text || '';
+        const head = text.slice(0, Math.floor(maxChars * 0.55));
+        const tail = text.slice(-Math.floor(maxChars * 0.35));
+        return `${head}\n\n... (${text.length - head.length - tail.length} chars omitted for history responsiveness) ...\n\n${tail}`;
+    }
+
+    private trimContent(content: string | ContentPart[] | null | undefined, maxChars: number): string | ContentPart[] {
+        if (typeof content === 'string') return this.trimText(content, maxChars);
+        if (Array.isArray(content)) {
+            return content.map(part => {
+                if (part.type === 'text') {
+                    return { ...part, text: this.trimText(part.text || '', maxChars) };
+                }
+                return part;
+            });
+        }
+        return '';
+    }
+
     // ── Public API ──
 
     /**
@@ -191,21 +292,28 @@ export class HistoryManager {
             const needsContent = m.content === null || m.content === undefined;
             const needsReasoning = m.role === 'assistant' && m.reasoning_content === undefined;
             const needsToolName = m.role === 'tool' && !m._toolName && m.tool_call_id;
+            const needsSnapshotCopy = m.role === 'assistant' && m._uiSnapshot !== undefined;
+            const maxContent = m.role === 'tool' ? 200_000 : m.role === 'assistant' ? 200_000 : 500_000;
+            const content = this.trimContent(m.content, maxContent);
+            const reasoning = m.role === 'assistant' && m.reasoning_content
+                ? this.trimText(m.reasoning_content, 100_000)
+                : m.reasoning_content;
 
             // Skip copy if message is already well-formed
-            if (!needsContent && !needsReasoning && !needsToolName) {
+            if (!needsContent && !needsReasoning && !needsToolName && !needsSnapshotCopy && content === m.content && reasoning === m.reasoning_content) {
                 return m;
             }
 
             const copy: ChatMessage = {
                 role: m.role,
-                content: m.content ?? '',
+                content,
             };
 
             if (m.role === 'assistant') {
-                copy.reasoning_content = m.reasoning_content || '';
+                copy.reasoning_content = reasoning || '';
                 if (m.tool_calls) copy.tool_calls = m.tool_calls;
                 if (m._elapsedSec !== undefined) copy._elapsedSec = m._elapsedSec;
+                if (m._uiSnapshot !== undefined) copy._uiSnapshot = m._uiSnapshot;
             }
 
             if (m.role === 'tool') {
@@ -242,8 +350,9 @@ export class HistoryManager {
         title: string,
         messages: ChatMessage[],
         model: string,
-        metadata: Partial<Pick<HistoryConversation, 'mode' | 'personaId' | 'activeSkillPrompt' | 'inputHistory'>> = {},
+        metadata: Partial<Pick<HistoryConversation, 'mode' | 'personaId' | 'activeSkillPrompt' | 'inputHistory' | 'modelEndpointId'>> = {},
     ): void {
+        if (!this.isSafeId(id)) return;
         const messageCount = messages.filter(m => m.role === 'user' || m.role === 'assistant').length;
         const timestamp = new Date().toISOString();
 
@@ -256,6 +365,7 @@ export class HistoryManager {
             title: title || 'Untitled',
             timestamp,
             model,
+            modelEndpointId: metadata.modelEndpointId || '',
             messageCount,
             messages: normalized,
             mode: metadata.mode,
@@ -267,7 +377,7 @@ export class HistoryManager {
 
         // Update index (O(1) instead of re-reading all files)
         const index = this.loadIndex();
-        index[id] = { id, title: title || 'Untitled', timestamp, model, messageCount };
+        index[id] = { id, title: title || 'Untitled', timestamp, model, modelEndpointId: metadata.modelEndpointId || '', messageCount };
         this.saveIndex();
     }
 
@@ -287,6 +397,7 @@ export class HistoryManager {
      * If fixup was needed, re-saves the file so it's correct on next load.
      */
     load(id: string): HistoryConversation | null {
+        if (!this.isSafeId(id)) return null;
         try {
             const data = JSON.parse(fs.readFileSync(this.filePath(id), 'utf-8'));
             if (data && Array.isArray(data.messages)) {
@@ -350,6 +461,7 @@ export class HistoryManager {
      * Also removes from the index.
      */
     delete(id: string): boolean {
+        if (!this.isSafeId(id)) return false;
         try {
             const fp = this.filePath(id);
             if (fs.existsSync(fp)) {

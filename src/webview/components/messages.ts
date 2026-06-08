@@ -6,6 +6,7 @@ import { bus } from '../core/bus';
 import { vscode } from '../core/vscode';
 import { escapeHtml, createElement } from '../utils/dom';
 import { getWelcomePair, t } from '../core/i18n';
+import { renderTaskChecklist, TodoItem } from './taskChecklist';
 import {
     EditedFileInfo as MessageEditedFileInfo,
     WorkflowUiState as MessageWorkflowUiState,
@@ -63,10 +64,12 @@ function setCopyButtonState(btn: HTMLElement, copied: boolean): void {
     setMessageCopyButtonState(btn, copied);
 }
 
-const REASONING_PREVIEW_CHARS = 700;
-const REASONING_STORE_CHARS = 12000;
-const REASONING_DEDUP_INTERVAL_MS = 1500;
+const REASONING_PREVIEW_CHARS = 360;
+const REASONING_STORE_CHARS = 4000;
+const REASONING_DEDUP_INTERVAL_MS = 3000;
 const WORKFLOW_UPDATE_INTERVAL_MS = 400;
+const HISTORY_SNAPSHOT_MAX_HTML = 700_000;
+const HISTORY_PATCH_MAX_CHARS = 500_000;
 
 interface EditedFileInfo {
     path: string;
@@ -80,6 +83,10 @@ interface TaskChangeFile {
     added: number;
     removed: number;
     binary?: boolean;
+    staged?: boolean;
+    source?: 'git' | 'tool';
+    action?: string;
+    hasToolDiff?: boolean;
 }
 
 interface TaskChangeSummary {
@@ -106,6 +113,8 @@ interface WorkflowUiState {
 // Tool card helpers
 
 const TOOL_ICONS: Record<string, string> = {
+    schedule_tasks: 'SC',
+    update_todos: 'TD',
     read_file: 'R', write_file: 'W', edit_file: 'E', list_directory: 'L',
     search_files: 'S', execute_command: '$', fetch_url: 'U', glob_files: 'G',
     delete_file: 'D', move_file: 'M', copy_file: 'C', get_file_info: 'I',
@@ -113,7 +122,7 @@ const TOOL_ICONS: Record<string, string> = {
     git_push: 'GP', git_pull: 'GU', web_search: 'WS',
     browser_open: 'BO', browser_click: 'BC', browser_type: 'BT',
     browser_screenshot: 'BS', browser_get_content: 'BG', browser_close: 'BX',
-    spawn_subagent: 'SA', git_worktree_add: 'WA', git_worktree_list: 'WL',
+    spawn_subagent: 'SA', run_workflow: 'WF', git_worktree_add: 'WA', git_worktree_list: 'WL',
     git_worktree_remove: 'WR', read_notebook: 'NR', edit_notebook_cell: 'NE',
     insert_notebook_cell: 'NI', delete_notebook_cell: 'ND',
     desktop_screenshot: 'DS', desktop_windows: 'DW', desktop_focus: 'DF',
@@ -442,13 +451,15 @@ export const Messages = {
         for (let i = 0; i < dots.length; i++) {
             dots[i].classList.add('done');
             const lbl = dots[i].parentElement?.querySelector('span:nth-child(2)') as HTMLElement | null;
-            if (lbl) lbl.textContent = 'Thought';
+            if (lbl) lbl.textContent = t('thought');
             // Show the toggle when thinking is finalized
             const toggle = dots[i].parentElement as HTMLElement | null;
             const block = toggle?.nextElementSibling as HTMLElement | null;
             if (block?.classList.contains('thinking-block')) {
                 (block as any)._thinkingDone = true;
-                this.renderThinkingBlock(block, true);
+                // Keep completed thoughts collapsed and cheap. Rendering the full
+                // text here blocks the webview right when the turn is finishing.
+                this.renderThinkingBlock(block, false);
                 block.classList.remove('show');
                 toggle?.classList.remove('open');
             }
@@ -584,16 +595,21 @@ export const Messages = {
             const dot = createElement('span', 'thinking-dot');
             toggle.appendChild(dot);
             const lbl = createElement('span');
-            lbl.textContent = 'Thinking...';
+            lbl.textContent = t('thinking');
             toggle.appendChild(lbl);
             const arrow = createElement('span', 'arrow');
             arrow.textContent = '>';
             toggle.appendChild(arrow);
-            toggle.addEventListener('click', () => {
+            const toggleThinking = () => {
                 thinkBlock!.classList.toggle('show');
                 toggle.classList.toggle('open');
                 this.renderThinkingBlock(thinkBlock!, thinkBlock!.classList.contains('show'));
+            };
+            toggle.addEventListener('click', toggleThinking);
+            thinkBlock.addEventListener('click', () => {
+                if (!thinkBlock!.classList.contains('show')) toggleThinking();
             });
+            thinkBlock.title = t('thinking.expand.title');
 
             streamingMsg.appendChild(toggle);
             streamingMsg.appendChild(thinkBlock);
@@ -613,23 +629,21 @@ export const Messages = {
     },
 
     filterReasoningNoise(text: string): string {
-        if (!text) return '';
-        const noisyPatterns = [
-            /\[Context:\s*[^\]]+\]/gi,
-            /\[Progress\][^\[]*/gi,
-            /\[Soft budget reached\][^\[]*/gi,
-            /\[Stop guard\][^\[]*/gi,
-            /compressing with summarization\.?\s*x?\s*\d*/gi,
-            /sliding window\.?\s*x?\s*\d*/gi,
-            /The user wants to continue implementing[^.\n]*(?:\.|\n)?/gi,
-        ];
-        let out = text;
-        for (const pattern of noisyPatterns) out = out.replace(pattern, '');
-        return out.replace(/\s{3,}/g, ' ');
+        return filterMessageReasoningNoise(text);
     },
 
     renderThinkingBlock(thinkBlock: HTMLElement, forceFull = false, replayHint = false): void {
-        const rawText = (thinkBlock as any)._reasoningText || '';
+        const datasetText = thinkBlock.dataset.reasoningText || '';
+        const rawText = (thinkBlock as any)._reasoningText || datasetText;
+        const trimmed = !!((thinkBlock as any)._reasoningTrimmed || thinkBlock.dataset.reasoningTrimmed === 'true');
+        if (rawText && !(thinkBlock as any)._reasoningText) {
+            (thinkBlock as any)._reasoningText = rawText;
+        }
+        (thinkBlock as any)._reasoningTrimmed = trimmed;
+        if (rawText && thinkBlock.dataset.reasoningText !== rawText) {
+            thinkBlock.dataset.reasoningText = rawText;
+        }
+        thinkBlock.dataset.reasoningTrimmed = trimmed ? 'true' : 'false';
         const toggle = thinkBlock.previousElementSibling as HTMLElement | null;
         if (rawText.length <= 30) {
             if (toggle) toggle.style.display = 'none';
@@ -638,12 +652,12 @@ export const Messages = {
         const now = Date.now();
         if (!forceFull && !replayHint) {
             const lastAt = (thinkBlock as any)._lastRenderedAt || 0;
-            if (now - lastAt < 350) {
+            if (now - lastAt < 900) {
                 if (!(thinkBlock as any)._renderTimer) {
                     (thinkBlock as any)._renderTimer = window.setTimeout(() => {
                         (thinkBlock as any)._renderTimer = 0;
                         this.renderThinkingBlock(thinkBlock, false, false);
-                    }, 350 - (now - lastAt));
+                    }, 900 - (now - lastAt));
                 }
                 return;
             }
@@ -653,21 +667,15 @@ export const Messages = {
         const expanded = forceFull || thinkBlock.classList.contains('show');
         let displayText = rawText;
         if (expanded) {
-            const prefix = (thinkBlock as any)._reasoningTrimmed ? '[Earlier thinking trimmed for responsiveness]\n\n' : '';
-            if (
-                forceFull ||
-                !(thinkBlock as any)._dedupedText ||
-                now - ((thinkBlock as any)._lastDedupAt || 0) > REASONING_DEDUP_INTERVAL_MS
-            ) {
-                (thinkBlock as any)._dedupedText = prefix + this._dedupReasoning(rawText);
-                (thinkBlock as any)._lastDedupAt = now;
-            }
-            displayText = (thinkBlock as any)._dedupedText;
+            const prefix = trimmed ? t('thinking.trimmed.prefix') : '';
+            // Expansion must be instant. Avoid regex-heavy deduplication in the
+            // click path; the stored text is already capped for responsiveness.
+            displayText = prefix + rawText;
         } else {
-            const prefix = (thinkBlock as any)._reasoningTrimmed ? '[Thinking trimmed]\n' : '';
-            displayText = rawText.length > REASONING_PREVIEW_CHARS
-                ? `${prefix}... ${rawText.slice(-REASONING_PREVIEW_CHARS)}`
-                : `${prefix}${rawText.slice(-REASONING_PREVIEW_CHARS)}`;
+            const trimmedText = trimmed ? t('thinking.trimmed') : '';
+            displayText = t('thinking.compact')
+                .replace('{count}', rawText.length.toLocaleString())
+                .replace('{trimmed}', trimmedText);
         }
 
         if (/loop|recovery/i.test(displayText)) {
@@ -810,6 +818,8 @@ export const Messages = {
 
     getToolLabel(name: string): string {
         const labels: Record<string, string> = {
+            schedule_tasks: 'Schedule',
+            update_todos: 'Todos',
             read_file: 'Read', write_file: 'Write', edit_file: 'Edit',
             list_directory: 'List', search_files: 'Search', glob_files: 'Glob',
             execute_command: 'Bash', fetch_url: 'Fetch', web_search: 'Search',
@@ -819,6 +829,7 @@ export const Messages = {
             get_file_info: 'Info',
             browser_open: 'Open', browser_click: 'Click', browser_type: 'Type',
             browser_screenshot: 'Screenshot', browser_get_content: 'Read', browser_close: 'Close',
+            run_workflow: 'Workflow',
         };
         if (name.startsWith('mcp_')) return 'MCP';
         return labels[name] || name;
@@ -829,6 +840,8 @@ export const Messages = {
         if (name.startsWith('browser_')) return '#2196F3';
         if (name.startsWith('mcp_')) return '#9C27B0';
         const colors: Record<string, string> = {
+            schedule_tasks: '#64B5F6',
+            update_todos: '#4CAF50',
             read_file: '#4EC9B0', write_file: '#CE9178', edit_file: '#DCDCAA',
             search_files: '#569CD6', glob_files: '#569CD6', list_directory: '#569CD6',
             execute_command: '#DCDCAA', fetch_url: '#CE9178', web_search: '#569CD6',
@@ -901,6 +914,30 @@ export const Messages = {
         }
 
         // execute_command → card-style: add OUT section
+        if (toolName === 'update_todos') {
+            const todos = Array.isArray(toolArgs?.todos) ? toolArgs.todos : [];
+            const items: TodoItem[] = todos
+                .map((item: any): TodoItem | null => {
+                    const text = String(item?.content || item?.text || item?.title || '').trim();
+                    if (!text) return null;
+                    const priorityText = String(item?.priority || '').toLowerCase();
+                    const priority = priorityText === 'high' ? 'P1' : priorityText === 'low' ? 'P3' : 'P2';
+                    return {
+                        text: item?.status === 'in_progress' ? `${text} (in progress)` : text,
+                        done: /completed|done/i.test(String(item?.status || '')),
+                        priority,
+                    };
+                })
+                .filter((item): item is TodoItem => !!item);
+            const checklist = renderTaskChecklist(items);
+            if (checklist) {
+                const card = createElement('div', 'todo-tool-result');
+                card.innerHTML = checklist;
+                last.after(card);
+            }
+            return;
+        }
+
         if (toolName === 'execute_command') {
             last.setAttribute('data-status', isError ? 'error' : 'success');
             const body = last.querySelector('.tool-card-body');
@@ -1146,10 +1183,13 @@ export const Messages = {
 
         for (const line of lines) {
             if (line.startsWith('diff --git')) {
+                if (curHunk.length > 0) {
+                    curFile.hunks.push(curHunk);
+                    curHunk = [];
+                }
                 if (curFile.name) { files.push(curFile); }
                 const m = line.match(/b\/(.+)$/);
                 curFile = { name: m ? m[1] : '', hunks: [], added: 0, removed: 0 };
-                curHunk = [];
                 oldLn = 0; newLn = 0;
                 continue;
             }
@@ -1181,7 +1221,7 @@ export const Messages = {
             totalRemoved += file.removed;
             if (file.added === 0 && file.removed === 0) continue;
 
-            html += `<div class="diff-file-header">📄 ${escapeHtml(file.name)}</div>`;
+            html += `<div class="diff-file-header" data-file="${escapeHtml(file.name)}">📄 ${escapeHtml(file.name)}</div>`;
 
             for (const hunk of file.hunks) {
                 // Find hunk header line
@@ -1264,17 +1304,66 @@ export const Messages = {
         document.querySelectorAll<HTMLElement>('.live-progress-card[data-active="true"]').forEach(card => card.setAttribute('data-active', 'false'));
         store.set('planExecutionActive', false);
         const messagesDiv = document.getElementById('messages')!;
+        this.renderToolOnlyTaskChangesFallback();
         smartScroll(messagesDiv);
+        this.scheduleHistorySnapshot(elapsedSec);
+    },
+
+    scheduleHistorySnapshot(elapsedSec?: number): void {
+        window.setTimeout(() => {
+            const snapshot = this.captureLatestTurnSnapshot(elapsedSec);
+            if (snapshot) vscode.historySnapshot(snapshot);
+        }, 80);
+    },
+
+    captureLatestTurnSnapshot(elapsedSec?: number): any | null {
+        const messagesDiv = document.getElementById('messages');
+        if (!messagesDiv) return null;
+        const assistants = Array.from(messagesDiv.querySelectorAll<HTMLElement>('.msg-assistant, .streaming'));
+        const assistant = assistants.reverse().find(el => el.classList.contains('execution-compacted') || el.querySelector('.execution-drawer, .task-changes-card, .diff-card'));
+        if (!assistant) return null;
+        const userMessages = Array.from(messagesDiv.querySelectorAll<HTMLElement>('.msg-user'));
+        const user = userMessages[userMessages.length - 1] || null;
+        const snapshotNodes = [assistant, ...this.collectFollowingTaskChangeCards(assistant)];
+        const html = snapshotNodes.map(node => node.outerHTML).join('');
+        if (!html || html.length > HISTORY_SNAPSHOT_MAX_HTML) return null;
+        const userHtml = user?.outerHTML || '';
+        return {
+            version: 1,
+            capturedAt: Date.now(),
+            elapsedSec: typeof elapsedSec === 'number' ? Number(elapsedSec.toFixed(1)) : undefined,
+            assistantHtml: html,
+            userHtml: userHtml.length < 200_000 ? userHtml : '',
+        };
+    },
+
+    collectFollowingTaskChangeCards(assistant: HTMLElement): HTMLElement[] {
+        const cards: HTMLElement[] = [];
+        let next = assistant.nextElementSibling as HTMLElement | null;
+        while (next?.classList.contains('task-changes-card')) {
+            cards.push(next);
+            next = next.nextElementSibling as HTMLElement | null;
+        }
+        return cards;
     },
 
     compactExecutionDetails(elapsedSec?: number): void {
         const streamingMsg = store.get('streamingMsg');
         if (!streamingMsg || streamingMsg.classList.contains('execution-compacted')) return;
 
+        const finalContents = Array.from(streamingMsg.querySelectorAll('.md-content-final:not(.md-content-update)')) as HTMLElement[];
+        const finalContent = [...finalContents]
+            .reverse()
+            .find(el => !!el.textContent?.trim() || !!el.querySelector('*')) || null;
+        for (const content of finalContents) {
+            if (content !== finalContent) content.classList.add('md-content-update');
+        }
+
         const detailNodes = Array.from(streamingMsg.children).filter((node) => {
             const el = node as HTMLElement;
             return el.classList.contains('thinking-toggle') ||
                 el.classList.contains('thinking-block') ||
+                el.classList.contains('md-content-update') ||
                 el.classList.contains('tool-line') ||
                 el.classList.contains('tool-card') ||
                 el.classList.contains('diff-card') ||
@@ -1283,13 +1372,8 @@ export const Messages = {
                 el.classList.contains('round-marker');
         }) as HTMLElement[];
 
-        const mdContents = Array.from(streamingMsg.querySelectorAll('.md-content')) as HTMLElement[];
-        const finalContent = [...mdContents]
-            .reverse()
-            .find(el => !!el.textContent?.trim() || !!el.querySelector('*')) || null;
         if (detailNodes.length === 0) return;
 
-        const editedFiles = this.collectEditedFiles(streamingMsg);
         const toolCards = detailNodes.filter(el => el.classList.contains('tool-line') || el.classList.contains('tool-card'));
         const usage = store.get('tokenUsage');
         const startedTokenTotal = (streamingMsg as any)._startedTokenTotal as number | undefined;
@@ -1335,9 +1419,6 @@ export const Messages = {
         } else {
             streamingMsg.appendChild(drawer);
         }
-        if (editedFiles.length > 0) {
-            streamingMsg.appendChild(this.renderEditedFilesSummary(editedFiles));
-        }
         streamingMsg.classList.add('execution-compacted');
     },
 
@@ -1370,47 +1451,157 @@ export const Messages = {
         return Array.from(map.values()).sort((a, b) => a.path.localeCompare(b.path));
     },
 
-    renderEditedFilesSummary(files: EditedFileInfo[]): HTMLElement {
-        const totalAdded = files.reduce((sum, f) => sum + f.added, 0);
-        const totalRemoved = files.reduce((sum, f) => sum + f.removed, 0);
-        const totalChanged = totalAdded + totalRemoved;
-        const changeText = totalChanged === 1 ? '1 line changed' : `${totalChanged} lines changed`;
-        const box = createElement('div', 'edited-files-summary');
-        const rows = files.map(f => {
-            const changed = f.added + f.removed;
-            const label = changed === 1 ? '1 line' : `${changed} lines`;
-            return `<div class="edited-file-row">` +
-                `<span class="edited-file-action">${escapeHtml(f.action)}</span>` +
-                `<span class="edited-file-path">${escapeHtml(f.path)}</span>` +
-                `<span class="edited-file-stats">${label} <span class="diff-stats-add">+${f.added}</span> <span class="diff-stats-del">-${f.removed}</span></span>` +
-                `</div>`;
-        }).join('');
-        box.innerHTML =
-            `<div class="edited-files-header">Changed Files <span>${files.length} files</span> <span>${changeText}</span> <span class="diff-stats-add">+${totalAdded}</span> <span class="diff-stats-del">-${totalRemoved}</span></div>` +
-            `<div class="edited-files-list">${rows}</div>`;
-        return box;
+    normalizeFileKey(filePath: string): string {
+        return String(filePath || '').replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
     },
 
-    renderTaskChangesCard(summary: TaskChangeSummary | null): void {
-        if (!summary || !summary.files || summary.files.length === 0 || !summary.patch) return;
+    fileKeysMatch(a: string, b: string): boolean {
+        const left = this.normalizeFileKey(a);
+        const right = this.normalizeFileKey(b);
+        if (!left || !right) return false;
+        return left === right || left.endsWith(`/${right}`) || right.endsWith(`/${left}`);
+    },
+
+    getLatestAssistantWithToolDiffs(): HTMLElement | null {
+        const containers = Array.from(document.querySelectorAll<HTMLElement>('.msg-assistant, .streaming'));
+        return containers.reverse().find(container => container.querySelector('.diff-card[data-file], [data-file][data-action]')) || null;
+    },
+
+    findToolDiffCard(filePath: string): HTMLElement | null {
+        const latest = this.getLatestAssistantWithToolDiffs();
+        if (!latest) return null;
+        const cards = Array.from(latest.querySelectorAll<HTMLElement>('.diff-card[data-file]'));
+        return cards.find(card => this.fileKeysMatch(card.getAttribute('data-file') || '', filePath)) || null;
+    },
+
+    cloneToolDiffForFile(filePath: string): HTMLElement | null {
+        const source = this.findToolDiffCard(filePath);
+        if (!source) return null;
+        const clone = source.cloneNode(true) as HTMLElement;
+        clone.classList.add('expanded', 'task-tool-diff');
+        clone.querySelector<HTMLElement>('.diff-card-header')?.addEventListener('click', () => {
+            clone.classList.toggle('expanded');
+        });
+        return clone;
+    },
+
+    cloneAllToolDiffs(): HTMLElement[] {
+        const latest = this.getLatestAssistantWithToolDiffs();
+        if (!latest) return [];
+        return Array.from(latest.querySelectorAll<HTMLElement>('.diff-card[data-file]')).map(card => {
+            const clone = card.cloneNode(true) as HTMLElement;
+            clone.classList.add('expanded', 'task-tool-diff');
+            clone.querySelector<HTMLElement>('.diff-card-header')?.addEventListener('click', () => {
+                clone.classList.toggle('expanded');
+            });
+            return clone;
+        });
+    },
+
+    findTaskChangeFile(map: Map<string, TaskChangeFile>, filePath: string): TaskChangeFile | undefined {
+        return Array.from(map.values()).find(file => this.fileKeysMatch(file.path, filePath));
+    },
+
+    renderToolOnlyTaskChangesFallback(): void {
+        const messagesDiv = document.getElementById('messages');
+        if (!messagesDiv) return;
+        const latest = this.getLatestAssistantWithToolDiffs();
+        if (!latest || latest.querySelector('.task-changes-card')) return;
+        if (messagesDiv.querySelector('.task-changes-card[data-tool-fallback="true"]')) return;
+
+        const editedFiles = this.collectEditedFiles(latest);
+        if (editedFiles.length === 0) return;
+        const summary: TaskChangeSummary = {
+            id: `tool_changes_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            files: editedFiles.map(file => ({
+                path: file.path,
+                added: file.added,
+                removed: file.removed,
+                source: 'tool',
+                action: file.action,
+                hasToolDiff: !!this.findToolDiffCard(file.path),
+            })),
+            totalAdded: editedFiles.reduce((sum, file) => sum + file.added, 0),
+            totalRemoved: editedFiles.reduce((sum, file) => sum + file.removed, 0),
+            patch: '',
+            createdAt: Date.now(),
+            canUndo: false,
+            warning: '本轮改动来自工具记录，但当前没有可安全反向应用的 Git patch；可查看 diff，撤销需手动处理。',
+        };
+        this.renderTaskChangesCard(summary, true);
+    },
+
+    mergeToolEditedFilesIntoTaskSummary(summary: TaskChangeSummary): TaskChangeSummary {
+        const map = new Map<string, TaskChangeFile>();
+        for (const file of summary.files || []) {
+            map.set(file.path, { ...file, source: file.source || 'git' });
+        }
+
+        const latest = this.getLatestAssistantWithToolDiffs();
+        if (latest) {
+            for (const edited of this.collectEditedFiles(latest)) {
+                const existing = map.get(edited.path) || this.findTaskChangeFile(map, edited.path);
+                if (existing) {
+                    existing.added = Math.max(existing.added || 0, edited.added || 0);
+                    existing.removed = Math.max(existing.removed || 0, edited.removed || 0);
+                    existing.action = existing.action || edited.action;
+                    existing.hasToolDiff = existing.hasToolDiff || !!this.findToolDiffCard(edited.path);
+                    continue;
+                }
+                map.set(edited.path, {
+                    path: edited.path,
+                    added: edited.added,
+                    removed: edited.removed,
+                    source: 'tool',
+                    action: edited.action,
+                    hasToolDiff: !!this.findToolDiffCard(edited.path),
+                });
+            }
+        }
+
+        const files = Array.from(map.values()).sort((a, b) => a.path.localeCompare(b.path));
+        return {
+            ...summary,
+            files,
+            totalAdded: files.reduce((sum, file) => sum + (file.added || 0), 0),
+            totalRemoved: files.reduce((sum, file) => sum + (file.removed || 0), 0),
+        };
+    },
+
+    renderTaskChangesCard(summary: TaskChangeSummary | null, isToolFallback = false): void {
+        if (!summary || !summary.files || summary.files.length === 0) return;
         const messagesDiv = document.getElementById('messages')!;
+        if (!isToolFallback) {
+            messagesDiv.querySelectorAll<HTMLElement>('.task-changes-card[data-tool-fallback="true"]').forEach(el => el.remove());
+        }
+        summary = this.mergeToolEditedFilesIntoTaskSummary(summary);
         const card = createElement('div', 'task-changes-card');
         card.setAttribute('data-task-change-id', summary.id);
+        if (isToolFallback) card.setAttribute('data-tool-fallback', 'true');
         (card as any)._patch = summary.patch;
+        if (summary.patch && summary.patch.length <= HISTORY_PATCH_MAX_CHARS) {
+            const patchTemplate = createElement('template', 'task-changes-patch');
+            patchTemplate.setAttribute('data-kind', 'git-patch');
+            patchTemplate.textContent = summary.patch;
+            card.appendChild(patchTemplate);
+        }
 
         const fileCount = summary.files.length;
         const fileText = fileCount === 1 ? '1 个文件' : `${fileCount} 个文件`;
         const rows = summary.files.map(file => {
             const binary = file.binary ? '<span class="task-change-binary">binary</span>' : '';
+            const staged = file.staged ? '<span class="task-change-binary">staged</span>' : '';
+            const external = file.source === 'tool' ? '<span class="task-change-binary">tool</span>' : '';
+            const action = file.action ? `<span class="task-change-binary">${escapeHtml(file.action)}</span>` : '';
             return `<button class="task-change-row" type="button" data-file="${escapeHtml(file.path)}">` +
                 `<span class="task-change-path">${escapeHtml(file.path)}</span>` +
-                `<span class="task-change-row-stats">${binary}<span class="diff-stats-add">+${file.added}</span> <span class="diff-stats-del">-${file.removed}</span></span>` +
+                `<span class="task-change-row-stats">${binary}${staged}${external}${action}<span class="diff-stats-add">+${file.added}</span> <span class="diff-stats-del">-${file.removed}</span></span>` +
                 `</button>`;
         }).join('');
 
-        card.innerHTML = `
+        card.insertAdjacentHTML('beforeend', `
             <div class="task-changes-head">
-                <div class="task-changes-icon">+</div>
+                <div class="task-changes-icon"><span class="task-changes-icon-add">+</span><span class="task-changes-icon-del">-</span></div>
                 <div class="task-changes-title">
                     <div>已编辑 ${fileText}</div>
                     <div class="task-changes-stats"><span class="diff-stats-add">+${summary.totalAdded}</span> <span class="diff-stats-del">-${summary.totalRemoved}</span></div>
@@ -1424,7 +1615,7 @@ export const Messages = {
             <div class="task-changes-list">${rows}</div>
             <div class="task-changes-diff" hidden></div>
             <div class="task-changes-status"></div>
-        `;
+        `);
 
         messagesDiv.appendChild(card);
         smartScroll(messagesDiv);
@@ -1433,25 +1624,69 @@ export const Messages = {
         const undoBtn = card.querySelector<HTMLButtonElement>('.task-changes-undo');
         const diffEl = card.querySelector<HTMLElement>('.task-changes-diff');
         const statusEl = card.querySelector<HTMLElement>('.task-changes-status');
-        if (undoBtn && summary.canUndo === false) {
+        if (undoBtn && (summary.canUndo === false || !summary.patch)) {
             undoBtn.disabled = true;
-            undoBtn.title = summary.warning || 'Cannot safely undo this diff.';
+            undoBtn.title = summary.warning || (!summary.patch ? '没有可安全反向应用的 Git patch。' : 'Cannot safely undo this diff.');
+        }
+        if (reviewBtn && !summary.patch && !summary.files.some(file => file.hasToolDiff)) {
+            reviewBtn.disabled = true;
+            reviewBtn.title = '没有可展示的文本 diff。';
         }
 
-        const toggleReview = () => {
+        const ensureDefaultDiff = () => {
+            if (!diffEl) return;
+            if (summary.patch) {
+                diffEl.innerHTML = '';
+                renderMessageGitDiff(diffEl, summary.patch);
+                return;
+            }
+            diffEl.innerHTML = '';
+            for (const toolDiff of this.cloneAllToolDiffs()) diffEl.appendChild(toolDiff);
+        };
+
+        const toggleReview = (targetFile?: string) => {
             if (!diffEl) return;
             const opening = diffEl.hidden;
             if (opening && !diffEl.hasChildNodes()) {
-                renderMessageGitDiff(diffEl, summary.patch);
+                ensureDefaultDiff();
             }
-            diffEl.hidden = !opening;
-            if (reviewBtn) reviewBtn.textContent = opening ? '收起' : '审核';
+            if (targetFile) {
+                diffEl.hidden = false;
+            } else {
+                diffEl.hidden = !opening;
+            }
+            if (reviewBtn) reviewBtn.textContent = diffEl.hidden ? '审核' : '收起';
+            if (targetFile && !diffEl.hidden) {
+                let header = Array.from(diffEl.querySelectorAll<HTMLElement>('.diff-file-header'))
+                    .find(el => this.fileKeysMatch(el.dataset.file || '', targetFile));
+                if (!header && summary.patch) {
+                    ensureDefaultDiff();
+                    header = Array.from(diffEl.querySelectorAll<HTMLElement>('.diff-file-header'))
+                        .find(el => this.fileKeysMatch(el.dataset.file || '', targetFile));
+                }
+                if (header) {
+                    header.scrollIntoView({ block: 'nearest' });
+                    if (statusEl) statusEl.textContent = '';
+                } else if (statusEl) {
+                    const toolDiff = this.cloneToolDiffForFile(targetFile);
+                    if (toolDiff) {
+                        diffEl.innerHTML = '';
+                        diffEl.appendChild(toolDiff);
+                        statusEl.textContent = `${targetFile} 来自本轮工具记录；该 diff 可查看，但不属于当前 Git patch 撤销范围。`;
+                    } else {
+                        statusEl.textContent = `${targetFile} 来自本轮工具记录，但没有可回放的文本 diff。`;
+                    }
+                }
+            }
             smartScroll(messagesDiv);
         };
 
-        reviewBtn?.addEventListener('click', toggleReview);
+        reviewBtn?.addEventListener('click', () => toggleReview());
         card.querySelectorAll('.task-change-row').forEach(row => {
-            row.addEventListener('click', toggleReview);
+            row.addEventListener('click', () => {
+                const targetFile = (row as HTMLElement).dataset.file || '';
+                toggleReview(targetFile);
+            });
         });
         undoBtn?.addEventListener('click', () => {
             if (summary.canUndo === false) return;
@@ -1461,6 +1696,7 @@ export const Messages = {
             if (statusEl) statusEl.textContent = '正在撤销...';
             vscode.taskChangesUndo(summary.id, summary.patch);
         });
+        this.scheduleHistorySnapshot();
     },
 
     handleTaskChangesUndoResult(result: { id?: string; ok?: boolean; error?: string }): void {
@@ -1539,6 +1775,11 @@ export const Messages = {
     },
 
     renderHistoryTurn(turn: any, messagesDiv: HTMLElement): void {
+            if (turn.snapshot?.assistantHtml) {
+                this.renderHistorySnapshotTurn(turn, messagesDiv);
+                return;
+            }
+
             const user = turn.user || {};
             this.renderHistoryUserMessage(user.text || '', user.images || null);
 
@@ -1572,6 +1813,260 @@ export const Messages = {
             messagesDiv.appendChild(msg);
     },
 
+    renderHistorySnapshotTurn(turn: any, messagesDiv: HTMLElement): void {
+        const snapshot = turn.snapshot || {};
+        if (snapshot.userHtml) {
+            const userWrap = createElement('div', 'history-snapshot-wrap');
+            userWrap.innerHTML = String(snapshot.userHtml);
+            this.sanitizeHistorySnapshot(userWrap);
+            const userEl = userWrap.firstElementChild as HTMLElement | null;
+            if (userEl) {
+                userEl.classList.add('history-message');
+                messagesDiv.appendChild(userEl);
+            } else {
+                const user = turn.user || {};
+                this.renderHistoryUserMessage(user.text || '', user.images || null);
+            }
+        } else {
+            const user = turn.user || {};
+            this.renderHistoryUserMessage(user.text || '', user.images || null);
+        }
+
+        const wrap = createElement('div', 'history-snapshot-wrap');
+        wrap.innerHTML = String(snapshot.assistantHtml || '');
+        this.sanitizeHistorySnapshot(wrap);
+        const nodes = Array.from(wrap.children) as HTMLElement[];
+        if (nodes.length === 0) return;
+        nodes.forEach(node => {
+            node.classList.add('history-message', 'history-snapshot-message');
+            node.classList.remove('streaming');
+        });
+        wrap.querySelectorAll<HTMLElement>('.tool-line[data-status="running"], .tool-card[data-status="running"]').forEach(el => {
+            el.setAttribute('data-status', 'success');
+        });
+        this.rebindHistorySnapshotInteractions(wrap, turn.meta?.details || []);
+        for (const node of nodes) {
+            messagesDiv.appendChild(node);
+        }
+        this.renderHistoryDiffFallback(turn, messagesDiv);
+    },
+
+    renderHistoryDiffFallback(turn: any, messagesDiv: HTMLElement): void {
+        const details = Array.isArray(turn?.meta?.details) ? turn.meta.details : [];
+        if (!details.length) return;
+        const hasDiffUi = messagesDiv.lastElementChild?.classList.contains('task-changes-card') ||
+            messagesDiv.lastElementChild?.classList.contains('diff-card');
+        if (hasDiffUi) return;
+        const diff = details
+            .map((d: any) => ({
+                title: String(d?.title || ''),
+                body: String(d?.body || ''),
+            }))
+            .find((d: any) => d.body.includes('diff --git') || /(^|[._-])git[_-]?diff$/i.test(d.title));
+        if (!diff?.body || !diff.body.includes('diff --git')) return;
+
+        const card = createElement('div', 'diff-card history-diff-card');
+        card.innerHTML =
+            `<div class="diff-card-header">` +
+            `<span class="diff-card-icon">±</span>` +
+            `<span class="diff-card-title">历史 Diff</span>` +
+            `<span class="diff-card-toggle">展开</span>` +
+            `</div><div class="diff-card-body"></div>`;
+        const body = card.querySelector<HTMLElement>('.diff-card-body');
+        if (body) renderMessageGitDiff(body, diff.body);
+        card.querySelector<HTMLElement>('.diff-card-header')?.addEventListener('click', () => {
+            card.classList.toggle('expanded');
+        });
+        messagesDiv.appendChild(card);
+    },
+
+    sanitizeHistorySnapshot(root: HTMLElement): void {
+        root.querySelectorAll('script, iframe, object, embed, link, meta, style').forEach(el => el.remove());
+        const urlAttrs = new Set(['href', 'src', 'xlink:href', 'formaction', 'action']);
+        root.querySelectorAll<HTMLElement>('*').forEach(el => {
+            if (el.tagName === 'FORM') {
+                el.replaceWith(...Array.from(el.childNodes));
+                return;
+            }
+            for (const attr of Array.from(el.attributes)) {
+                const name = attr.name.toLowerCase();
+                const value = (attr.value || '').trim();
+                if (
+                    name.startsWith('on') ||
+                    name === 'srcdoc' ||
+                    urlAttrs.has(name) && !this.isSafeHistorySnapshotUrl(value) ||
+                    /^\s*(?:javascript|data|vbscript|file|blob):/i.test(value)
+                ) {
+                    el.removeAttribute(attr.name);
+                }
+            }
+        });
+    },
+
+    isSafeHistorySnapshotUrl(value: string): boolean {
+        if (!value) return false;
+        if (value.startsWith('#')) return true;
+        if (/^https?:\/\//i.test(value)) return true;
+        if (/^(?:localhost|127\.0\.0\.1):\d+(?:[/?#]|$)/i.test(value)) return true;
+        return false;
+    },
+
+    isThinkingCompactPlaceholder(text: string): boolean {
+        return /(?:chars?\s+captured|Click to expand|已捕获|点击展开)/i.test(String(text || ''));
+    },
+
+    rebindHistorySnapshotInteractions(root: HTMLElement, details: any[] = []): void {
+        const savedThoughts = (Array.isArray(details) ? details : [])
+            .filter(d => d?.type === 'reasoning' && String(d.body || '').trim());
+        let thoughtIndex = 0;
+        root.querySelectorAll<HTMLButtonElement>('.execution-drawer-header').forEach(header => {
+            header.addEventListener('click', () => {
+                header.closest('.execution-drawer')?.classList.toggle('open');
+            });
+        });
+        root.querySelectorAll<HTMLElement>('.thinking-block').forEach(block => {
+            const visibleText = String(block.textContent || '').trim();
+            let reasoningText = (block as any)._reasoningText || block.dataset.reasoningText || '';
+            if (!reasoningText && visibleText && !this.isThinkingCompactPlaceholder(visibleText)) {
+                reasoningText = visibleText;
+            }
+            if (!reasoningText) {
+                const saved = savedThoughts[thoughtIndex];
+                if (saved?.body) reasoningText = String(saved.body);
+            }
+            thoughtIndex++;
+            if (!reasoningText) return;
+            (block as any)._reasoningText = reasoningText;
+            (block as any)._reasoningTrimmed = block.dataset.reasoningTrimmed === 'true';
+            block.dataset.reasoningText = reasoningText;
+            block.dataset.reasoningTrimmed = (block as any)._reasoningTrimmed ? 'true' : 'false';
+            block.title = t('thinking.expand.title');
+            this.renderThinkingBlock(block, block.classList.contains('show'), false);
+            block.addEventListener('click', () => {
+                if (block.classList.contains('show')) return;
+                const toggle = block.previousElementSibling as HTMLElement | null;
+                block.classList.add('show');
+                toggle?.classList.add('open');
+                this.renderThinkingBlock(block, true, false);
+            });
+        });
+        root.querySelectorAll<HTMLElement>('.thinking-toggle').forEach(toggle => {
+            const dot = toggle.querySelector('.thinking-dot');
+            const lbl = toggle.querySelector('span:nth-child(2)') as HTMLElement | null;
+            if (lbl) lbl.textContent = dot?.classList.contains('done') ? t('thought') : t('thinking');
+            toggle.addEventListener('click', () => {
+                const block = toggle.nextElementSibling as HTMLElement | null;
+                if (!block?.classList.contains('thinking-block')) return;
+                const open = !block.classList.contains('show');
+                block.classList.toggle('show', open);
+                toggle.classList.toggle('open', open);
+                this.renderThinkingBlock(block, open, false);
+            });
+        });
+        root.querySelectorAll<HTMLElement>('.diff-card-header').forEach(header => {
+            header.addEventListener('click', () => {
+                header.closest('.diff-card')?.classList.toggle('expanded');
+            });
+        });
+        root.querySelectorAll<HTMLButtonElement>('.task-changes-undo').forEach(btn => {
+            btn.disabled = true;
+            btn.title = '历史记录中的改动卡片仅用于回放查看，不能执行撤销。';
+        });
+        root.querySelectorAll<HTMLButtonElement>('.task-changes-review').forEach(btn => {
+            const card = btn.closest('.task-changes-card') as HTMLElement | null;
+            const diffEl = card?.querySelector<HTMLElement>('.task-changes-diff');
+            if (!this.getHistoryTaskChangesPatch(card, details) && diffEl && !diffEl.hasChildNodes()) {
+                btn.disabled = true;
+                btn.title = 'No replayable text diff was saved in this history record.';
+            }
+            btn.addEventListener('click', () => {
+                if (!diffEl) return;
+                this.ensureHistoryTaskChangesDiff(card, diffEl, details);
+                diffEl.hidden = !diffEl.hidden;
+                btn.textContent = diffEl.hidden ? '审核' : '收起';
+            });
+        });
+        root.querySelectorAll<HTMLButtonElement>('.task-changes-review-legacy-disabled').forEach(btn => {
+            const card = btn.closest('.task-changes-card') as HTMLElement | null;
+            const diffEl = card?.querySelector<HTMLElement>('.task-changes-diff');
+            btn.addEventListener('click', () => {
+                if (!diffEl) return;
+                diffEl.hidden = !diffEl.hidden;
+                btn.textContent = diffEl.hidden ? '审核' : '收起';
+            });
+        });
+        root.querySelectorAll<HTMLButtonElement>('.task-change-row').forEach(row => {
+            row.addEventListener('click', () => {
+                const card = row.closest('.task-changes-card') as HTMLElement | null;
+                const diffEl = card?.querySelector<HTMLElement>('.task-changes-diff');
+                if (!diffEl) return;
+                this.ensureHistoryTaskChangesDiff(card, diffEl, details);
+                diffEl.hidden = false;
+                const targetFile = row.dataset.file || '';
+                const header = Array.from(diffEl.querySelectorAll<HTMLElement>('.diff-file-header'))
+                    .find(el => this.fileKeysMatch(el.dataset.file || el.textContent || '', targetFile));
+                const statusEl = card?.querySelector<HTMLElement>('.task-changes-status');
+                if (header) {
+                    header.scrollIntoView({ block: 'nearest' });
+                    if (statusEl) statusEl.textContent = '';
+                } else if (statusEl) {
+                    statusEl.textContent = `${targetFile} 没有保存可回放的文本 diff。`;
+                }
+                const reviewBtn = card?.querySelector<HTMLButtonElement>('.task-changes-review');
+                if (reviewBtn) reviewBtn.textContent = '收起';
+            });
+        });
+        root.querySelectorAll<HTMLButtonElement>('.task-change-row-legacy-disabled').forEach(row => {
+            row.addEventListener('click', () => {
+                const card = row.closest('.task-changes-card') as HTMLElement | null;
+                const diffEl = card?.querySelector<HTMLElement>('.task-changes-diff');
+                if (!diffEl) return;
+                this.ensureHistoryTaskChangesDiff(card, diffEl, details);
+                diffEl.hidden = false;
+                const targetFile = row.dataset.file || '';
+                const header = Array.from(diffEl.querySelectorAll<HTMLElement>('.diff-file-header'))
+                    .find(el => this.fileKeysMatch(el.dataset.file || el.textContent || '', targetFile));
+                header?.scrollIntoView({ block: 'nearest' });
+                const reviewBtn = card?.querySelector<HTMLButtonElement>('.task-changes-review');
+                if (reviewBtn) reviewBtn.textContent = '收起';
+            });
+        });
+    },
+
+    getHistoryTaskChangesPatch(card: HTMLElement | null | undefined, details: any[] = []): string {
+        if (!card) return '';
+        const runtimePatch = (card as any)._patch;
+        if (typeof runtimePatch === 'string' && runtimePatch) return runtimePatch;
+        const tpl = card.querySelector<HTMLTemplateElement>('template.task-changes-patch[data-kind="git-patch"]');
+        const patch = tpl?.content?.textContent || tpl?.textContent || '';
+        if (patch) {
+            (card as any)._patch = patch;
+            return patch;
+        }
+        const detailPatch = this.findHistoryDiffFromDetails(details);
+        if (detailPatch) (card as any)._patch = detailPatch;
+        return detailPatch;
+    },
+
+    findHistoryDiffFromDetails(details: any[] = []): string {
+        if (!Array.isArray(details)) return '';
+        const found = details
+            .map(d => ({
+                title: String(d?.title || ''),
+                body: String(d?.body || ''),
+            }))
+            .find(d => d.body.includes('diff --git') || /(^|[._-])git[_-]?diff$/i.test(d.title));
+        return found?.body?.includes('diff --git') ? found.body : '';
+    },
+
+    ensureHistoryTaskChangesDiff(card: HTMLElement | null | undefined, diffEl: HTMLElement, details: any[] = []): void {
+        if (diffEl.querySelector('.diff-file-header')) return;
+        const patch = this.getHistoryTaskChangesPatch(card, details);
+        if (!patch) return;
+        diffEl.innerHTML = '';
+        renderMessageGitDiff(diffEl, patch);
+    },
+
     renderHistoryProcessOverview(details: any[]): HTMLElement {
         const wrap = createElement('div', 'history-process-overview');
         const list = Array.isArray(details) ? details : [];
@@ -1585,7 +2080,7 @@ export const Messages = {
 
         const stats = createElement('div', 'history-process-stats');
         stats.innerHTML = [
-            thoughts.length ? `<span class="history-process-pill thought">${thoughts.length} Thought</span>` : '',
+            thoughts.length ? `<span class="history-process-pill thought">${thoughts.length} ${escapeHtml(t('thought'))}</span>` : '',
             tools.length ? `<span class="history-process-pill tool">${tools.length} Tools</span>` : '',
             errors.length ? `<span class="history-process-pill error">${errors.length} Error</span>` : '',
         ].filter(Boolean).join('');
@@ -1594,7 +2089,7 @@ export const Messages = {
         if (thoughtPreview) {
             const thought = createElement('div', 'history-thought-preview');
             thought.innerHTML =
-                `<span class="history-thought-label">Thought</span>` +
+                `<span class="history-thought-label">${escapeHtml(t('thought'))}</span>` +
                 `<span class="history-thought-text">${escapeHtml(thoughtPreview)}</span>`;
             wrap.appendChild(thought);
         }
@@ -1652,7 +2147,7 @@ export const Messages = {
             const item = createElement('details', `history-detail history-detail-${detail.type || 'item'}`) as HTMLDetailsElement;
             const summary = createElement('summary', 'history-detail-summary');
             const rawTitle = String(detail.title || detail.type || 'detail');
-            const title = escapeHtml(detail.type === 'tool' ? (this.getToolLabel(rawTitle) || rawTitle) : rawTitle);
+            const title = escapeHtml(detail.type === 'tool' ? (this.getToolLabel(rawTitle) || rawTitle) : (detail.type === 'reasoning' ? t('thought') : rawTitle));
             const elapsed = Number(detail.elapsedSec || 0);
             const preview = this.previewHistoryDetail(detail, 110);
             summary.innerHTML =
@@ -1661,14 +2156,7 @@ export const Messages = {
                 (elapsed > 0 ? `<span class="history-detail-time">${this.formatDuration(elapsed)}</span>` : '');
             const body = createElement('pre', 'history-detail-body');
             const bodyText = String(detail.body || '').trim() || '(empty)';
-            body.textContent = bodyText.length > 600 ? 'Open to load output...' : bodyText;
-            (item as any)._lazyBodyLoaded = bodyText.length <= 600;
-            item.addEventListener('toggle', () => {
-                if (item.open && !(item as any)._lazyBodyLoaded) {
-                    body.textContent = bodyText;
-                    (item as any)._lazyBodyLoaded = true;
-                }
-            });
+            body.textContent = bodyText;
             if (detail.isError) item.classList.add('history-detail-error');
             item.appendChild(summary);
             item.appendChild(body);
@@ -2551,6 +3039,10 @@ export const Messages = {
             btn.textContent = t('queue.edit');
             btn.title = t('queue.edit');
         });
+        container.querySelectorAll<HTMLButtonElement>('.queue-item-run').forEach(btn => {
+            btn.textContent = t('queue.run.now');
+            btn.title = t('queue.run.now.title');
+        });
         container.querySelectorAll<HTMLButtonElement>('.queue-item-del').forEach(btn => {
             btn.title = t('remove');
             btn.setAttribute('aria-label', t('remove'));
@@ -2585,6 +3077,7 @@ export const Messages = {
         item.innerHTML = `<span class="queue-item-num">#${idx + 1}</span>` +
             `<span class="queue-item-text">${escapeHtml(text.length > 80 ? text.substring(0, 80) + '...' : text)}</span>` +
             imageBadge +
+            `<button class="queue-item-run" title="${escapeHtml(t('queue.run.now.title'))}">${escapeHtml(t('queue.run.now'))}</button>` +
             `<button class="queue-item-edit" title="${escapeHtml(t('queue.edit'))}">${escapeHtml(t('queue.edit'))}</button>` +
             `<button class="queue-item-del" title="${escapeHtml(t('remove'))}" aria-label="${escapeHtml(t('remove'))}">x</button>`;
         const refreshQueueItems = () => {
@@ -2598,6 +3091,18 @@ export const Messages = {
             if (items.length === 0) container.remove();
         };
         const getCurrentIndex = () => Array.from(list.children).indexOf(item);
+        item.querySelector('.queue-item-run')!.addEventListener('click', () => {
+            const queued = store.get('queuedMsgs');
+            const currentIdx = getCurrentIndex();
+            const target = queued[currentIdx];
+            if (!target) return;
+            const remaining = queued.filter((_: any, i: number) => i !== currentIdx);
+            store.set('queuedMsgs', remaining);
+            store.set('skipNextQueueAutoSend', true);
+            vscode.interruptAndSend(target.text, target.images || null);
+            item.remove();
+            refreshQueueItems();
+        });
         item.querySelector('.queue-item-edit')!.addEventListener('click', () => {
             const queued = store.get('queuedMsgs');
             const currentIdx = getCurrentIndex();

@@ -10,8 +10,8 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
 import { atomicWriteSync } from './utils/fileLock';
+import { workspaceDataPath, workspaceWindowDataPath } from './workspaceData';
 
 export interface TokenUsage {
     promptTokens: number;
@@ -53,8 +53,10 @@ export class TokenTracker {
     private dirty = false;
     private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
-    constructor() {
-        this.dataPath = path.join(os.homedir(), '.mimo', 'token-usage.json');
+    constructor(workspace = process.cwd(), windowSessionId?: string) {
+        this.dataPath = windowSessionId
+            ? workspaceWindowDataPath(workspace, windowSessionId, 'token-usage.json')
+            : workspaceDataPath(workspace, 'token-usage.json');
         this.data = this.load();
     }
 

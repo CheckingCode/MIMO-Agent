@@ -58,9 +58,43 @@ const QUICK_GREETINGS = new Set([
 
 function looksLikeSimpleQuestion(text: string): boolean {
     const trimmed = text.trim();
+    if (/(diff|git|staged|cached|暂存|变更|改动|文件|卡片|VS\s*Code|vscode|MIMO|MiMo|扩展|插件|\.html?|\.tsx?|\.jsx?|\.ts|\.js|\.py|\.json|\.md)/i.test(trimmed)) {
+        return false;
+    }
     return /^(what|why|how|can|could|is|are|do|does|will|would)\b/i.test(trimmed)
         || /^(什么是|为什么|怎么|如何|能否|可不可以|有没有|是不是|是否)/.test(trimmed)
         || (trimmed.length <= 80 && /[?？]$/.test(trimmed));
+}
+
+function includesAny(text: string, needles: string[]): boolean {
+    const lower = text.toLowerCase();
+    return needles.some(needle => lower.includes(needle.toLowerCase()));
+}
+
+function classifyLocalWorkspaceTask(text: string): IntentResult | null {
+    const hasLocalPath = /[A-Za-z]:[\\/]|(?:^|[\s"'`])\.{1,2}[\\/]|[\\/][^\\/]+[\\/]/.test(text);
+    const hasLocalTarget = hasLocalPath || includesAny(text, [
+        'ppt', '.ppt', '.pptx', '.pdf', '.doc', '.docx', '.xls', '.xlsx',
+        '\u76ee\u5f55', '\u6587\u4ef6\u5939', '\u6587\u4ef6', '\u9879\u76ee', '\u5f00\u9898',
+    ]);
+    const hasAction = includesAny(text, [
+        '\u5e2e\u6211', '\u6839\u636e', '\u8bfb\u53d6', '\u67e5\u770b', '\u770b\u770b',
+        '\u627e', '\u641c\u7d22', '\u5199', '\u751f\u6210', '\u6574\u7406',
+        '\u521b\u5efa', '\u5236\u4f5c', '\u505a\u4e00\u4e2a', '\u6c47\u62a5\u7a3f',
+        '\u62a5\u544a', '\u6587\u6863', '\u603b\u7ed3',
+        'search', 'find', 'read', 'write', 'generate', 'create', 'summarize',
+    ]);
+
+    if (!hasLocalTarget || !hasAction) return null;
+
+    return {
+        needsTools: true,
+        category: 'multi_step',
+        plan: 'Inspect the referenced local files or directories before producing the requested output',
+        complexity: 'complex',
+        suggestedPersona: 'analyst',
+        source: 'heuristic',
+    };
 }
 
 const QUICK_DIRECT_PATTERNS: Array<{ pattern: RegExp; result: IntentResult }> = [
@@ -96,6 +130,10 @@ const QUICK_TOOL_PATTERNS: Array<{ pattern: RegExp; result: IntentResult }> = [
         result: { needsTools: true, category: 'config', plan: 'Inspect the relevant configuration and update it safely', complexity: 'moderate', suggestedPersona: 'programmer', source: 'heuristic' },
     },
     {
+        pattern: /(为什么|为啥|怎么|为何).{0,40}(diff|git|暂存|变更|改动|文件|卡片|VS\s*Code|vscode|MIMO|MiMo|扩展|插件)|(?:diff|git|staged|cached).{0,60}(not showing|missing|没有|不显示|看不到)/i,
+        result: { needsTools: true, category: 'debug', plan: 'Inspect the extension or workspace state before explaining the UI behavior', complexity: 'moderate', suggestedPersona: 'debugger', source: 'heuristic' },
+    },
+    {
         pattern: /(写一个|帮我写|实现|创建文件|修改文件|增加功能|build|implement|create|edit|write file)/i,
         result: { needsTools: true, category: 'code_task', plan: 'Inspect the relevant files and implement the requested change', complexity: 'moderate', suggestedPersona: 'programmer', source: 'heuristic' },
     },
@@ -104,6 +142,9 @@ const QUICK_TOOL_PATTERNS: Array<{ pattern: RegExp; result: IntentResult }> = [
 export function quickClassifyIntent(userInput: string): IntentResult | null {
     const trimmed = userInput.trim();
     const lower = trimmed.toLowerCase();
+
+    const localWorkspaceTask = classifyLocalWorkspaceTask(trimmed);
+    if (localWorkspaceTask) return localWorkspaceTask;
 
     if (!trimmed) {
         return {

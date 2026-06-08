@@ -99,6 +99,14 @@ function sanitizeBoolean(value: unknown): boolean | undefined {
     return typeof value === 'boolean' ? value : undefined;
 }
 
+function detectProviderFromBaseUrl(baseUrl: string): string {
+    const normalized = String(baseUrl || '').toLowerCase();
+    if (normalized.includes('xiaomimimo') || normalized.includes('mimo')) return 'mimo';
+    if (normalized.includes('deepseek')) return 'deepseek';
+    if (normalized.includes('openai.com')) return 'openai';
+    return 'custom';
+}
+
 function sanitizeMode(value: unknown): AgentMode | undefined {
     return value === 'auto' || value === 'polling' || value === 'plan' || value === 'adversarial' || value === 'infinite'
         ? value
@@ -272,6 +280,12 @@ function sanitizeSettings(input: unknown): Record<string, unknown> {
     if (model !== undefined) out.model = model;
     const activeProviderProfile = sanitizeString(s.active_provider_profile, 80);
     if (activeProviderProfile !== undefined) out.active_provider_profile = activeProviderProfile;
+    if (s.active_route && typeof s.active_route === 'object') {
+        const rawRoute = s.active_route as Record<string, unknown>;
+        const endpointId = sanitizeString(rawRoute.endpoint_id, 80);
+        const routeModel = sanitizeString(rawRoute.model, 128);
+        if (endpointId && routeModel) out.active_route = { endpoint_id: endpointId, model: routeModel };
+    }
     if (Array.isArray(s.provider_profiles)) {
         out.provider_profiles = s.provider_profiles
             .map((profile) => {
@@ -279,6 +293,7 @@ function sanitizeSettings(input: unknown): Record<string, unknown> {
                 const raw = profile as Record<string, unknown>;
                 const id = sanitizeString(raw.id, 80);
                 const name = sanitizeString(raw.name, 120) || id;
+                const provider = sanitizeString(raw.provider, 80) || detectProviderFromBaseUrl(String(raw.base_url || ''));
                 const baseUrl = sanitizeString(raw.base_url, 2048);
                 const profileModel = sanitizeString(raw.model, 128) || '';
                 const apiKey = sanitizeString(raw.api_key, 4096) || '';
@@ -286,7 +301,7 @@ function sanitizeSettings(input: unknown): Record<string, unknown> {
                     ? raw.models.map(v => sanitizeString(v, 128)).filter((v): v is string => !!v).slice(0, 100)
                     : [];
                 if (!id || !baseUrl || !/^https?:\/\//i.test(baseUrl)) return undefined;
-                return { id, name, base_url: baseUrl.replace(/\/+$/, ''), model: profileModel, api_key: apiKey, models: profileModels };
+                return { id, name, provider, base_url: baseUrl.replace(/\/+$/, ''), model: profileModel, api_key: apiKey, models: profileModels };
             })
             .filter(Boolean)
             .slice(0, 50);
@@ -297,7 +312,7 @@ function sanitizeSettings(input: unknown): Record<string, unknown> {
             .filter((v): v is string => !!v)
             .slice(0, 50);
     }
-    const maxTokens = sanitizeNumber(s.max_tokens, 256, 131072);
+    const maxTokens = sanitizeNumber(s.max_tokens, 256, 65536);
     if (maxTokens !== undefined) out.max_tokens = Math.round(maxTokens);
     const temperature = sanitizeNumber(s.temperature, 0, 2);
     if (temperature !== undefined) out.temperature = temperature;
@@ -361,11 +376,53 @@ function sanitizeSkill(input: unknown): { name: string; description: string; too
     return { name, description, prompt, tools };
 }
 
-function trimWebviewToolResult(result: string, maxChars = 12_000): string {
+function trimWebviewToolResult(result: string, maxChars = 3_500): string {
     if (!result || result.length <= maxChars) return result || '';
     const head = result.slice(0, Math.floor(maxChars * 0.7));
     const tail = result.slice(-Math.floor(maxChars * 0.25));
     return `${head}\n\n... output truncated for Webview responsiveness (${result.length} chars). Showing head and tail only. ...\n\n${tail}`;
+}
+
+function createReasoningPostQueue(post: (msg: any) => void) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let buffer = '';
+    const MAX_BUFFER_CHARS = 6_000;
+
+    const flush = () => {
+        if (timer) {
+            clearTimeout(timer);
+            timer = undefined;
+        }
+        if (!buffer) return;
+        const token = buffer;
+        buffer = '';
+        post({ type: 'reasoning', token });
+    };
+
+    return {
+        push(token: string) {
+            if (!token) return;
+            buffer += token;
+            if (buffer.length > MAX_BUFFER_CHARS) {
+                buffer = buffer.slice(-MAX_BUFFER_CHARS);
+            }
+            if (buffer.length >= 1_500) {
+                flush();
+                return;
+            }
+            if (!timer) {
+                timer = setTimeout(flush, 900);
+            }
+        },
+        flush,
+        cancel() {
+            if (timer) {
+                clearTimeout(timer);
+                timer = undefined;
+            }
+            buffer = '';
+        },
+    };
 }
 
 function createStreamingRenderQueue(post: (msg: any) => void) {
@@ -418,6 +475,19 @@ function renderAssistantMarkdown(post: (msg: any) => void, type: 'assistantUpdat
     }
 }
 
+interface TurnChangeFile {
+    path: string;
+    added: number;
+    removed: number;
+    action?: string;
+    source?: 'tool';
+    hasToolDiff?: boolean;
+}
+
+interface TurnChangeTracker {
+    files: Map<string, TurnChangeFile>;
+}
+
 interface PanelState {
     panel: vscode.WebviewPanel;
     convId: string;        // initial conversation ID (for init)
@@ -438,6 +508,12 @@ interface PanelState {
     planId?: string;
 }
 
+interface SerializedChatPanelState {
+    kind?: string;
+    convIds?: string[];
+    activeConvId?: string;
+}
+
 export class ChatViewProvider {
     private panels = new Map<string, PanelState>();
     private panel?: vscode.WebviewPanel;  // current/active panel reference
@@ -445,14 +521,110 @@ export class ChatViewProvider {
     private history: HistoryManager;
     private cssContent: string = '';
     private replaySeq = 0;
+    private pendingHistorySaves = new Map<string, {
+        title: string;
+        messages: ChatMessage[];
+        model: string;
+        metadata: Partial<Pick<import('../history').HistoryConversation, 'mode' | 'personaId' | 'activeSkillPrompt' | 'inputHistory' | 'modelEndpointId'>>;
+    }>();
+    private historySaveTimer: ReturnType<typeof setTimeout> | undefined;
 
     constructor(
         private readonly extensionUri: vscode.Uri,
         agent: MiMoAgent,
+        private readonly windowSessionId?: string,
     ) {
         this.agent = agent;
-        this.history = new HistoryManager();
+        this.history = new HistoryManager(loadConfig().workspace, windowSessionId);
         this.loadCss();
+    }
+
+    private queueHistorySave(
+        id: string,
+        title: string,
+        messages: ChatMessage[],
+        model: string,
+        metadata: Partial<Pick<import('../history').HistoryConversation, 'mode' | 'personaId' | 'activeSkillPrompt' | 'inputHistory' | 'modelEndpointId'>> = {},
+    ): void {
+        this.pendingHistorySaves.set(id, { title, messages, model, metadata });
+        if (this.historySaveTimer) return;
+        this.historySaveTimer = setTimeout(() => {
+            this.historySaveTimer = undefined;
+            const saves = Array.from(this.pendingHistorySaves.entries());
+            this.pendingHistorySaves.clear();
+            setImmediate(() => {
+                for (const [convId, save] of saves) {
+                    try {
+                        this.history.save(convId, save.title, save.messages, save.model, save.metadata);
+                    } catch {
+                        // Best effort; UI responsiveness matters more than history persistence.
+                    }
+                }
+            });
+        }, 1200);
+    }
+
+    private historyMetadata(conv: import('../agentTypes').ConversationState): Partial<Pick<import('../history').HistoryConversation, 'mode' | 'personaId' | 'activeSkillPrompt' | 'modelEndpointId'>> {
+        return {
+            mode: conv.mode,
+            personaId: conv.personaId,
+            activeSkillPrompt: conv.activeSkillPrompt,
+            modelEndpointId: conv.modelEndpointId,
+        };
+    }
+
+    private attachUiSnapshot(convId: string, snapshot: any): void {
+        if (!snapshot || typeof snapshot !== 'object' || typeof snapshot.assistantHtml !== 'string') return;
+        if (snapshot.assistantHtml.length > 750_000) return;
+        const messages = this.agent.getMessages(convId);
+        for (let i = messages.length - 1; i >= 0; i--) {
+            if (messages[i].role === 'assistant') {
+                messages[i]._uiSnapshot = snapshot;
+                return;
+            }
+        }
+    }
+
+    flushHistorySaves(): void {
+        if (this.historySaveTimer) {
+            clearTimeout(this.historySaveTimer);
+            this.historySaveTimer = undefined;
+        }
+        const saves = Array.from(this.pendingHistorySaves.entries());
+        this.pendingHistorySaves.clear();
+        for (const [convId, save] of saves) {
+            try {
+                this.history.save(convId, save.title, save.messages, save.model, save.metadata);
+            } catch {
+                // Best effort during shutdown.
+            }
+        }
+    }
+
+    refreshModelLists(): void {
+        const models = this.agent.getModelOptions();
+        for (const st of this.panels.values()) {
+            const panel = st.panel;
+            const current = this.agent.getModelSelectionValue(st.activeConvId);
+            panel.webview.postMessage({ type: 'modelList', models, current });
+            panel.webview.postMessage({ type: 'modelCaps', caps: this.agent.getModelCapabilities(current) });
+            panel.webview.postMessage({ type: 'settingsData', settings: getSettingsPanel() });
+        }
+    }
+
+    setModelForOpenPanels(model: string): void {
+        for (const st of this.panels.values()) {
+            if (st.activeConvId) this.agent.setModel(model, st.activeConvId);
+        }
+        this.refreshModelLists();
+    }
+
+    private modelListMessage(convId: string): { type: 'modelList'; models: any[]; current: string } {
+        return {
+            type: 'modelList',
+            models: this.agent.getModelOptions(),
+            current: this.agent.getModelSelectionValue(convId),
+        };
     }
 
     private loadCss(): void {
@@ -530,11 +702,7 @@ export class ChatViewProvider {
             panel.webview.postMessage({ type: 'convTitle', title, convId: activeId });
             try {
                 const msgs = this.agent.getMessages(activeId);
-                this.history.save(activeId, conv.title, msgs, conv.model, {
-                    mode: conv.mode,
-                    personaId: conv.personaId,
-                    activeSkillPrompt: conv.activeSkillPrompt,
-                });
+                this.queueHistorySave(activeId, conv.title, msgs, conv.model, this.historyMetadata(conv));
             } catch { /* best effort only */ }
         });
     }
@@ -546,12 +714,70 @@ export class ChatViewProvider {
         this.createPanel(splitEditor);
     }
 
-    private createPanel(splitEditor = false): string {
+    restorePanel(panel: vscode.WebviewPanel, state: unknown): void {
+        this.createPanel(false, panel, this.sanitizeSerializedPanelState(state));
+    }
+
+    private sanitizeSerializedPanelState(state: unknown): SerializedChatPanelState | undefined {
+        if (!state || typeof state !== 'object') return undefined;
+        const raw = state as Record<string, unknown>;
+        const convIds = Array.isArray(raw.convIds)
+            ? raw.convIds
+                .map(id => sanitizeString(id, 120))
+                .filter((id): id is string => !!id)
+                .slice(0, 20)
+            : [];
+        const activeConvId = sanitizeString(raw.activeConvId, 120);
+        if (convIds.length === 0 && !activeConvId) return undefined;
+        return {
+            kind: sanitizeString(raw.kind, 40),
+            convIds,
+            activeConvId,
+        };
+    }
+
+    private ensureRestoredConversation(id: string): boolean {
+        if (!id) return false;
+        if (this.agent.getConversation(id)) return true;
+        const histConv = this.history.load(id);
+        if (!histConv) return false;
+        this.agent.loadConversation(id, histConv.title, histConv.messages, histConv.model, {
+            mode: sanitizeMode(histConv.mode),
+            personaId: histConv.personaId,
+            activeSkillPrompt: histConv.activeSkillPrompt,
+            modelEndpointId: histConv.modelEndpointId,
+        });
+        return true;
+    }
+
+    private resolveRestoredConversationIds(restored?: SerializedChatPanelState): { convIds: string[]; activeConvId: string; fresh: boolean } {
+        const requested = Array.from(new Set([
+            ...(restored?.convIds || []),
+            restored?.activeConvId || '',
+        ].filter(Boolean)));
+        const convIds = requested.filter(id => this.ensureRestoredConversation(id));
+        let activeConvId = restored?.activeConvId && convIds.includes(restored.activeConvId)
+            ? restored.activeConvId
+            : convIds[0];
+        if (!activeConvId) {
+            activeConvId = this.agent.createConversation();
+            convIds.push(activeConvId);
+            return { convIds, activeConvId, fresh: true };
+        }
+        return { convIds, activeConvId, fresh: false };
+    }
+
+    private createPanel(
+        splitEditor = false,
+        restoredPanel?: vscode.WebviewPanel,
+        restoredState?: SerializedChatPanelState,
+    ): string {
         const panelId = `mimo-${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        const convId = this.agent.createConversation();
+        const restored = this.resolveRestoredConversationIds(restoredState);
+        const convId = restored.activeConvId;
 
         const column = splitEditor ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
-        const panel = vscode.window.createWebviewPanel(
+        const panel = restoredPanel || vscode.window.createWebviewPanel(
             'mimo-agent.chat',
             'MiMo Chat',
             { viewColumn: column, preserveFocus: false },
@@ -561,15 +787,21 @@ export class ChatViewProvider {
                 retainContextWhenHidden: true,
             },
         );
+        panel.webview.options = {
+            enableScripts: true,
+            localResourceRoots: [this.extensionUri],
+        };
         panel.iconPath = vscode.Uri.joinPath(this.extensionUri, 'assets', 'mimo-agent-icon.svg');
+        const activeConv = this.agent.getConversation(convId);
+        if (activeConv) panel.title = activeConv.title;
 
         // Track this panel
-        const state: PanelState = { panel, convId, convIds: [convId], activeConvId: convId, messageQueue: [] };
+        const state: PanelState = { panel, convId, convIds: restored.convIds, activeConvId: convId, messageQueue: [] };
         this.panels.set(panelId, state);
 
         // Update current panel references
         this.panel = panel;
-        state.pendingInit = { firstId: convId, fresh: true };
+        state.pendingInit = { firstId: convId, fresh: restored.fresh };
 
         // On panel close 鈥?remove from map
         panel.onDidDispose(() => {
@@ -593,12 +825,14 @@ export class ChatViewProvider {
 
             switch (msg.type) {
                 case 'ready': {
-                    post({ type: 'setLang', lang: vscode.env.language.startsWith('zh') ? 'zh' : 'en' });
+                    const initialLang = vscode.env.language.startsWith('zh') ? 'zh' : 'en';
+                    post({ type: 'setLang', lang: initialLang });
 
                     // ALWAYS initialize 鈥?no dependency on pendingInit
                     const st = this.panels.get(panelId);
                     let myConvId = st?.activeConvId;
                     if (!myConvId) break;
+                    this.agent.setUiLang(initialLang, myConvId);
                     console.log(`[MiMo] ready: panelId=${panelId}, myConvId=${myConvId}, convCount=${this.agent.getConversation(myConvId)?.messages.length ?? 'N/A'}`);
 
                     // 1. Verify conversation exists 鈥?if not, create fresh one
@@ -622,8 +856,8 @@ export class ChatViewProvider {
                     }
 
                     // 3. Model info
-                    const model = this.agent.getModel(myConvId);
-                    post({ type: 'modelList', models: this.agent.getModelList(), current: model });
+                    const model = this.agent.getModelSelectionValue(myConvId);
+                    post(this.modelListMessage(myConvId));
                     post({ type: 'modelCaps', caps: this.agent.getModelCapabilities(model) });
 
                     // 4. Skills
@@ -667,8 +901,8 @@ export class ChatViewProvider {
                     post({ type: 'clearMessages' });
                     if (conv) {
                         this.replayConversation(conv.messages, panel);
-                        post({ type: 'modelList', models: this.agent.getModelList(), current: conv.model });
-                        post({ type: 'modelCaps', caps: this.agent.getModelCapabilities(conv.model) });
+                        post(this.modelListMessage(msg.id));
+                        post({ type: 'modelCaps', caps: this.agent.getModelCapabilities(this.agent.getModelSelectionValue(msg.id)) });
                         post({ type: 'restoreMode', mode: conv.mode, label: conv.mode });
                         // Restore busy state (only if THIS conversation is running)
                         post(this.agent.isConvRunning(msg.id) ? { type: 'busy' } : { type: 'idle' });
@@ -693,8 +927,8 @@ export class ChatViewProvider {
                         if (nextConv) {
                             post({ type: 'clearMessages' });
                             this.replayConversation(nextConv.messages, panel);
-                            post({ type: 'modelList', models: this.agent.getModelList(), current: nextConv.model });
-                            post({ type: 'modelCaps', caps: this.agent.getModelCapabilities(nextConv.model) });
+                            post(this.modelListMessage(nextId));
+                            post({ type: 'modelCaps', caps: this.agent.getModelCapabilities(this.agent.getModelSelectionValue(nextId)) });
                             post({ type: 'restoreMode', mode: nextConv.mode, label: nextConv.mode });
                         }
                     }
@@ -713,11 +947,7 @@ export class ChatViewProvider {
                     try {
                         const conv4 = this.agent.getConversation(msg.id);
                         if (conv4) {
-                            this.history.save(msg.id, msg.title, conv4.messages, conv4.model, {
-                                mode: conv4.mode,
-                                personaId: conv4.personaId,
-                                activeSkillPrompt: conv4.activeSkillPrompt,
-                            });
+                            this.queueHistorySave(msg.id, msg.title, conv4.messages, conv4.model, this.historyMetadata(conv4));
                         }
                     } catch { /* ignore */ }
                     break;
@@ -728,12 +958,39 @@ export class ChatViewProvider {
                     const text = sanitizeString(msg.text, 200_000) || '';
                     const images = sanitizeImages(msg.images);
                     if (!text && !images?.length) break;
-                    if (this.agent.isConvRunning(sendConvId)) {
+                    if (this.agent.isConvBusy(sendConvId)) {
                         post({ type: 'system', text: 'A message is already running. Wait for it to finish or press Stop before sending another message.' });
                         post({ type: 'clearQueue' });
                     } else {
                         await this.handleUserMessage(text, images, sendConvId, panel);
                     }
+                    break;
+                }
+                case 'interruptAndSend': {
+                    const st = this.panels.get(panelId);
+                    const sendConvId = st?.activeConvId || convId;
+                    const text = sanitizeString(msg.text, 200_000) || '';
+                    const images = sanitizeImages(msg.images);
+                    if (!text && !images?.length) break;
+                    if (st) st.messageQueue = [];
+
+                    if (this.agent.isConvBusy(sendConvId)) {
+                        post({ type: 'system', text: vscode.env.language.startsWith('zh') ? '正在中断当前任务，并切换到选中的排队消息...' : 'Interrupting the current run and switching to the selected queued message...' });
+                        this.agent.abort(sendConvId);
+                        const idle = await this.waitForConversationIdle(sendConvId, 10_000);
+                        if (!idle) {
+                            post({ type: 'system', text: vscode.env.language.startsWith('zh') ? '当前任务仍在收尾，稍后再试。' : 'The current run is still winding down. Try again shortly.' });
+                            break;
+                        }
+                    }
+
+                    await this.handleUserMessage(text, images, sendConvId, panel);
+                    break;
+                }
+                case 'setUiLang': {
+                    const stLang = this.panels.get(panelId);
+                    const lang = msg.lang === 'en' ? 'en' : 'zh';
+                    this.agent.setUiLang(lang, stLang?.activeConvId || convId);
                     break;
                 }
                 case 'clear': {
@@ -749,7 +1006,9 @@ export class ChatViewProvider {
                 }
                 case 'setModel': {
                     const stModel = this.panels.get(panelId);
-                    this.agent.setModel(msg.model, stModel?.activeConvId);
+                    const modelConvId = stModel?.activeConvId;
+                    this.agent.setModel(msg.model, modelConvId);
+                    if (modelConvId) post(this.modelListMessage(modelConvId));
                     post({ type: 'modelCaps', caps: this.agent.getModelCapabilities(msg.model) });
                     break;
                 }
@@ -794,6 +1053,16 @@ export class ChatViewProvider {
                     if (result.ok) {
                         const summary = await this.agent.getWorkspaceChangeSummary();
                         post({ type: 'taskChangesRefresh', summary });
+                    }
+                    break;
+                }
+                case 'historySnapshot': {
+                    const stSnap = this.panels.get(panelId);
+                    const snapConvId = stSnap?.activeConvId || convId;
+                    const convSnap = this.agent.getConversation(snapConvId);
+                    if (convSnap) {
+                        this.attachUiSnapshot(snapConvId, msg.snapshot);
+                        this.queueHistorySave(snapConvId, convSnap.title, convSnap.messages, convSnap.model, this.historyMetadata(convSnap));
                     }
                     break;
                 }
@@ -847,6 +1116,7 @@ export class ChatViewProvider {
                                 mode: sanitizeMode(histConv.mode),
                                 personaId: histConv.personaId,
                                 activeSkillPrompt: histConv.activeSkillPrompt,
+                                modelEndpointId: histConv.modelEndpointId,
                             });
                             foundPanel.activeConvId = id;
                             foundPanel.panel.title = histConv.title;
@@ -854,8 +1124,8 @@ export class ChatViewProvider {
                             foundPanel.panel.webview.postMessage({ type: 'convTitle', title: histConv.title, convId: id });
                             foundPanel.panel.webview.postMessage({ type: 'clearMessages' });
                             this.replayConversation(histConv.messages, foundPanel.panel);
-                            foundPanel.panel.webview.postMessage({ type: 'modelList', models: this.agent.getModelList(), current: histConv.model });
-                            foundPanel.panel.webview.postMessage({ type: 'modelCaps', caps: this.agent.getModelCapabilities(histConv.model) });
+                            foundPanel.panel.webview.postMessage(this.modelListMessage(id));
+                            foundPanel.panel.webview.postMessage({ type: 'modelCaps', caps: this.agent.getModelCapabilities(this.agent.getModelSelectionValue(id)) });
                             foundPanel.panel.webview.postMessage({ type: 'restoreMode', mode: histConv.mode || 'auto', label: histConv.mode || 'auto' });
                             foundPanel.panel.webview.postMessage({ type: 'restoreInputHistory', items: histConv.inputHistory || extractInputHistory(histConv.messages) });
                         } else {
@@ -866,6 +1136,7 @@ export class ChatViewProvider {
                                 mode: sanitizeMode(histConv.mode),
                                 personaId: histConv.personaId,
                                 activeSkillPrompt: histConv.activeSkillPrompt,
+                                modelEndpointId: histConv.modelEndpointId,
                             });
                             newState.convIds.push(id);
                             newState.activeConvId = id;
@@ -874,8 +1145,8 @@ export class ChatViewProvider {
                             newState.panel.webview.postMessage({ type: 'convTitle', title: histConv.title, convId: id });
                             newState.panel.webview.postMessage({ type: 'clearMessages' });
                             this.replayConversation(histConv.messages, newState.panel);
-                            newState.panel.webview.postMessage({ type: 'modelList', models: this.agent.getModelList(), current: histConv.model });
-                            newState.panel.webview.postMessage({ type: 'modelCaps', caps: this.agent.getModelCapabilities(histConv.model) });
+                            newState.panel.webview.postMessage(this.modelListMessage(id));
+                            newState.panel.webview.postMessage({ type: 'modelCaps', caps: this.agent.getModelCapabilities(this.agent.getModelSelectionValue(id)) });
                             newState.panel.webview.postMessage({ type: 'restoreMode', mode: histConv.mode || 'auto', label: histConv.mode || 'auto' });
                             newState.panel.webview.postMessage({ type: 'restoreInputHistory', items: histConv.inputHistory || extractInputHistory(histConv.messages) });
                         }
@@ -929,6 +1200,7 @@ export class ChatViewProvider {
                     if (s.model !== undefined) saveSetting('api.model', s.model);
                     if (s.models !== undefined) saveSetting('api.models', s.models);
                     if (s.active_provider_profile !== undefined) saveSetting('api.active_provider_profile', s.active_provider_profile);
+                    if (s.active_route !== undefined) saveSetting('api.active_route', s.active_route);
                     if (s.provider_profiles !== undefined) saveSetting('api.provider_profiles', s.provider_profiles);
                     if (s.max_tokens !== undefined) saveSetting('agent.max_tokens', s.max_tokens);
                     if (s.temperature !== undefined) saveSetting('agent.temperature', s.temperature);
@@ -956,6 +1228,7 @@ export class ChatViewProvider {
                     // Hot-reload: re-read config and update agent in memory
                     const newConfig = loadConfig();
                     this.agent.updateConfig(newConfig);
+                    this.refreshModelLists();
                     if (!msg.silent) {
                         post({ type: 'system', text: vscode.env.language.startsWith('zh') ? '设置已保存并生效。' : 'Settings saved and applied.' });
                     }
@@ -1139,7 +1412,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         console.log(`[MiMo] handleUserMessage: convId=${activeId}, msgCount=${this.agent.getConversation(activeId)?.messages.length ?? 'N/A'}`);
         const conv = this.agent.getConversation(activeId);
         if (!conv) return;
-        if (this.agent.isConvRunning(activeId)) {
+        if (this.agent.isConvBusy(activeId)) {
             post({ type: 'system', text: 'This conversation is already running. Wait for completion or stop it first.' });
             return;
         }
@@ -1161,6 +1434,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         const turnStartedAt = Date.now();
         const baselineChanges = await this.agent.getWorkspaceChangeSummary();
         const baselinePatch = baselineChanges?.patch || '';
+        const turnToolChanges: TurnChangeTracker = { files: new Map() };
         post({ type: 'userMessage', text, images: images || null });
         post({ type: 'busy' });
 
@@ -1169,8 +1443,11 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         let finalAnswerEmitted = false;
         let hasToolCalls = false;
         let totalToolCalls = 0;
+        let turnHadError = false;
         const startedAsPlanExecution = conv.mode === 'plan' && !!conv.planConfirmed;
+        const pendingToolArgs: Array<{ name: string; args: Record<string, any> }> = [];
         const streamRender = createStreamingRenderQueue(post);
+        const reasoningPost = createReasoningPostQueue(post);
         const commitAssistantUpdate = () => {
             streamRender.cancel();
             renderAssistantMarkdown(post, 'assistantUpdate', responseText);
@@ -1212,12 +1489,14 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     emitFinalAnswer(text);
                 },
                 onThoughtSummary: (text: string) => {
-                    post({ type: 'reasoning', token: text });
+                    reasoningPost.push(text);
                 },
                 onReasoning: (token: string) => {
-                    post({ type: 'reasoning', token });
+                    reasoningPost.push(token);
                 },
                 onToolCallStart: (name: string, args: Record<string, any>) => {
+                    pendingToolArgs.push({ name, args });
+                    reasoningPost.flush();
                     if (responseText.trim()) {
                         commitAssistantUpdate();
                     }
@@ -1226,14 +1505,19 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     post({ type: 'toolCallStart', name, args });
                 },
                 onToolCallEnd: (name: string, result: string, isError: boolean, elapsed: number) => {
+                    const index = pendingToolArgs.findIndex(item => item.name === name);
+                    const matched = index >= 0 ? pendingToolArgs.splice(index, 1)[0] : undefined;
+                    this.recordTurnToolChange(turnToolChanges, name, matched?.args || {}, isError);
                     post({ type: 'toolCallEnd', name, result: trimWebviewToolResult(result), isError, elapsed });
                 },
                 onRoundStart: (round: number) => {
+                    reasoningPost.flush();
                     hasToolCalls = false;
                     responseText = '';
                     post({ type: 'roundStart', round });
                 },
                 onRoundEnd: (_round: number) => {
+                    reasoningPost.flush();
                     // Flush accumulated text at end of each round so interleaved
                     // text output (thinking → text → tools) renders in real time
                     // instead of being held until onDone.
@@ -1290,6 +1574,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     post({ type: 'adversarialToolEnd', persona, toolName, result, isError, elapsed });
                 },
                 onDone: (response: string) => {
+                    reasoningPost.flush();
                     const elapsedSec = Math.max(0, (Date.now() - turnStartedAt) / 1000);
                     const stoppedByUser = response === '(stopped by user)';
                     if (!stoppedByUser) {
@@ -1310,12 +1595,8 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     }
                     // Auto-save to history
                     const msgs = this.agent.getMessages(activeId);
-                    this.history.save(activeId, conv.title, msgs, conv.model, {
-                        mode: conv.mode,
-                        personaId: conv.personaId,
-                        activeSkillPrompt: conv.activeSkillPrompt,
-                    });
-                    this.postTaskChanges(post, baselinePatch);
+                    this.queueHistorySave(activeId, conv.title, msgs, conv.model, this.historyMetadata(conv));
+                    this.postTaskChanges(post, baselinePatch, turnToolChanges);
                     // Plan mode: auto-save plan text to ~/.mimo/plans/, show confirm buttons
                     // Skip if response is a greeting/direct reply (not an actual plan)
                     const _hasPlanMarkers = looksLikePlanResponse(response);
@@ -1342,6 +1623,9 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     }
                 },
                 onError: (error: string) => {
+                    turnHadError = true;
+                    this.agent.releaseConversation(activeId);
+                    reasoningPost.flush();
                     this.saveRecoverySnapshot(activeId, conv);
                     const stErr = this.findStateByPanel(panel);
                     if (stErr) stErr.messageQueue = [];
@@ -1353,17 +1637,34 @@ while ($true) { Start-Sleep -Milliseconds 100 }
 
             await this.agent.chat(text, handlers, images, activeId);
         } catch (e: any) {
+            turnHadError = true;
+            this.agent.releaseConversation(activeId);
             const stErr = this.findStateByPanel(panel);
             if (stErr) stErr.messageQueue = [];
             post({ type: 'clearQueue' });
             post({ type: 'error', error: e.message });
         } finally {
+            reasoningPost.cancel();
             streamRender.cancel();
+            if (turnHadError) this.agent.releaseConversation(activeId);
             post({ type: 'idle' });
 
-            // Process next message in queue (if any)
-            this.processNextQueued(panel, convId);
+            // Process next queued message only after successful completion.
+            // Failed provider/model calls should unlock the UI and wait for the user
+            // to adjust model or generation settings before retrying.
+            if (!turnHadError) {
+                this.processNextQueued(panel, convId);
+            }
         }
+    }
+
+    private async waitForConversationIdle(convId: string, timeoutMs: number): Promise<boolean> {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            if (!this.agent.isConvBusy(convId)) return true;
+            await new Promise(resolve => setTimeout(resolve, 120));
+        }
+        return !this.agent.isConvBusy(convId);
     }
 
     private processNextQueued(panel: vscode.WebviewPanel, convId?: string): void {
@@ -1384,11 +1685,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
     private saveRecoverySnapshot(activeId: string, conv: any): void {
         try {
             const msgs = this.agent.getMessages(activeId);
-            this.history.save(activeId, conv.title, msgs, conv.model, {
-                mode: conv.mode,
-                personaId: conv.personaId,
-                activeSkillPrompt: conv.activeSkillPrompt,
-            });
+            this.queueHistorySave(activeId, conv.title, msgs, conv.model, this.historyMetadata(conv));
         } catch {
             // Best-effort recovery only.
         }
@@ -1404,6 +1701,153 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         }
     }
 
+    private normalizeTurnChangePath(filePath: string): string {
+        return String(filePath || '').replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
+    }
+
+    private lineCount(text: string): number {
+        if (!text) return 0;
+        return text.split(/\r\n|\r|\n/).length;
+    }
+
+    private estimateEditCounts(args: Record<string, any>): { added: number; removed: number } {
+        if (typeof args.old_text === 'string' || typeof args.new_text === 'string') {
+            return {
+                added: this.lineCount(String(args.new_text || '')),
+                removed: this.lineCount(String(args.old_text || '')),
+            };
+        }
+        if (typeof args.line_start === 'number' && typeof args.line_end === 'number') {
+            const removed = Math.max(0, Math.floor(args.line_end) - Math.floor(args.line_start) + 1);
+            return { added: this.lineCount(String(args.new_text || '')), removed };
+        }
+        return { added: 0, removed: 0 };
+    }
+
+    private recordTurnToolChange(
+        tracker: TurnChangeTracker,
+        name: string,
+        args: Record<string, any>,
+        isError: boolean,
+    ): void {
+        if (isError) return;
+        const mutationTools = new Set(['write_file', 'edit_file', 'delete_file', 'move_file', 'copy_file']);
+        if (!mutationTools.has(name)) return;
+
+        const pathArg = name === 'move_file' || name === 'copy_file'
+            ? String(args.destination || args.dest || args.to || '')
+            : String(args.path || args.filePath || args.file || '');
+        if (!pathArg) return;
+
+        let added = 0;
+        let removed = 0;
+        let action = 'edit';
+        let hasToolDiff = false;
+        if (name === 'write_file') {
+            added = this.lineCount(String(args.content || ''));
+            action = args.isCreate === false ? 'write' : 'write';
+            hasToolDiff = true;
+        } else if (name === 'edit_file') {
+            const counts = this.estimateEditCounts(args);
+            added = counts.added;
+            removed = counts.removed;
+            action = 'edit';
+            hasToolDiff = typeof args.old_text === 'string' || typeof args.new_text === 'string';
+        } else if (name === 'delete_file') {
+            action = 'delete';
+            removed = 1;
+        } else if (name === 'move_file') {
+            action = 'move';
+            added = 1;
+            removed = 1;
+        } else if (name === 'copy_file') {
+            action = 'copy';
+            added = 1;
+        }
+
+        const key = this.normalizeTurnChangePath(pathArg);
+        const existing = tracker.files.get(key);
+        if (existing) {
+            existing.added += added;
+            existing.removed += removed;
+            existing.hasToolDiff = existing.hasToolDiff || hasToolDiff;
+            if (existing.action !== action) existing.action = 'edit';
+            return;
+        }
+        tracker.files.set(key, {
+            path: pathArg,
+            added,
+            removed,
+            action,
+            source: 'tool',
+            hasToolDiff,
+        });
+    }
+
+    private fileKeysMatch(a: string, b: string): boolean {
+        const left = this.normalizeTurnChangePath(a);
+        const right = this.normalizeTurnChangePath(b);
+        if (!left || !right) return false;
+        return left === right || left.endsWith(`/${right}`) || right.endsWith(`/${left}`);
+    }
+
+    private filterSummaryToTurnChanges(summary: any, tracker: TurnChangeTracker): any | null {
+        const turnFiles = Array.from(tracker.files.values());
+        if (turnFiles.length === 0) return null;
+        if (!summary || !Array.isArray(summary.files)) return null;
+
+        const filtered = summary.files.filter((file: any) =>
+            turnFiles.some(turnFile => this.fileKeysMatch(turnFile.path, file.path || '')),
+        );
+        if (filtered.length === 0) return null;
+        const patch = this.filterPatchToTurnChanges(String(summary.patch || ''), tracker);
+        return {
+            ...summary,
+            files: filtered,
+            totalAdded: filtered.reduce((sum: number, file: any) => sum + (file.added || 0), 0),
+            totalRemoved: filtered.reduce((sum: number, file: any) => sum + (file.removed || 0), 0),
+            patch,
+            canUndo: patch ? summary.canUndo : false,
+            warning: patch ? summary.warning : (summary.warning || '本轮文件已记录，但没有可安全隔离的 Git patch；可查看工具记录，自动撤销不可用。'),
+        };
+    }
+
+    private filterPatchToTurnChanges(patch: string, tracker: TurnChangeTracker): string {
+        const text = String(patch || '').trimEnd();
+        if (!text) return '';
+        const turnFiles = Array.from(tracker.files.values());
+        const blocks = text
+            .split(/(?=^diff --git\s+)/m)
+            .map(block => block.trimEnd())
+            .filter(Boolean);
+        const kept = blocks.filter(block => {
+            const firstLine = block.split(/\r?\n/, 1)[0] || '';
+            const match = firstLine.match(/^diff --git\s+a\/(.+?)\s+b\/(.+)$/);
+            if (!match) return false;
+            const left = match[1] || '';
+            const right = match[2] || '';
+            return turnFiles.some(file =>
+                this.fileKeysMatch(file.path, left) || this.fileKeysMatch(file.path, right),
+            );
+        });
+        return kept.length ? kept.join('\n') + '\n' : '';
+    }
+
+    private buildToolOnlyTurnSummary(tracker: TurnChangeTracker, warning?: string): any | null {
+        const files = Array.from(tracker.files.values()).sort((a, b) => a.path.localeCompare(b.path));
+        if (files.length === 0) return null;
+        return {
+            id: `turn_changes_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            files,
+            totalAdded: files.reduce((sum, file) => sum + (file.added || 0), 0),
+            totalRemoved: files.reduce((sum, file) => sum + (file.removed || 0), 0),
+            patch: '',
+            createdAt: Date.now(),
+            canUndo: false,
+            warning: warning || '本卡片只汇总本轮对话中由 MiMo 工具修改的文件；未使用 Git diff，因此可查看记录但不能自动撤销。',
+        };
+    }
+
     private async handleSkillInvocation(skillName: string, text: string, convId?: string, targetPanel?: vscode.WebviewPanel) {
         const panel = targetPanel || this.panel;
         if (!panel) return;
@@ -1417,6 +1861,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         const turnStartedAt = Date.now();
         const baselineChanges = await this.agent.getWorkspaceChangeSummary();
         const baselinePatch = baselineChanges?.patch || '';
+        const turnToolChanges: TurnChangeTracker = { files: new Map() };
         post({ type: 'busy' });
 
         let responseText = '';
@@ -1424,7 +1869,9 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         let finalAnswerEmitted = false;
         let hasToolCalls = false;
         let totalToolCalls = 0;
+        const pendingToolArgs: Array<{ name: string; args: Record<string, any> }> = [];
         const streamRender = createStreamingRenderQueue(post);
+        const reasoningPost = createReasoningPostQueue(post);
         const commitAssistantUpdate = () => {
             streamRender.cancel();
             renderAssistantMarkdown(post, 'assistantUpdate', responseText);
@@ -1464,9 +1911,11 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     streamRender.cancel();
                     emitFinalAnswer(text);
                 },
-                onThoughtSummary: (text: string) => post({ type: 'reasoning', token: text }),
-                onReasoning: (token) => post({ type: 'reasoning', token }),
+                onThoughtSummary: (text: string) => reasoningPost.push(text),
+                onReasoning: (token) => reasoningPost.push(token),
                 onToolCallStart: (name, args) => {
+                    pendingToolArgs.push({ name, args });
+                    reasoningPost.flush();
                     if (responseText.trim()) {
                         commitAssistantUpdate();
                     }
@@ -1474,13 +1923,20 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     totalToolCalls++;
                     post({ type: 'toolCallStart', name, args });
                 },
-                onToolCallEnd: (name, result, isError, elapsed) => post({ type: 'toolCallEnd', name, result: trimWebviewToolResult(result), isError, elapsed }),
+                onToolCallEnd: (name, result, isError, elapsed) => {
+                    const index = pendingToolArgs.findIndex(item => item.name === name);
+                    const matched = index >= 0 ? pendingToolArgs.splice(index, 1)[0] : undefined;
+                    this.recordTurnToolChange(turnToolChanges, name, matched?.args || {}, isError);
+                    post({ type: 'toolCallEnd', name, result: trimWebviewToolResult(result), isError, elapsed });
+                },
                 onRoundStart: (round) => {
+                    reasoningPost.flush();
                     hasToolCalls = false;
                     responseText = '';
                     post({ type: 'roundStart', round });
                 },
                 onRoundEnd: (_round: number) => {
+                    reasoningPost.flush();
                     if (responseText) {
                         commitAssistantUpdate();
                     }
@@ -1530,6 +1986,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     post({ type: 'adversarialToolEnd', persona, toolName, result, isError, elapsed });
                 },
                 onDone: (response: string) => {
+                    reasoningPost.flush();
                     const elapsedSec = Math.max(0, (Date.now() - turnStartedAt) / 1000);
                     streamRender.cancel();
                     if (response === '(stopped by user)' && responseText.trim()) {
@@ -1547,14 +2004,11 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                         }});
                     }
                     const msgs = this.agent.getMessages(activeId);
-                    this.history.save(activeId, conv.title, msgs, conv.model, {
-                        mode: conv.mode,
-                        personaId: conv.personaId,
-                        activeSkillPrompt: conv.activeSkillPrompt,
-                    });
-                    this.postTaskChanges(post, baselinePatch);
+                    this.queueHistorySave(activeId, conv.title, msgs, conv.model, this.historyMetadata(conv));
+                    this.postTaskChanges(post, baselinePatch, turnToolChanges);
                 },
                 onError: (error) => {
+                    reasoningPost.flush();
                     this.saveRecoverySnapshot(activeId, conv);
                     post({ type: 'systemI18n', key: 'recovery.snapshot.saved' });
                     post({ type: 'error', error });
@@ -1563,27 +2017,47 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         } catch (e: any) {
             post({ type: 'error', error: e.message });
         } finally {
+            reasoningPost.cancel();
             streamRender.cancel();
             post({ type: 'idle' });
             this.processNextQueued(panel, convId);
         }
     }
 
-    private postTaskChanges(post: (msg: any) => void, baselinePatch = ''): void {
+    private postTaskChanges(post: (msg: any) => void, baselinePatch = '', turnToolChanges?: TurnChangeTracker): void {
+        if (!turnToolChanges || turnToolChanges.files.size === 0) return;
         void this.agent.getWorkspaceChangeSummary()
             .then(summary => {
-                if (summary?.patch === baselinePatch) return;
+                const filteredSummary = this.filterSummaryToTurnChanges(summary, turnToolChanges);
+                if (!filteredSummary) {
+                    const toolOnly = this.buildToolOnlyTurnSummary(turnToolChanges);
+                    if (toolOnly) post({ type: 'taskChanges', summary: toolOnly });
+                    return;
+                }
+                summary = filteredSummary;
                 if (summary && baselinePatch.trim()) {
-                    summary.canUndo = false;
-                    summary.warning = '任务开始前已有未提交改动，无法安全隔离本轮撤销；请审核 diff 后手动处理。';
-                } else if (summary) {
+                    const samePatch = summary.patch === baselinePatch && summary.patch.trim();
+                    if (samePatch) {
+                        summary.canUndo = false;
+                        summary.warning = '本轮确有工具修改，但当前 Git patch 与任务开始前一致；已按本轮工具记录展示文件，自动撤销不可用。';
+                    } else {
+                        summary.canUndo = false;
+                        summary.warning = '任务开始前已有未提交改动；本卡片只保留本轮工具涉及的文件，自动撤销不可用，请审核 diff 后手动处理。';
+                    }
+                } else if (summary && summary.canUndo !== false) {
                     summary.canUndo = true;
                 }
                 if (summary && summary.files.length > 0) {
                     post({ type: 'taskChanges', summary });
                 }
             })
-            .catch(() => { /* best-effort task summary only */ });
+            .catch(() => {
+                const toolOnly = this.buildToolOnlyTurnSummary(
+                    turnToolChanges,
+                    '未能读取 Git diff；已按本轮 MiMo 工具记录展示修改文件。自动撤销不可用。',
+                );
+                if (toolOnly) post({ type: 'taskChanges', summary: toolOnly });
+            });
     }
 
     /**
@@ -1604,8 +2078,8 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         this.postToWebview({ type: 'convTitle', title: conv.title, convId }, p);
         if (p) p.title = conv.title;
 
-        const model = conv.model;
-        this.postToWebview({ type: 'modelList', models: this.agent.getModelList(), current: model }, p);
+        const model = this.agent.getModelSelectionValue(convId);
+        this.postToWebview(this.modelListMessage(convId), p);
         this.postToWebview({ type: 'modelCaps', caps: this.agent.getModelCapabilities(model) }, p);
         this.postToWebview({ type: 'restoreMode', mode: conv.mode, label: conv.mode }, p);
         this.postToWebview(this.agent.isConvRunning(convId) ? { type: 'busy' } : { type: 'idle' }, p);
@@ -1642,6 +2116,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
             details: Array<{ type: 'reasoning' | 'tool'; title: string; body: string; elapsedSec?: number; isError?: boolean }>;
             elapsedSec: number;
             estimatedTokens: number;
+            snapshot?: any;
         } | null = null;
 
         const flush = () => {
@@ -1659,6 +2134,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                         elapsedSec: current.elapsedSec > 0 ? Number(current.elapsedSec.toFixed(1)) : 0,
                         tokens,
                     },
+                    snapshot: current.snapshot,
                 });
             }
             current = null;
@@ -1684,6 +2160,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     details: [],
                     elapsedSec: 0,
                     estimatedTokens: 0,
+                    snapshot: undefined,
                 };
                 continue;
             }
@@ -1699,12 +2176,15 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                 if (typeof m._elapsedSec === 'number' && m._elapsedSec > 0) {
                     current.elapsedSec = m._elapsedSec;
                 }
+                if (m._uiSnapshot && typeof m._uiSnapshot === 'object') {
+                    current.snapshot = m._uiSnapshot;
+                }
                 if (m.reasoning_content) {
                     current.hasDetails = true;
                     const reasoning = String(m.reasoning_content);
                     current.details.push({
                         type: 'reasoning',
-                        title: 'Thought',
+                        title: 'reasoning',
                         body: reasoning,
                     });
                     current.estimatedTokens += Math.ceil(reasoning.length / 3);
@@ -1793,7 +2273,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         <div class="setting-group"><label>Active Profile ID</label><input type="text" id="set-active-provider-profile" placeholder="mimo"></div>
         <div class="setting-group"><label>Provider Profiles JSON</label><textarea id="set-provider-profiles" spellcheck="false" style="min-height:74px" placeholder='[{"id":"deepseek","base_url":"https://api.deepseek.com/v1","model":"deepseek-chat"}]'></textarea></div>
         <div class="setting-group"><label>Temperature</label><input type="number" id="set-temperature" min="0" max="2" step="0.1"></div>
-        <div class="setting-group"><label>Max Tokens</label><input type="number" id="set-maxtokens" min="256" max="131072"></div>
+        <div class="setting-group"><label>Max Tokens</label><input type="number" id="set-maxtokens" min="256" max="65536"></div>
         <div class="setting-group"><label>Command Timeout (s)</label><input type="number" id="set-command-timeout" min="5" max="3600"></div>
         <div class="setting-group"><label>Max Tool Output</label><input type="number" id="set-max-output-len" min="1000" max="200000"></div>
         <div class="setting-group"><label><input type="checkbox" id="set-thinking"> Enable thinking mode</label></div>
@@ -1893,8 +2373,12 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                 </div>
             </div>
             <span class="model-select-wrap">
-                <select id="model-select"></select>
-                <span class="select-chevron" aria-hidden="true"></span>
+                <select id="model-select" aria-hidden="true" tabindex="-1"></select>
+                <button class="model-picker-trigger" id="model-picker-trigger" title="Model">
+                    <span id="model-picker-label">Model</span>
+                    <span class="select-chevron" aria-hidden="true"></span>
+                </button>
+                <div id="model-picker-popup" class="model-picker-popup" role="listbox"></div>
             </span>
             <button id="reasoning-effort-btn" class="reasoning-effort-btn" title="Reasoning effort">推理: 均衡</button>
             <input type="file" id="file-input" accept="image/*" multiple style="display:none">

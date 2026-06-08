@@ -3,9 +3,31 @@
  */
 
 import { vscode } from '../../core/vscode';
+import { t } from '../../core/i18n';
 import { escapeHtml, createElement } from '../../utils/dom';
 
+const TOOL_CARD_INPUT_CHARS = 900;
+
+function compactToolInput(text: string, maxChars = TOOL_CARD_INPUT_CHARS): string {
+    if (!text || text.length <= maxChars) return text || '';
+    const head = text.slice(0, Math.floor(maxChars * 0.62));
+    const tail = text.slice(-Math.floor(maxChars * 0.25));
+    return `${head}\n\n... ${t('tool.input.compacted')} (${text.length} chars) ...\n\n${tail}`;
+}
+
+function summarizeCommand(command: string): string {
+    const clean = (command || '').replace(/\s+/g, ' ').trim();
+    if (!clean) return '';
+    if (/\[System\.IO\.File\]::WriteAllText|Set-Content|Out-File/i.test(clean) && clean.length > 220) {
+        const pathMatch = clean.match(/["']([A-Za-z]:\\[^"']+|\.{0,2}[\\/][^"']+)["']/);
+        return `${t('tool.command.writeLargeFile')}${pathMatch?.[1] ? `: ${pathMatch[1]}` : ''}`;
+    }
+    return clean.length > 90 ? `${clean.slice(0, 90)}...` : clean;
+}
+
 const TOOL_ICONS: Record<string, string> = {
+    schedule_tasks: 'SC',
+    update_todos: 'TD',
     read_file: 'R', write_file: 'W', edit_file: 'E', list_directory: 'L',
     search_files: 'S', execute_command: '$', fetch_url: 'U', glob_files: 'G',
     delete_file: 'D', move_file: 'M', copy_file: 'C', get_file_info: 'I',
@@ -13,7 +35,7 @@ const TOOL_ICONS: Record<string, string> = {
     git_push: 'GP', git_pull: 'GU', web_search: 'WS',
     browser_open: 'BO', browser_click: 'BC', browser_type: 'BT',
     browser_screenshot: 'BS', browser_get_content: 'BG', browser_close: 'BX',
-    spawn_subagent: 'SA', git_worktree_add: 'WA', git_worktree_list: 'WL',
+    spawn_subagent: 'SA', run_workflow: 'WF', git_worktree_add: 'WA', git_worktree_list: 'WL',
     git_worktree_remove: 'WR', read_notebook: 'NR', edit_notebook_cell: 'NE',
     insert_notebook_cell: 'NI', delete_notebook_cell: 'ND',
     desktop_screenshot: 'DS', desktop_windows: 'DW', desktop_focus: 'DF',
@@ -35,6 +57,19 @@ export function toolSummary(name: string, args: any): string {
         return `[${server}] ${tool}`;
     }
     switch (name) {
+        case 'schedule_tasks': {
+            const tasks = Array.isArray(args.tasks) ? args.tasks : [];
+            const simple = tasks.filter((item: any) => String(item?.complexity || '').toLowerCase() === 'simple').length;
+            const complex = tasks.filter((item: any) => String(item?.complexity || '').toLowerCase() === 'complex').length;
+            return `${tasks.length} tasks, ${simple} simple, ${complex} complex`;
+        }
+        case 'update_todos': {
+            const todos = Array.isArray(args.todos) ? args.todos : [];
+            const done = todos.filter((item: any) => /completed|done/i.test(String(item?.status || ''))).length;
+            const active = todos.find((item: any) => /in[_-]?progress|active|doing/i.test(String(item?.status || '')));
+            const activeText = active ? ` - ${(active.content || active.text || active.title || '').substring(0, 40)}` : '';
+            return `${done}/${todos.length} completed${activeText}`;
+        }
         case 'read_file': {
             let summary = args.path || '';
             if (args.offset || args.limit) {
@@ -48,7 +83,7 @@ export function toolSummary(name: string, args: any): string {
         case 'edit_file': return args.path || '';
         case 'list_directory': return args.path || '.';
         case 'search_files': return `"${args.pattern || ''}" in ${args.path || '.'}`;
-        case 'execute_command': return args.command || '';
+        case 'execute_command': return summarizeCommand(args.command || '');
         case 'fetch_url': return args.url || '';
         case 'glob_files': return `${args.pattern || ''} in ${args.path || '.'}`;
         case 'delete_file': return args.path || '';
@@ -69,6 +104,7 @@ export function toolSummary(name: string, args: any): string {
         case 'browser_get_content': return 'page content';
         case 'browser_close': return '';
         case 'spawn_subagent': return `${args.type || 'general'}: ${(args.task || '').substring(0, 50)}`;
+        case 'run_workflow': return `${Array.isArray(args.phases) ? args.phases.length : 0} phases`;
         case 'git_worktree_add': return args.branch || '';
         case 'git_worktree_list': return 'all worktrees';
         case 'git_worktree_remove': return args.path || '';
@@ -91,7 +127,9 @@ export function toolSummary(name: string, args: any): string {
 
 export function getToolLabel(name: string): string {
     const labels: Record<string, string> = {
+        schedule_tasks: 'Schedule',
         read_file: 'Read', write_file: 'Write', edit_file: 'Edit',
+        update_todos: 'Todos',
         list_directory: 'List', search_files: 'Search', glob_files: 'Glob',
         execute_command: 'Bash', fetch_url: 'Fetch', web_search: 'Search',
         git_status: 'Git', git_diff: 'Diff', git_log: 'Log',
@@ -100,6 +138,7 @@ export function getToolLabel(name: string): string {
         get_file_info: 'Info',
         browser_open: 'Open', browser_click: 'Click', browser_type: 'Type',
         browser_screenshot: 'Screenshot', browser_get_content: 'Read', browser_close: 'Close',
+        run_workflow: 'Workflow',
     };
     if (name.startsWith('mcp_')) return 'MCP';
     return labels[name] || name;
@@ -110,6 +149,8 @@ export function getToolColor(name: string): string {
     if (name.startsWith('browser_')) return '#2196F3';
     if (name.startsWith('mcp_')) return '#9C27B0';
     const colors: Record<string, string> = {
+        schedule_tasks: '#64B5F6',
+        update_todos: '#4CAF50',
         read_file: '#4EC9B0', write_file: '#CE9178', edit_file: '#DCDCAA',
         search_files: '#569CD6', glob_files: '#569CD6', list_directory: '#569CD6',
         execute_command: '#DCDCAA', fetch_url: '#CE9178', web_search: '#569CD6',
@@ -150,17 +191,19 @@ export function createExecuteCommandCard(name: string, args: any): HTMLElement {
     (card as any)._toolArgs = args;
 
     const command = args.command || '';
+    const commandSummary = summarizeCommand(command);
+    const commandPreview = compactToolInput(command);
     card.innerHTML =
         `<div class="tool-card-header">` +
             `<span class="tool-card-dot"></span>` +
             `<span class="tool-card-title">Bash</span>` +
-            `<span class="tool-card-desc">${escapeHtml(command.length > 60 ? command.substring(0, 60) + '...' : command)}</span>` +
+            `<span class="tool-card-desc">${escapeHtml(commandSummary)}</span>` +
             `<span class="tool-card-time"></span>` +
         `</div>` +
         `<div class="tool-card-body">` +
             `<div class="tool-card-section">` +
                 `<span class="tool-card-section-label">IN</span>` +
-                `<span class="tool-card-section-content">${escapeHtml(command)}</span>` +
+                `<span class="tool-card-section-content">${escapeHtml(commandPreview)}</span>` +
             `</div>` +
         `</div>`;
     return card;

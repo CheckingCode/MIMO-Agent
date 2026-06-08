@@ -22,6 +22,14 @@ export interface HistoryEntry {
     messageCount: number;
 }
 
+export type ModelOption = string | {
+    value: string;
+    label?: string;
+    model?: string;
+    endpointId?: string;
+    endpointName?: string;
+};
+
 export interface StoreState {
     // UI state
     isBusy: boolean;
@@ -30,7 +38,7 @@ export interface StoreState {
     activeTabId: string;
 
     // Model
-    models: string[];
+    models: ModelOption[];
     currentModel: string;
     modelCaps: { vision: boolean; tts: boolean; description: string };
     reasoningEffort: 'turbo' | 'fast' | 'balanced' | 'deep' | 'max';
@@ -59,6 +67,7 @@ export interface StoreState {
 
     // Queued messages
     queuedMsgs: Array<{ text: string; images: ImageData[] | null }>;
+    skipNextQueueAutoSend: boolean;
 
     // Token usage
     tokenUsage: { prompt: number; completion: number; total: number; calls: number };
@@ -96,6 +105,7 @@ class Store {
         historyItems: [],
         settingsData: {},
         queuedMsgs: [],
+        skipNextQueueAutoSend: false,
         tokenUsage: { prompt: 0, completion: 0, total: 0, calls: 0 },
         voiceEnabled: false,
         isRecording: false,

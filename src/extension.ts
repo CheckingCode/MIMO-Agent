@@ -5,7 +5,8 @@ import * as os from 'os';
 import { MiMoAgent } from './agent';
 import { ChatViewProvider } from './webview/chatProvider';
 import { SettingsProvider } from './webview/settingsProvider';
-import { loadConfig } from './config';
+import { loadConfig, saveSetting } from './config';
+import { createWindowSessionId } from './workspaceData';
 
 let agent: MiMoAgent;
 let chatProvider: ChatViewProvider;
@@ -13,6 +14,7 @@ let settingsProvider: SettingsProvider;
 
 export function activate(context: vscode.ExtensionContext) {
     const config = loadConfig();
+    const windowSessionId = createWindowSessionId();
 
     // Ensure ~/.mimo/ directory exists
     const mimoHome = path.join(os.homedir(), '.mimo');
@@ -27,9 +29,17 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     // Create agent synchronously (it's needed for commands)
-    agent = new MiMoAgent(config, context.extensionPath, context);
-    chatProvider = new ChatViewProvider(context.extensionUri, agent);
-    settingsProvider = new SettingsProvider(context.extensionUri, agent);
+    agent = new MiMoAgent(config, context.extensionPath, context, windowSessionId);
+    chatProvider = new ChatViewProvider(context.extensionUri, agent, windowSessionId);
+    settingsProvider = new SettingsProvider(context.extensionUri, agent, () => chatProvider.refreshModelLists());
+
+    context.subscriptions.push(
+        vscode.window.registerWebviewPanelSerializer('mimo-agent.chat', {
+            async deserializeWebviewPanel(panel: vscode.WebviewPanel, state: unknown) {
+                chatProvider.restorePanel(panel, state);
+            },
+        }),
+    );
 
     // Register commands
     context.subscriptions.push(
@@ -54,6 +64,65 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('mimo-agent.settings', () => {
             settingsProvider.show();
+        }),
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('mimo-agent.switchModel', async () => {
+            const options = agent.getModelOptions();
+            if (options.length === 0) {
+                vscode.window.showWarningMessage('MiMo: No model profiles configured.');
+                return;
+            }
+
+            const quickPickItems: Array<vscode.QuickPickItem & { option?: typeof options[number] }> = [];
+            const grouped = new Map<string, typeof options>();
+            for (const option of options) {
+                const key = option.endpointId || option.endpointName || 'default';
+                if (!grouped.has(key)) grouped.set(key, []);
+                grouped.get(key)!.push(option);
+            }
+            for (const [key, groupOptions] of grouped.entries()) {
+                const first = groupOptions[0];
+                quickPickItems.push({
+                    label: first.endpointName || first.endpointId || key,
+                    kind: vscode.QuickPickItemKind.Separator,
+                });
+                for (const option of groupOptions) {
+                    quickPickItems.push({
+                        label: option.model,
+                        description: option.endpointName || option.endpointId || '',
+                        detail: option.endpointId ? `${option.endpointId} · ${option.value}` : option.value,
+                        option,
+                    });
+                }
+            }
+
+            const selected = await vscode.window.showQuickPick(
+                quickPickItems,
+                {
+                    title: 'MiMo: Switch Model',
+                    placeHolder: 'Choose API profile and model',
+                    matchOnDescription: true,
+                    matchOnDetail: true,
+                },
+            );
+            if (!selected?.option) return;
+
+            const endpointId = selected.option.endpointId || '';
+            const model = selected.option.model;
+            let ok = true;
+            ok = saveSetting('api.model', model) && ok;
+            ok = saveSetting('api.active_provider_profile', endpointId) && ok;
+            ok = saveSetting('api.active_route', { endpoint_id: endpointId, model }) && ok;
+            agent.updateConfig(loadConfig());
+            agent.setModel(selected.option.value);
+            chatProvider.setModelForOpenPanels(selected.option.value);
+            vscode.window.showInformationMessage(
+                ok
+                    ? `MiMo: Switched to ${selected.option.endpointName ? selected.option.endpointName + ' / ' : ''}${model}`
+                    : 'MiMo: Model switched in memory, but saving settings failed.',
+            );
         }),
     );
 
@@ -123,6 +192,7 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {
+    chatProvider?.flushHistorySaves();
     agent?.dispose();
     import('./browser').then(m => m.browserClose()).catch(() => {});
 }

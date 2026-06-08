@@ -26,6 +26,8 @@ export interface McpServerConfig {
     args: string[];
     /** Environment variables */
     env?: Record<string, string>;
+    /** Request/call timeout in milliseconds */
+    timeoutMs?: number;
 }
 
 export interface McpTool {
@@ -178,6 +180,14 @@ export class McpClient {
     }
 
     /**
+     * Get request timeout for this MCP server.
+     */
+    getTimeoutMs(): number {
+        const configured = Number(this.config.timeoutMs || (this.config as any).timeout_ms);
+        return Number.isFinite(configured) && configured > 0 ? configured : 30_000;
+    }
+
+    /**
      * Get discovered tools as OpenAI tool definitions.
      */
     getToolDefinitions(): ToolDefinition[] {
@@ -221,13 +231,13 @@ export class McpClient {
 
             this.pending.set(id, { resolve, reject });
 
-            // Timeout after 30s
+            // Timeout after configured request limit
             setTimeout(() => {
                 if (this.pending.has(id)) {
                     this.pending.delete(id);
                     reject(new Error(`MCP request timeout: ${method}`));
                 }
-            }, 30000);
+            }, this.getTimeoutMs());
 
             const data = JSON.stringify(request) + '\n';
             try {
@@ -392,8 +402,7 @@ export class McpManager {
                 }
                 const originalName = client.stripPrefix(toolName);
 
-                // Set call timeout (30 seconds)
-                const timeout = 30_000;
+                const timeout = client.getTimeoutMs();
                 return await Promise.race([
                     client.callTool(originalName, args),
                     new Promise<string>((_, reject) =>

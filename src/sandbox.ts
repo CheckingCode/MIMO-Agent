@@ -32,7 +32,7 @@ export interface SandboxConfig {
     cpuLimit: number;
     /** Timeout in seconds */
     timeoutSec: number;
-    /** Enable git auto-snapshot before destructive ops (default: true) */
+    /** Enable git auto-snapshot before destructive ops (default: false; opt-in only) */
     gitSnapshot: boolean;
     /** Enable command logging (default: true) */
     logging: boolean;
@@ -47,7 +47,7 @@ export const DEFAULT_SANDBOX_CONFIG: SandboxConfig = {
     memoryLimit: '512m',
     cpuLimit: 1,
     timeoutSec: 120,
-    gitSnapshot: true,
+    gitSnapshot: false,
     logging: true,
     networkDisabled: true,
 };

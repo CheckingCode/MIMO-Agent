@@ -6,14 +6,21 @@ import { SandboxConfig, DEFAULT_SANDBOX_CONFIG } from './sandbox';
 import { McpServerConfig } from './mcp';
 
 const MAX_MODEL_TOKENS = 131072;
+const DEFAULT_MIMO_MODELS = ['mimo-v2.5-pro', 'mimo-v2.5', 'mimo-v2-pro', 'mimo-v2-mini'];
 
-type ProviderProfileSetting = {
+export type ProviderProfileSetting = {
     id: string;
     name: string;
+    provider?: string;
     base_url: string;
     model: string;
     api_key: string;
     models: string[];
+};
+
+export type ModelRouteSetting = {
+    endpoint_id: string;
+    model: string;
 };
 
 export interface MiMoConfig {
@@ -21,6 +28,9 @@ export interface MiMoConfig {
     baseUrl: string;
     model: string;
     models: string[];
+    activeProviderProfile: string;
+    activeRoute: ModelRouteSetting;
+    providerProfiles: ProviderProfileSetting[];
     maxTokens: number;
     maxRounds: number;
     temperature: number;
@@ -81,8 +91,23 @@ export function loadConfig(): MiMoConfig {
         }
     } catch { /* ignore */ }
 
-    // Priority for model-call settings: ~/.mimo/settings.json > env > VS Code settings > defaults.
-    const apiKey = settings?.api?.api_key
+    const providerProfiles = sanitizeProviderProfiles(settings?.api?.provider_profiles);
+    const baseUrlBeforeProfile = settings?.api?.base_url
+        || process.env.MIMO_BASE_URL
+        || process.env.OPENAI_BASE_URL
+        || cfg.get<string>('baseUrl')
+        || 'https://token-plan-cn.xiaomimimo.com/v1';
+    const requestedRoute = sanitizeModelRoute(settings?.api?.active_route);
+    const activeProviderProfile = requestedRoute?.endpoint_id
+        || sanitizeString(settings?.api?.active_provider_profile, 80)
+        || inferActiveProviderProfile(baseUrlBeforeProfile, providerProfiles);
+    const activeProfile = activeProviderProfile
+        ? providerProfiles.find(profile => profile.id === activeProviderProfile)
+        : undefined;
+
+    // Priority for model-call settings: active profile > ~/.mimo/settings.json > env > VS Code settings > defaults.
+    const apiKey = activeProfile?.api_key
+        || settings?.api?.api_key
         || settings?.api?.apiKey
         || process.env.MIMO_API_KEY
         || process.env.MIMO_TP_API_KEY
@@ -90,26 +115,37 @@ export function loadConfig(): MiMoConfig {
         || cfg.get<string>('apiKey')
         || '';
 
-    const baseUrl = settings?.api?.base_url
-        || process.env.MIMO_BASE_URL
-        || process.env.OPENAI_BASE_URL
-        || cfg.get<string>('baseUrl')
-        || 'https://token-plan-cn.xiaomimimo.com/v1';
+    const baseUrl = activeProfile?.base_url || baseUrlBeforeProfile;
 
-    const model = settings?.api?.model
+    const model = requestedRoute?.model
+        || activeProfile?.model
+        || settings?.api?.model
         || process.env.MIMO_MODEL
         || process.env.OPENAI_MODEL
         || cfg.get<string>('model')
         || 'mimo-v2.5-pro';
-    const providerProfiles = sanitizeProviderProfiles(settings?.api?.provider_profiles);
-    const activeProviderProfile = sanitizeString(settings?.api?.active_provider_profile, 80)
-        || inferActiveProviderProfile(settings?.api?.base_url || baseUrl, providerProfiles);
+    const configuredModels = Array.isArray(activeProfile?.models) && activeProfile.models.length > 0
+        ? activeProfile.models
+        : Array.isArray(settings?.api?.models)
+            ? settings.api.models
+            : [];
+    const models = configuredModels.length > 0
+        ? configuredModels
+        : /xiaomi|mimo/i.test(`${baseUrl} ${model}`)
+            ? DEFAULT_MIMO_MODELS
+            : [model].filter(Boolean);
 
     return {
         apiKey,
         baseUrl: baseUrl.replace(/\/+$/, ''),
         model,
-        models: settings?.api?.models || [],
+        models,
+        activeProviderProfile: activeProviderProfile || '',
+        activeRoute: {
+            endpoint_id: activeProviderProfile || '',
+            model,
+        },
+        providerProfiles,
         maxTokens: Math.min(
             MAX_MODEL_TOKENS,
             Math.max(256, settings?.agent?.max_tokens ?? cfg.get<number>('maxTokens') ?? 8192),
@@ -216,6 +252,7 @@ function sanitizeProviderProfiles(input: unknown): ProviderProfileSetting[] {
             const raw = profile as Record<string, unknown>;
             const id = sanitizeString(raw.id, 80);
             const name = sanitizeString(raw.name, 120) || id || '';
+            const provider = sanitizeString(raw.provider, 80);
             const baseUrl = sanitizeString(raw.base_url, 2048);
             const model = sanitizeString(raw.model, 128);
             const apiKey = sanitizeString(raw.api_key, 4096);
@@ -226,6 +263,7 @@ function sanitizeProviderProfiles(input: unknown): ProviderProfileSetting[] {
             return {
                 id,
                 name,
+                provider: provider || inferProviderFromBaseUrl(baseUrl),
                 base_url: baseUrl.replace(/\/+$/, ''),
                 model: model || '',
                 api_key: apiKey || '',
@@ -234,6 +272,23 @@ function sanitizeProviderProfiles(input: unknown): ProviderProfileSetting[] {
         })
         .filter((v): v is ProviderProfileSetting => !!v)
         .slice(0, 50);
+}
+
+function inferProviderFromBaseUrl(baseUrl: string): string {
+    const normalized = String(baseUrl || '').toLowerCase();
+    if (normalized.includes('xiaomimimo') || normalized.includes('mimo')) return 'mimo';
+    if (normalized.includes('deepseek')) return 'deepseek';
+    if (normalized.includes('openai.com')) return 'openai';
+    return 'custom';
+}
+
+function sanitizeModelRoute(input: unknown): ModelRouteSetting | undefined {
+    if (!input || typeof input !== 'object') return undefined;
+    const raw = input as Record<string, unknown>;
+    const endpointId = sanitizeString(raw.endpoint_id, 80);
+    const model = sanitizeString(raw.model, 128);
+    if (!endpointId || !model) return undefined;
+    return { endpoint_id: endpointId, model };
 }
 
 function inferActiveProviderProfile(baseUrl: string, profiles: ProviderProfileSetting[]): string {
@@ -311,13 +366,23 @@ export function saveSetting(dotPath: string, value: any): boolean {
 export function getSettingsPanel(): Record<string, any> {
     const s = readSettings();
     const providerProfiles = sanitizeProviderProfiles(s?.api?.provider_profiles);
+    const activeRoute = sanitizeModelRoute(s?.api?.active_route);
+    const activeProviderProfile = activeRoute?.endpoint_id
+        || sanitizeString(s?.api?.active_provider_profile, 80)
+        || inferActiveProviderProfile(s?.api?.base_url || '', providerProfiles);
+    const activeProfile = activeProviderProfile
+        ? providerProfiles.find(profile => profile.id === activeProviderProfile)
+        : undefined;
     return {
-        api_key: s?.api?.api_key || s?.api?.apiKey || '',
-        base_url: s?.api?.base_url || 'https://token-plan-cn.xiaomimimo.com/v1',
-        model: s?.api?.model || 'mimo-v2.5-pro',
-        models: s?.api?.models || [],
-        active_provider_profile: sanitizeString(s?.api?.active_provider_profile, 80)
-            || inferActiveProviderProfile(s?.api?.base_url || '', providerProfiles),
+        api_key: activeProfile?.api_key || s?.api?.api_key || s?.api?.apiKey || '',
+        base_url: activeProfile?.base_url || s?.api?.base_url || 'https://token-plan-cn.xiaomimimo.com/v1',
+        model: activeRoute?.model || activeProfile?.model || s?.api?.model || 'mimo-v2.5-pro',
+        models: activeProfile?.models?.length ? activeProfile.models : (s?.api?.models || []),
+        active_provider_profile: activeProviderProfile,
+        active_route: activeRoute || {
+            endpoint_id: activeProviderProfile,
+            model: activeProfile?.model || s?.api?.model || 'mimo-v2.5-pro',
+        },
         provider_profiles: providerProfiles,
         max_tokens: Math.min(MAX_MODEL_TOKENS, Math.max(256, s?.agent?.max_tokens ?? 8192)),
         temperature: s?.agent?.temperature ?? 0.7,
@@ -331,7 +396,7 @@ export function getSettingsPanel(): Record<string, any> {
         sandbox_image: s?.sandbox?.image || 'node:20-alpine',
         sandbox_memory: s?.sandbox?.memory_limit || '512m',
         sandbox_cpu: s?.sandbox?.cpu_limit ?? 1,
-        sandbox_git_snapshot: s?.sandbox?.git_snapshot ?? true,
+        sandbox_git_snapshot: s?.sandbox?.git_snapshot ?? false,
         sandbox_logging: s?.sandbox?.logging ?? true,
         sandbox_network_disabled: s?.sandbox?.network_disabled ?? true,
         dependency_install_enabled: s?.dependency_install?.enabled ?? true,

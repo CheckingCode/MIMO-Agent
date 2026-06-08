@@ -22,6 +22,21 @@ export const Panels = {
             settingsPanel.classList.add('hidden');
         });
 
+        document.addEventListener('click', (e) => {
+            if (historyPanel.classList.contains('hidden')) return;
+            const target = e.target as HTMLElement | null;
+            if (!target) return;
+            if (historyPanel.contains(target)) return;
+            if (target.closest('#btn-history')) return;
+            historyPanel.classList.add('hidden');
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                historyPanel.classList.add('hidden');
+            }
+        });
+
         // History search
         let searchTimeout: ReturnType<typeof setTimeout>;
         const historySearch = document.getElementById('history-search');
@@ -101,7 +116,7 @@ export const Panels = {
                     }
                 })(),
                 temperature: parseFloat((document.getElementById('set-temperature') as HTMLInputElement).value) || 0.7,
-                max_tokens: Math.min(131072, Math.max(256, parseInt((document.getElementById('set-maxtokens') as HTMLInputElement).value) || 8192)),
+                max_tokens: Math.min(65536, Math.max(256, parseInt((document.getElementById('set-maxtokens') as HTMLInputElement).value) || 8192)),
                 command_timeout: parseInt((document.getElementById('set-command-timeout') as HTMLInputElement)?.value || '120') || 120,
                 max_output_len: parseInt((document.getElementById('set-max-output-len') as HTMLInputElement)?.value || '5000') || 5000,
                 enable_thinking: (document.getElementById('set-thinking') as HTMLInputElement).checked,
@@ -110,7 +125,7 @@ export const Panels = {
                 sandbox_image: (document.getElementById('set-sandbox-image') as HTMLInputElement).value,
                 sandbox_memory: (document.getElementById('set-sandbox-memory') as HTMLInputElement).value,
                 sandbox_cpu: parseInt((document.getElementById('set-sandbox-cpu') as HTMLInputElement).value) || 1,
-                sandbox_git_snapshot: (document.getElementById('set-sandbox-git') as HTMLInputElement)?.checked ?? true,
+                sandbox_git_snapshot: (document.getElementById('set-sandbox-git') as HTMLInputElement)?.checked ?? false,
                 sandbox_logging: (document.getElementById('set-sandbox-logging') as HTMLInputElement)?.checked ?? true,
                 dependency_install_enabled: (document.getElementById('set-dependency-install-enabled') as HTMLInputElement)?.checked ?? true,
                 dependency_install_project_mode: (document.getElementById('set-dependency-project-mode') as HTMLSelectElement)?.value || 'auto',
@@ -193,7 +208,7 @@ export const Panels = {
         (document.getElementById('set-sandbox-memory') as HTMLInputElement).value = s.sandbox_memory || '512m';
         (document.getElementById('set-sandbox-cpu') as HTMLInputElement).value = String(s.sandbox_cpu ?? 1);
         const gitCb = document.getElementById('set-sandbox-git') as HTMLInputElement;
-        if (gitCb) gitCb.checked = s.sandbox_git_snapshot !== false;
+        if (gitCb) gitCb.checked = s.sandbox_git_snapshot === true;
         const logCb = document.getElementById('set-sandbox-logging') as HTMLInputElement;
         if (logCb) logCb.checked = s.sandbox_logging !== false;
         const dependencyEnabled = document.getElementById('set-dependency-install-enabled') as HTMLInputElement;

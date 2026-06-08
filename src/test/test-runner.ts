@@ -60,6 +60,14 @@ export function expect(actual: any) {
                 throw new Error(`toContain called on non-string/non-array value: ${typeof actual}`);
             }
         },
+        toMatch(expected: RegExp) {
+            if (typeof actual !== 'string') {
+                throw new Error(`toMatch called on non-string value: ${typeof actual}`);
+            }
+            if (!expected.test(actual)) {
+                throw new Error(`Expected "${actual}" to match ${expected}`);
+            }
+        },
         toHaveLength(len: number) {
             if (actual.length !== len) {
                 throw new Error(`Expected length ${len}, got ${actual.length}`);

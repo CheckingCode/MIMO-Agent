@@ -10,9 +10,18 @@ declare function acquireVsCodeApi(): {
 
 const api = acquireVsCodeApi();
 
+function saveWindowState(patch: Record<string, any>): void {
+    const current = api.getState() || {};
+    api.setState({ ...current, ...patch });
+}
+
 export const vscode = {
     post(msg: any): void {
         api.postMessage(msg);
+    },
+
+    setWindowState(patch: Record<string, any>): void {
+        saveWindowState(patch);
     },
 
     // ── Convenience methods ──
@@ -35,6 +44,10 @@ export const vscode = {
 
     send(text: string, images?: any[] | null): void {
         api.postMessage({ type: 'send', text, images: images || null });
+    },
+
+    interruptAndSend(text: string, images?: any[] | null): void {
+        api.postMessage({ type: 'interruptAndSend', text, images: images || null });
     },
 
     stop(): void {
@@ -143,6 +156,14 @@ export const vscode = {
 
     taskChangesUndo(id: string, patch: string): void {
         api.postMessage({ type: 'taskChangesUndo', id, patch });
+    },
+
+    historySnapshot(snapshot: any): void {
+        api.postMessage({ type: 'historySnapshot', snapshot });
+    },
+
+    setUiLang(lang: 'en' | 'zh'): void {
+        api.postMessage({ type: 'setUiLang', lang });
     },
 
     voiceInput(): void {

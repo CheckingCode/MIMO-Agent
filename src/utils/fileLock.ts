@@ -11,6 +11,12 @@ import * as path from 'path';
 const LOCK_TIMEOUT = 10000; // 10 seconds lock timeout
 const LOCK_RETRY = 50;      // 50ms retry interval
 
+function sleepSync(ms: number): void {
+    const buffer = new SharedArrayBuffer(4);
+    const view = new Int32Array(buffer);
+    Atomics.wait(view, 0, 0, ms);
+}
+
 /**
  * Cross-process file lock (based on .lock files).
  * Ensures only one process can write to a file at a time.
@@ -108,9 +114,7 @@ export function withFileLockSync<T>(filePath: string, fn: () => T): T {
                 continue;
             }
 
-            // Busy wait for sync version
-            const waitUntil = Date.now() + LOCK_RETRY;
-            while (Date.now() < waitUntil) { /* spin */ }
+            sleepSync(LOCK_RETRY);
         }
     }
 

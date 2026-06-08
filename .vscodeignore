@@ -18,6 +18,7 @@ CODE_REVIEW_REPORT.md
 MODES_ANALYSIS.md
 build-webview.mjs
 releases/
+docs/reports/**
 assets/readme-*.svg
 html_output/**
 pptx_extracted/**

@@ -14,6 +14,8 @@ export interface ChatMessage {
     _toolElapsed?: number;
     /** Replay metadata - wall-clock elapsed seconds for a user turn */
     _elapsedSec?: number;
+    /** Replay metadata - serialized webview turn snapshot for high-fidelity history */
+    _uiSnapshot?: any;
 }
 
 export interface ContentPart {

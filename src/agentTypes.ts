@@ -13,6 +13,7 @@ export interface TaskChangeFile {
     added: number;
     removed: number;
     binary?: boolean;
+    staged?: boolean;
 }
 
 export interface TaskChangeSummary {
@@ -63,6 +64,8 @@ export interface ConversationState {
     title: string;
     messages: ChatMessage[];
     model: string;
+    modelEndpointId?: string;
+    uiLang?: 'en' | 'zh';
     planConfirmed?: boolean;
     mode: AgentMode;
     personaId?: string;

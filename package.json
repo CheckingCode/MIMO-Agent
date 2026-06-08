@@ -2,7 +2,7 @@
   "name": "mimo-agent",
   "displayName": "MiMo",
   "description": "AI coding agent powered by Xiaomi MiMo LLM",
-  "version": "1.5.4",
+  "version": "1.6.5",
   "publisher": "mimo-agent",
   "icon": "assets/mimo-agent-icon.png",
   "engines": {
@@ -39,10 +39,12 @@
   "license": "MIT",
   "main": "./out/extension.js",
   "activationEvents": [
+    "onWebviewPanel:mimo-agent.chat",
     "onCommand:mimo-agent.chat",
     "onCommand:mimo-agent.clear",
     "onCommand:mimo-agent.newChat",
     "onCommand:mimo-agent.settings",
+    "onCommand:mimo-agent.switchModel",
     "onCommand:mimo-agent.explain",
     "onCommand:mimo-agent.review",
     "onCommand:mimo-agent.refactor"
@@ -67,6 +69,11 @@
       {
         "command": "mimo-agent.settings",
         "title": "MiMo: Settings",
+        "icon": "assets/mimo-agent-icon.svg"
+      },
+      {
+        "command": "mimo-agent.switchModel",
+        "title": "MiMo: Switch Model",
         "icon": "assets/mimo-agent-icon.svg"
       },
       {
@@ -113,6 +120,10 @@
         },
         {
           "command": "mimo-agent.settings",
+          "when": "*"
+        },
+        {
+          "command": "mimo-agent.switchModel",
           "when": "*"
         },
         {

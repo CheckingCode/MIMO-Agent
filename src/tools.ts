@@ -13,11 +13,134 @@ import {
 import { browserOpen, browserClick, browserType, browserScreenshot, browserGetContent, browserClose } from './browser';
 import { desktopScreenshot, desktopWindows, desktopFocus, desktopType, desktopKey, desktopClick, desktopMouseMove, desktopDrag, desktopLaunch } from './desktop';
 
+type TodoStatus = 'pending' | 'in_progress' | 'completed';
+type TodoPriority = 'high' | 'medium' | 'low';
+type ScheduledTaskComplexity = 'simple' | 'moderate' | 'complex';
+
+interface TodoStateItem {
+    id: string;
+    content: string;
+    status: TodoStatus;
+    priority: TodoPriority;
+}
+
+interface ScheduledTaskItem {
+    id: string;
+    content: string;
+    complexity: ScheduledTaskComplexity;
+    priority: TodoPriority;
+    depends_on: string[];
+    can_parallel: boolean;
+    rationale: string;
+}
+
+let currentTodos: TodoStateItem[] = [];
+let currentTaskSchedule: ScheduledTaskItem[] = [];
+
 // ── Tool Definitions (OpenAI function calling format) ──────────────
 // Core tools: 12 focused tools for MiMo's tool calling ability
 // Extended tools: available via execute_command but not exposed to model
 
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
+    {
+        type: 'function',
+        function: {
+            name: 'schedule_tasks',
+            description: 'Analyze a batch of user tasks, assign complexity and dependencies, then produce an execution order. Use this before executing when the user gives multiple tasks or when task order may matter. Dependency order beats user order; among independent tasks prefer simple tasks before complex tasks.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    goal: { type: 'string', description: 'Overall user goal or short summary' },
+                    tasks: {
+                        type: 'array',
+                        description: 'All tasks detected from the user request.',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                id: { type: 'string', description: 'Stable short id, e.g. inspect-settings' },
+                                content: { type: 'string', description: 'Concrete task description' },
+                                complexity: { type: 'string', enum: ['simple', 'moderate', 'complex'] },
+                                priority: { type: 'string', enum: ['high', 'medium', 'low'] },
+                                depends_on: {
+                                    type: 'array',
+                                    items: { type: 'string' },
+                                    description: 'Task ids that must finish before this task can start',
+                                },
+                                can_parallel: { type: 'boolean', description: 'True when this task can run in parallel with other ready tasks' },
+                                rationale: { type: 'string', description: 'Why this complexity/dependency/order is appropriate' },
+                            },
+                            required: ['id', 'content', 'complexity'],
+                        },
+                    },
+                },
+                required: ['tasks'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'update_todos',
+            description: 'Update the current task checklist for multi-step work. Use this when starting a complex task, when marking a step in_progress, and after completing a step. Keep exactly one item in_progress while work is active.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    todos: {
+                        type: 'array',
+                        description: 'Full current todo list, replacing the previous list.',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                id: { type: 'string', description: 'Stable short id for the todo item' },
+                                content: { type: 'string', description: 'Concrete task description' },
+                                status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] },
+                                priority: { type: 'string', enum: ['high', 'medium', 'low'] },
+                            },
+                            required: ['content', 'status'],
+                        },
+                    },
+                },
+                required: ['todos'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'run_workflow',
+            description: 'Execute a planned workflow with sequential and parallel phases. Use after schedule_tasks when the work can be decomposed into independent exploration/execution tasks or dependent phases.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    phases: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                title: { type: 'string' },
+                                mode: { type: 'string', enum: ['parallel', 'sequential'] },
+                                tasks: {
+                                    type: 'array',
+                                    items: {
+                                        type: 'object',
+                                        properties: {
+                                            task: { type: 'string' },
+                                            type: { type: 'string', enum: ['explore', 'general'] },
+                                            label: { type: 'string' },
+                                            model: { type: 'string' },
+                                        },
+                                        required: ['task', 'type'],
+                                    },
+                                },
+                            },
+                            required: ['title', 'mode', 'tasks'],
+                        },
+                    },
+                },
+                required: ['phases'],
+            },
+        },
+    },
     // ── File Operations (3) ──
     {
         type: 'function',
@@ -39,7 +162,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         type: 'function',
         function: {
             name: 'write_file',
-            description: 'Create or overwrite a file. Creates parent directories automatically.',
+            description: 'Create or overwrite a file. Creates parent directories automatically. Prefer this for generated files or long HTML/CSS/JS/text content instead of embedding large content in shell commands.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -105,7 +228,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         type: 'function',
         function: {
             name: 'execute_command',
-            description: 'Execute a shell command. Use for git, package managers, tests, builds, etc. Dependency install commands follow the configured install policy: project dependencies may run with an extended timeout, while system software installs require user confirmation or are blocked.',
+            description: 'Execute a shell command. Use for git, package managers, tests, builds, short scripts, and validation. Do not embed large file bodies such as full HTML/CSS/JS documents in shell commands; use write_file/edit_file for that. Dependency install commands follow the configured install policy: project dependencies may run with an extended timeout, while system software installs require user confirmation or are blocked.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -288,6 +411,8 @@ export async function executeTool(
         }
 
         switch (name) {
+            case 'schedule_tasks': return toolScheduleTasks(args);
+            case 'update_todos': return toolUpdateTodos(args);
             // File operations
             case 'read_file': return await toolReadFile(args, workspace, maxOutput);
             case 'write_file': return await toolWriteFile(args, workspace);
@@ -361,6 +486,162 @@ export async function executeTool(
 }
 
 // ── File Operation Implementations ─────────────────────────────────
+
+function normalizeTodoStatus(value: unknown): TodoStatus {
+    const text = String(value || '').trim().toLowerCase();
+    if (text === 'completed' || text === 'done' || text === 'complete') return 'completed';
+    if (text === 'in_progress' || text === 'in-progress' || text === 'active' || text === 'doing') return 'in_progress';
+    return 'pending';
+}
+
+function normalizeTodoPriority(value: unknown): TodoPriority {
+    const text = String(value || '').trim().toLowerCase();
+    if (text === 'high' || text === 'p0' || text === 'p1') return 'high';
+    if (text === 'low' || text === 'p3') return 'low';
+    return 'medium';
+}
+
+function normalizeTaskComplexity(value: unknown): ScheduledTaskComplexity {
+    const text = String(value || '').trim().toLowerCase();
+    if (text === 'simple' || text === 'low') return 'simple';
+    if (text === 'complex' || text === 'high') return 'complex';
+    return 'moderate';
+}
+
+function complexityRank(value: ScheduledTaskComplexity): number {
+    if (value === 'simple') return 0;
+    if (value === 'moderate') return 1;
+    return 2;
+}
+
+function priorityRank(value: TodoPriority): number {
+    if (value === 'high') return 0;
+    if (value === 'medium') return 1;
+    return 2;
+}
+
+function normalizeTaskId(value: unknown, fallback: string): string {
+    const text = String(value || '').trim().toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 80);
+    return text || fallback;
+}
+
+function orderScheduledTasks(tasks: ScheduledTaskItem[]): ScheduledTaskItem[] {
+    const byId = new Map(tasks.map(task => [task.id, task]));
+    const pending = new Map(tasks.map(task => [task.id, task]));
+    const ordered: ScheduledTaskItem[] = [];
+    const emitted = new Set<string>();
+
+    while (pending.size > 0) {
+        const ready = Array.from(pending.values())
+            .filter(task => task.depends_on.every(dep => emitted.has(dep) || !byId.has(dep)))
+            .sort((a, b) =>
+                priorityRank(a.priority) - priorityRank(b.priority)
+                || complexityRank(a.complexity) - complexityRank(b.complexity)
+                || a.content.localeCompare(b.content)
+            );
+        const next = ready[0] || Array.from(pending.values())
+            .sort((a, b) => complexityRank(a.complexity) - complexityRank(b.complexity))[0];
+        ordered.push(next);
+        emitted.add(next.id);
+        pending.delete(next.id);
+    }
+
+    return ordered;
+}
+
+function toolScheduleTasks(args: Record<string, any>): string {
+    if (!Array.isArray(args.tasks)) {
+        return 'Error: schedule_tasks requires a tasks array.';
+    }
+
+    const rawTasks = args.tasks
+        .map((item: any, index: number): ScheduledTaskItem | null => {
+            if (!item || typeof item !== 'object') return null;
+            const content = String(item.content || item.task || item.text || item.title || '').replace(/\s+/g, ' ').trim();
+            if (!content) return null;
+            return {
+                id: normalizeTaskId(item.id, `task-${index + 1}`),
+                content: content.slice(0, 600),
+                complexity: normalizeTaskComplexity(item.complexity),
+                priority: normalizeTodoPriority(item.priority),
+                depends_on: Array.isArray(item.depends_on)
+                    ? item.depends_on.map((v: unknown) => normalizeTaskId(v, '')).filter(Boolean).slice(0, 20)
+                    : [],
+                can_parallel: item.can_parallel !== false,
+                rationale: String(item.rationale || item.reason || '').replace(/\s+/g, ' ').trim().slice(0, 400),
+            };
+        })
+        .filter((item): item is ScheduledTaskItem => !!item)
+        .slice(0, 50);
+
+    const seen = new Set<string>();
+    const uniqueTasks = rawTasks.map((task, index) => {
+        let id = task.id;
+        while (seen.has(id)) id = `${task.id}-${index + 1}`;
+        seen.add(id);
+        return { ...task, id };
+    });
+
+    currentTaskSchedule = orderScheduledTasks(uniqueTasks);
+    const idSet = new Set(currentTaskSchedule.map(task => task.id));
+    currentTaskSchedule = currentTaskSchedule.map(task => ({
+        ...task,
+        depends_on: task.depends_on.filter(dep => idSet.has(dep)),
+    }));
+
+    const lines = currentTaskSchedule.map((task, index) => {
+        const deps = task.depends_on.length ? ` deps=${task.depends_on.join(',')}` : '';
+        const parallel = task.can_parallel ? 'parallel-ok' : 'sequential';
+        const why = task.rationale ? ` - ${task.rationale}` : '';
+        return `${index + 1}. ${task.id}: ${task.content} [${task.complexity}, ${task.priority}, ${parallel}${deps}]${why}`;
+    });
+
+    const simple = currentTaskSchedule.filter(task => task.complexity === 'simple').length;
+    const moderate = currentTaskSchedule.filter(task => task.complexity === 'moderate').length;
+    const complex = currentTaskSchedule.filter(task => task.complexity === 'complex').length;
+    return [
+        `Task schedule updated: ${currentTaskSchedule.length} tasks (${simple} simple, ${moderate} moderate, ${complex} complex).`,
+        args.goal ? `Goal: ${String(args.goal).slice(0, 300)}` : '',
+        ...lines,
+    ].filter(Boolean).join('\n');
+}
+
+function toolUpdateTodos(args: Record<string, any>): string {
+    if (!Array.isArray(args.todos)) {
+        return 'Error: update_todos requires a todos array.';
+    }
+
+    currentTodos = args.todos
+        .map((item: any, index: number): TodoStateItem | null => {
+            if (!item || typeof item !== 'object') return null;
+            const content = String(item.content || item.text || item.title || '').replace(/\s+/g, ' ').trim();
+            if (!content) return null;
+            return {
+                id: String(item.id || `todo-${index + 1}`).replace(/\s+/g, '-').slice(0, 80),
+                content: content.slice(0, 500),
+                status: normalizeTodoStatus(item.status),
+                priority: normalizeTodoPriority(item.priority),
+            };
+        })
+        .filter((item): item is TodoStateItem => !!item)
+        .slice(0, 50);
+
+    const completed = currentTodos.filter(item => item.status === 'completed').length;
+    const total = currentTodos.length;
+    const lines = currentTodos.map((item, index) => {
+        const box = item.status === 'completed' ? '[x]' : '[ ]';
+        const active = item.status === 'in_progress' ? ' (in progress)' : '';
+        return `${index + 1}. ${box} ${item.content}${active} [${item.priority}]`;
+    });
+
+    return [
+        `Todos updated: ${completed}/${total} completed.`,
+        ...lines,
+    ].join('\n');
+}
 
 /**
  * Validate file path for security issues.
@@ -551,8 +832,10 @@ async function toolReadFile(args: Record<string, any>, workspace: string, maxOut
     }
 
     const lines = content.split('\n');
-    const offset = args.offset || 0;
-    const limit = args.limit || 500;
+    const rawOffset = Number(args.offset ?? 0);
+    const rawLimit = Number(args.limit ?? 500);
+    const offset = Number.isFinite(rawOffset) ? Math.max(0, Math.floor(rawOffset)) : 0;
+    const limit = Number.isFinite(rawLimit) ? Math.min(1000, Math.max(1, Math.floor(rawLimit))) : 500;
     const selected = lines.slice(offset, offset + limit);
     const numbered = selected.map((l, i) => `${i + offset + 1}\t${l}`);
     let result = numbered.join('\n');
@@ -693,28 +976,67 @@ async function toolListDirectory(args: Record<string, any>, workspace: string): 
     const dirPath = resolvePath(args.path || '.', workspace);
     const { safe, reason } = isPathSafe(dirPath, workspace);
     if (!safe) return `Safety: ${reason}`;
-    if (!fs.existsSync(dirPath)) return `Directory not found: ${args.path || '.'}`;
-    if (!fs.statSync(dirPath).isDirectory()) return `Not a directory: ${args.path || '.'}`;
 
-    const entries = fs.readdirSync(dirPath, { withFileTypes: true })
-        .sort((a, b) => {
-            if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
-            return a.name.localeCompare(b.name);
-        })
-        .slice(0, 100);
+    const LIST_LIMIT = 80;
+    const SIZE_STAT_LIMIT = 30;
+    const LIST_TIMEOUT_MS = 5000;
+    const withTimeout = <T>(promise: Promise<T>, message: string): Promise<T | string> => {
+        return new Promise((resolve) => {
+            const timer = setTimeout(() => resolve(message), LIST_TIMEOUT_MS);
+            promise.then(
+                (value) => {
+                    clearTimeout(timer);
+                    resolve(value);
+                },
+                (error) => {
+                    clearTimeout(timer);
+                    resolve(`Directory listing failed: ${error?.message || String(error)}`);
+                },
+            );
+        });
+    };
 
-    const lines = entries.map((e) => {
-        if (e.isDirectory()) return `  [D] ${e.name}/`;
-        try {
-            const size = fs.statSync(path.join(dirPath, e.name)).size;
+    const listed = await withTimeout((async () => {
+        const stat = await fs.promises.stat(dirPath);
+        if (!stat.isDirectory()) return `Not a directory: ${args.path || '.'}`;
+
+        const allEntries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+        const entries = allEntries
+            .sort((a, b) => {
+                if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+                return a.name.localeCompare(b.name);
+            })
+            .slice(0, LIST_LIMIT);
+
+        const fileEntries = entries.filter(e => e.isFile()).slice(0, SIZE_STAT_LIMIT);
+        const sizeByName = new Map<string, number>();
+        await Promise.all(fileEntries.map(async (e) => {
+            try {
+                const size = (await fs.promises.stat(path.join(dirPath, e.name))).size;
+                sizeByName.set(e.name, size);
+            } catch {
+                // Size is optional; keep listing responsive on slow/problematic files.
+            }
+        }));
+
+        const lines = entries.map((e) => {
+            if (e.isDirectory()) return `  [D] ${e.name}/`;
+            const size = sizeByName.get(e.name);
+            if (size === undefined) return `  [F] ${e.name}`;
             const sizeStr = size < 1024 ? `${size}B` : size < 1048576 ? `${(size / 1024).toFixed(1)}KB` : `${(size / 1048576).toFixed(1)}MB`;
             return `  [F] ${e.name} (${sizeStr})`;
-        } catch {
-            return `  [F] ${e.name}`;
+        });
+        if (allEntries.length > LIST_LIMIT) {
+            lines.push(`  ... (${allEntries.length - LIST_LIMIT} more entries; narrow path for more)`);
         }
-    });
+        return `${args.path || '.'}/\n${lines.join('\n')}`;
+    })(), `Directory listing timed out after ${LIST_TIMEOUT_MS / 1000}s. Try a narrower path.`);
 
-    return `${args.path || '.'}/\n${lines.join('\n')}`;
+    if (typeof listed === 'string') {
+        if (/ENOENT|no such file/i.test(listed)) return `Directory not found: ${args.path || '.'}`;
+        return listed;
+    }
+    return listed;
 }
 
 async function toolSearchFiles(args: Record<string, any>, workspace: string, maxOutput: number): Promise<string> {
@@ -797,18 +1119,24 @@ function searchFilesFallback(
     const maxResults = headLimit || 50;
     const ctxBefore = before ?? context ?? 0;
     const ctxAfter = after ?? context ?? 0;
+    const maxFilesScanned = 1000;
+    let scanned = 0;
 
     function walk(d: string) {
-        if (results.length >= maxResults) return;
+        if (results.length >= maxResults || scanned >= maxFilesScanned) return;
         try {
             for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
-                if (results.length >= maxResults) break;
+                if (results.length >= maxResults || scanned >= maxFilesScanned) break;
                 const full = path.join(d, entry.name);
                 if (entry.isDirectory()) {
+                    if (GLOB_IGNORED_DIRS.has(entry.name)) continue;
                     walk(full);
                 } else if (entry.isFile()) {
+                    scanned++;
                     if (glob && !entry.name.match(glob.replace(/\*/g, '.*'))) continue;
                     try {
+                        const stat = fs.statSync(full);
+                        if (stat.size > 1024 * 1024) continue;
                         const content = fs.readFileSync(full, 'utf-8');
                         const lines = content.split('\n');
                         const rel = path.relative(dir, full);
@@ -856,6 +1184,7 @@ function searchFilesFallback(
         results.pop();
     }
     if (results.length >= maxResults) results.push(`... (${results.length} results shown, more available)`);
+    if (scanned >= maxFilesScanned) results.push(`... (scan stopped after ${scanned} files; narrow path/glob for more)`);
     return results.length ? results.join('\n') : 'No matches found';
 }
 
@@ -1002,7 +1331,7 @@ async function toolExecuteCommand(
     const effectiveConfig: SandboxConfig = {
         ...DEFAULT_SANDBOX_CONFIG,
         ...sandboxConfig,
-        gitSnapshot: sandboxConfig?.gitSnapshot !== false, // default true
+        gitSnapshot: sandboxConfig?.gitSnapshot === true,  // opt-in only
         logging: sandboxConfig?.logging !== false,         // default true
     };
 
@@ -1037,10 +1366,16 @@ async function toolFetchUrl(args: Record<string, any>, _redirectCount = 0): Prom
     }
 
     return new Promise((resolve) => {
+        let settled = false;
+        const finish = (message: string) => {
+            if (settled) return;
+            settled = true;
+            resolve(message);
+        };
         const url = new URL(args.url);
         // Only allow http/https protocols
         if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-            resolve(`Error: Unsupported protocol: ${url.protocol}`);
+            finish(`Error: Unsupported protocol: ${url.protocol}`);
             return;
         }
 
@@ -1054,91 +1389,144 @@ async function toolFetchUrl(args: Record<string, any>, _redirectCount = 0): Prom
         const req = transport.get(args.url, { timeout: 15000 }, (res: any) => {
             if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                 if (_redirectCount >= maxRedirects) {
-                    resolve(`Error: Too many redirects (max ${maxRedirects})`);
+                    finish(`Error: Too many redirects (max ${maxRedirects})`);
                     return;
                 }
                 // Validate redirect URL protocol
                 try {
                     const redirectUrl = new URL(res.headers.location, args.url);
                     if (redirectUrl.protocol !== 'http:' && redirectUrl.protocol !== 'https:') {
-                        resolve(`Error: Redirect to unsupported protocol: ${redirectUrl.protocol}`);
+                        finish(`Error: Redirect to unsupported protocol: ${redirectUrl.protocol}`);
                         return;
                     }
-                    toolFetchUrl({ ...args, url: redirectUrl.href }, _redirectCount + 1).then(resolve);
+                    toolFetchUrl({ ...args, url: redirectUrl.href }, _redirectCount + 1).then(finish);
                 } catch {
-                    resolve(`Error: Invalid redirect URL: ${res.headers.location}`);
+                    finish(`Error: Invalid redirect URL: ${res.headers.location}`);
                 }
                 return;
             }
             let data = '';
-            res.on('data', (c: Buffer) => (data += c.toString('utf-8')));
+            const hardLimit = Math.min(Math.max(Number(maxLen) || 5000, 1), 200_000);
+            res.on('data', (c: Buffer) => {
+                if (data.length <= hardLimit) data += c.toString('utf-8');
+                if (data.length > hardLimit) {
+                    data = data.slice(0, hardLimit);
+                    finish(wrapExternalContent(data + '\n... (truncated)', args.url));
+                    req.destroy();
+                }
+            });
             res.on('end', () => {
                 if (data.length > maxLen) data = data.slice(0, maxLen) + '\n... (truncated)';
-                resolve(wrapExternalContent(data, args.url));
+                finish(wrapExternalContent(data, args.url));
             });
         });
-        req.on('error', (e: Error) => resolve(`Fetch failed: ${e.message}`));
-        req.on('timeout', () => { req.destroy(); resolve('Fetch timeout'); });
+        req.on('error', (e: Error) => finish(`Fetch failed: ${e.message}`));
+        req.on('timeout', () => { req.destroy(); finish('Fetch timeout'); });
     });
+}
+
+const GLOB_IGNORED_DIRS = new Set([
+    '.git', '.hg', '.svn',
+    'node_modules', 'vendor',
+    'dist', 'build', 'out', 'coverage',
+    '.next', '.nuxt', '.turbo', '.cache',
+    '__pycache__', '.venv', 'venv',
+]);
+const GLOB_MAX_FILES_SCANNED = 5000;
+const GLOB_MAX_MATCHES = 100;
+
+function shouldSkipGlobDir(name: string): boolean {
+    return GLOB_IGNORED_DIRS.has(name);
+}
+
+function globToRegex(glob: string): RegExp {
+    let regex = '';
+    let i = 0;
+    while (i < glob.length) {
+        const c = glob[i];
+        if (c === '*' && glob[i + 1] === '*') {
+            regex += '.*';
+            i += 2;
+            if (glob[i] === '/') i++;
+        } else if (c === '*') {
+            regex += '[^/]*';
+            i++;
+        } else if (c === '?') {
+            regex += '[^/]';
+            i++;
+        } else if (c === '.') {
+            regex += '\\.';
+            i++;
+        } else {
+            if (/[+^${}()|[\]\\]/.test(c)) regex += '\\';
+            regex += c;
+            i++;
+        }
+    }
+    return new RegExp(`^${regex}$`, 'i');
+}
+
+function toGlobPath(filePath: string): string {
+    return filePath.split(path.sep).join('/');
 }
 
 async function toolGlobFiles(args: Record<string, any>, workspace: string): Promise<string> {
     const dirPath = resolvePath(args.path || '.', workspace);
     const { safe, reason } = isPathSafe(dirPath, workspace);
     if (!safe) return `Safety: ${reason}`;
+    if (!fs.existsSync(dirPath)) return `Directory not found: ${args.path || '.'}`;
+    if (!fs.statSync(dirPath).isDirectory()) return `Not a directory: ${args.path || '.'}`;
 
     try {
-        const entries = fs.readdirSync(dirPath, { withFileTypes: true, recursive: true })
-            .filter((e) => e.isFile())
-            .slice(0, 200);
-
-        // Convert glob pattern to regex properly
-        const globToRegex = (glob: string): RegExp => {
-            let regex = '';
-            let i = 0;
-            while (i < glob.length) {
-                const c = glob[i];
-                if (c === '*' && glob[i + 1] === '*') {
-                    // ** matches everything including /
-                    regex += '.*';
-                    i += 2;
-                    // skip trailing / after **
-                    if (glob[i] === '/') i++;
-                } else if (c === '*') {
-                    // * matches everything except /
-                    regex += '[^/]*';
-                    i++;
-                } else if (c === '?') {
-                    // ? matches single char except /
-                    regex += '[^/]';
-                    i++;
-                } else if (c === '.') {
-                    // Escape dot (common in filenames)
-                    regex += '\\.';
-                    i++;
-                } else {
-                    // Escape other regex special chars
-                    if (/[+^${}()|[\]\\]/.test(c)) {
-                        regex += '\\';
-                    }
-                    regex += c;
-                    i++;
-                }
-            }
-            return new RegExp(`^${regex}$`, 'i');
-        };
-
         const regex = globToRegex(args.pattern);
+        const matches: string[] = [];
+        const stack = [dirPath];
+        let scanned = 0;
 
-        const matches = entries
-            .filter((e) => {
-                const relPath = path.relative(dirPath, path.join(e.parentPath || '', e.name));
-                return regex.test(relPath) || regex.test(e.name);
-            })
-            .map((e) => `  ${path.relative(dirPath, path.join(e.parentPath || '', e.name))}`)
-            .slice(0, 100);
+        while (stack.length > 0 && matches.length < GLOB_MAX_MATCHES && scanned < GLOB_MAX_FILES_SCANNED) {
+            const current = stack.pop()!;
+            let entries: fs.Dirent[];
+            try {
+                entries = fs.readdirSync(current, { withFileTypes: true });
+            } catch {
+                continue;
+            }
 
-        return matches.length ? matches.join('\n') : 'No matching files';
+            entries.sort((a, b) => {
+                if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? 1 : -1;
+                return b.name.localeCompare(a.name);
+            });
+
+            for (const entry of entries) {
+                const full = path.join(current, entry.name);
+                if (entry.isDirectory()) {
+                    if (!shouldSkipGlobDir(entry.name)) stack.push(full);
+                    continue;
+                }
+                if (!entry.isFile()) continue;
+
+                scanned++;
+                const relPath = toGlobPath(path.relative(dirPath, full));
+                if (regex.test(relPath) || regex.test(entry.name)) {
+                    matches.push(`  ${relPath}`);
+                    if (matches.length >= GLOB_MAX_MATCHES) break;
+                }
+                if (scanned >= GLOB_MAX_FILES_SCANNED) break;
+            }
+        }
+
+        const limited = stack.length > 0 || scanned >= GLOB_MAX_FILES_SCANNED || matches.length >= GLOB_MAX_MATCHES;
+        if (!matches.length) {
+            return limited
+                ? `No matching files in first ${scanned} scanned files. Narrow path/pattern for more.`
+                : 'No matching files';
+        }
+
+        let output = matches.join('\n');
+        if (limited) {
+            output += `\n... (showing ${matches.length}; scanned ${scanned} files; narrow path/pattern for more)`;
+        }
+        return output;
     } catch (e: any) {
         return `Glob failed: ${e.message}`;
     }
@@ -1452,6 +1840,8 @@ async function toolGitWorktreeAdd(args: Record<string, any>, workspace: string):
     const branch = args.branch;
     const worktreePath = args.path || path.join(workspace, '.mimo', 'worktrees', branch);
     const newBranch = args.new_branch ? '-b' : '';
+    const { safe, reason } = isPathSafe(worktreePath, workspace);
+    if (!safe) return `Safety: ${reason}`;
 
     // Ensure parent directory exists
     const parentDir = path.dirname(worktreePath);
@@ -1484,6 +1874,8 @@ async function toolGitWorktreeList(args: Record<string, any>, workspace: string)
 async function toolGitWorktreeRemove(args: Record<string, any>, workspace: string): Promise<string> {
     const worktreePath = args.path;
     const force = args.force ? '--force' : '';
+    const { safe, reason } = isPathSafe(worktreePath, workspace);
+    if (!safe) return `Safety: ${reason}`;
     const cmd = `git worktree remove ${force} "${shellEscape(worktreePath)}"`.trim();
     try {
         const result = await execPromise(cmd, 30, workspace);

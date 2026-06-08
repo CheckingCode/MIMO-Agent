@@ -98,6 +98,15 @@ describe('isPathSafe', () => {
         const result = isPathSafe(sibling, workspace);
         expect(result.safe).toBe(false);
     });
+
+    it('should not treat path-prefix siblings as protected directories', () => {
+        const workspaceRoot = process.platform === 'win32'
+            ? 'C:\\WindowsOld\\project'
+            : '/usr-local-project';
+        const file = path.join(workspaceRoot, 'src', 'file.ts');
+        const result = isPathSafe(file, workspaceRoot);
+        expect(result.safe).toBe(true);
+    });
 });
 
 describe('isCommandSafe — system drive protection', () => {

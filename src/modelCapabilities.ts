@@ -28,8 +28,12 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapabilities> = {
     'mimo-v2.5-pro': { vision: false, tts: false, reasoning: true, thinkingControl: true, description: 'MiMo reasoning model' },
     'mimo-v2.5': { vision: true, tts: false, reasoning: true, thinkingControl: true, description: 'MiMo multimodal model' },
     'MiMo-V2.5': { vision: true, tts: false, reasoning: true, thinkingControl: true, description: 'MiMo multimodal model' },
+    'mimo-v2-omni': { vision: true, tts: false, reasoning: true, thinkingControl: true, description: 'MiMo Omni multimodal model' },
+    'MiMo-V2-Omni': { vision: true, tts: false, reasoning: true, thinkingControl: true, description: 'MiMo Omni multimodal model' },
     'mimo-v2.5-tts': { vision: false, tts: true, reasoning: false, thinkingControl: true, description: 'MiMo speech model' },
     'MiMo-V2.5-TTS': { vision: false, tts: true, reasoning: false, thinkingControl: true, description: 'MiMo speech model' },
+    'mimo-v2.5-asr': { vision: false, tts: false, reasoning: false, thinkingControl: true, description: 'MiMo speech recognition model' },
+    'MiMo-V2.5-ASR': { vision: false, tts: false, reasoning: false, thinkingControl: true, description: 'MiMo speech recognition model' },
     'mimo-v2-lite': { vision: false, tts: false, reasoning: false, thinkingControl: true, description: 'MiMo lightweight model' },
     'mimo-v2-flash': { vision: false, tts: false, reasoning: false, thinkingControl: true, description: 'MiMo fast model' },
 };
@@ -51,7 +55,7 @@ export function inferProvider(baseUrl: string, model: string): string {
 export function inferModelCapabilities(model: string, baseUrl = ''): ModelCapabilities {
     const name = normalizeModelName(model);
     const provider = inferProvider(baseUrl, model);
-    const vision = /(vision|vl|multimodal|gpt-4o|gpt-4\.1|o3|o4|claude-3|gemini|qwen-vl|llava|mimo-v2\.5(?!-pro|-lite|-flash|-tts))/i.test(name);
+    const vision = /(vision|vl|multimodal|omni|gpt-4o|gpt-4\.1|o3|o4|claude-3|gemini|qwen-vl|llava|mimo-v2\.5(?!-pro|-lite|-flash|-tts|-asr))/i.test(name);
     const tts = /(tts|audio|speech)/i.test(name);
     const reasoning = /(reason|thinking|o1|o3|o4|deepseek-r1|qwen3|mimo-v2\.5-pro)/i.test(name);
     return {

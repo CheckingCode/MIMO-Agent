@@ -239,7 +239,7 @@ function checkPathAgainstCriticalDirs(targetPath: string, workspaceRoot: string)
     // Check critical dirs (always blocked)
     for (const dir of criticalDirs) {
         const dirResolved = path.resolve(dir);
-        if (resolved.startsWith(dirResolved) || resolved.toLowerCase().startsWith(dirResolved.toLowerCase())) {
+        if (isSameOrInsidePath(resolved, dirResolved)) {
             return `禁止操作：目标路径在系统关键目录 ${dir} 内`;
         }
     }
@@ -248,7 +248,7 @@ function checkPathAgainstCriticalDirs(targetPath: string, workspaceRoot: string)
     if (targetDrive !== workspaceDrive) {
         for (const dir of sensitiveDirs) {
             const dirResolved = path.resolve(dir);
-            if (resolved.startsWith(dirResolved) || resolved.toLowerCase().startsWith(dirResolved.toLowerCase())) {
+            if (isSameOrInsidePath(resolved, dirResolved)) {
                 return `敏感操作：目标路径在系统盘 ${dir} 内（当前工作区在 ${workspaceDrive} 盘）`;
             }
         }
@@ -433,6 +433,13 @@ const PROTECTED_DIRS = process.platform === 'win32'
     ? WIN_CRITICAL_DIRS
     : UNIX_CRITICAL_DIRS;
 
+function isSameOrInsidePath(targetPath: string, parentPath: string): boolean {
+    const target = path.resolve(targetPath);
+    const parent = path.resolve(parentPath);
+    const rel = path.relative(parent, target);
+    return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
 export function isPathSafe(filePath: string, workspace: string): { safe: boolean; reason: string } {
     const resolved = path.resolve(filePath);
     const wsResolved = path.resolve(workspace);
@@ -443,7 +450,7 @@ export function isPathSafe(filePath: string, workspace: string): { safe: boolean
     }
     for (const p of PROTECTED_DIRS) {
         const pResolved = path.resolve(p);
-        if (resolved.startsWith(pResolved) || resolved.toLowerCase().startsWith(pResolved.toLowerCase())) {
+        if (isSameOrInsidePath(resolved, pResolved)) {
             return { safe: false, reason: `路径在受保护目录: ${p}` };
         }
     }

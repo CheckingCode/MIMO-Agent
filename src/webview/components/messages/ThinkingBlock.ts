@@ -1,10 +1,12 @@
+import { t } from '../../core/i18n';
+
 /**
  * Thinking/reasoning block rendering helpers.
  */
 
-const REASONING_PREVIEW_CHARS = 700;
-const REASONING_STORE_CHARS = 12000;
-const REASONING_DEDUP_INTERVAL_MS = 1500;
+const REASONING_PREVIEW_CHARS = 360;
+const REASONING_STORE_CHARS = 4000;
+const REASONING_DEDUP_INTERVAL_MS = 3000;
 
 export function reasoningStoreLimit(): number {
     return REASONING_STORE_CHARS;
@@ -17,17 +19,38 @@ export function filterReasoningNoise(text: string): string {
         /\[Progress\][^\[]*/gi,
         /\[Soft budget reached\][^\[]*/gi,
         /\[Stop guard\][^\[]*/gi,
+        /\[[^\]\n]*(?:Context|Progress|Recovery|Completion gate|Round budget|Complexity|Rate limited|Model fallback|Handoff)[^\]\n]*\][^\[]*/gi,
+        /(?:第\s*\d+\s*轮|Round\s+\d+)[^\n]*(?:预算|budget|context|上下文|压缩|tokens?)[^\n]*/gi,
+        /(?:上下文|Context)[^\n]*(?:估算|压缩|滑动窗口|summar|sliding window|tokens?)[^\n]*/gi,
+        /(?:Pre-tool stage|tool timeout|soft timeout|hard cap|round budget)[^\n]*/gi,
+        /(?:Let me|I will|I now|I have|Good,|The workspace is clean\.)[^\n]*(?:write|read|try|generate|continue|content|script|file)[^\n]*/gi,
         /compressing with summarization\.?\s*x?\s*\d*/gi,
         /sliding window\.?\s*x?\s*\d*/gi,
         /The user wants to continue implementing[^.\n]*(?:\.|\n)?/gi,
     ];
     let out = text;
     for (const pattern of noisyPatterns) out = out.replace(pattern, '');
-    return out.replace(/\s{3,}/g, ' ');
+    return out
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(line => line.length > 0)
+        .join('\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .replace(/[ \t]{3,}/g, ' ');
 }
 
 export function renderThinkingBlock(thinkBlock: HTMLElement, forceFull = false, replayHint = false): void {
-    const rawText = (thinkBlock as any)._reasoningText || '';
+    const datasetText = thinkBlock.dataset.reasoningText || '';
+    const rawText = (thinkBlock as any)._reasoningText || datasetText;
+    const trimmed = !!((thinkBlock as any)._reasoningTrimmed || thinkBlock.dataset.reasoningTrimmed === 'true');
+    if (rawText && !(thinkBlock as any)._reasoningText) {
+        (thinkBlock as any)._reasoningText = rawText;
+    }
+    (thinkBlock as any)._reasoningTrimmed = trimmed;
+    if (rawText && thinkBlock.dataset.reasoningText !== rawText) {
+        thinkBlock.dataset.reasoningText = rawText;
+    }
+    thinkBlock.dataset.reasoningTrimmed = trimmed ? 'true' : 'false';
     const toggle = thinkBlock.previousElementSibling as HTMLElement | null;
     if (rawText.length <= 30) {
         if (toggle) toggle.style.display = 'none';
@@ -36,12 +59,12 @@ export function renderThinkingBlock(thinkBlock: HTMLElement, forceFull = false, 
     const now = Date.now();
     if (!forceFull && !replayHint) {
         const lastAt = (thinkBlock as any)._lastRenderedAt || 0;
-        if (now - lastAt < 350) {
+        if (now - lastAt < 900) {
             if (!(thinkBlock as any)._renderTimer) {
                 (thinkBlock as any)._renderTimer = window.setTimeout(() => {
                     (thinkBlock as any)._renderTimer = 0;
                     renderThinkingBlock(thinkBlock, false, false);
-                }, 350 - (now - lastAt));
+                }, 900 - (now - lastAt));
             }
             return;
         }
@@ -51,7 +74,7 @@ export function renderThinkingBlock(thinkBlock: HTMLElement, forceFull = false, 
     const expanded = forceFull || thinkBlock.classList.contains('show');
     let displayText = rawText;
     if (expanded) {
-        const prefix = (thinkBlock as any)._reasoningTrimmed ? '[Earlier thinking trimmed for responsiveness]\n\n' : '';
+        const prefix = trimmed ? t('thinking.trimmed.prefix') : '';
         if (
             forceFull ||
             !(thinkBlock as any)._dedupedText ||
@@ -62,10 +85,10 @@ export function renderThinkingBlock(thinkBlock: HTMLElement, forceFull = false, 
         }
         displayText = (thinkBlock as any)._dedupedText;
     } else {
-        const prefix = (thinkBlock as any)._reasoningTrimmed ? '[Thinking trimmed]\n' : '';
-        displayText = rawText.length > REASONING_PREVIEW_CHARS
-            ? `${prefix}... ${rawText.slice(-REASONING_PREVIEW_CHARS)}`
-            : `${prefix}${rawText.slice(-REASONING_PREVIEW_CHARS)}`;
+        const trimmedText = trimmed ? t('thinking.trimmed') : '';
+        displayText = t('thinking.compact')
+            .replace('{count}', rawText.length.toLocaleString())
+            .replace('{trimmed}', trimmedText);
     }
 
     if (/loop|recovery/i.test(displayText)) {

@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { atomicWriteSync, withFileLockSync } from './utils/fileLock';
+import { workspaceDataPath, workspaceWindowDataPath } from './workspaceData';
 
 export type MemoryKind = 'preference' | 'project' | 'correction' | 'workflow';
 
@@ -46,8 +47,16 @@ const SECRET_PATTERNS = [
     /\b[A-Za-z0-9+/]{32,}={0,2}\b/,
 ];
 
-function memoryPath(): string {
-    return path.join(os.homedir(), '.mimo', 'memory.json');
+function globalMemoryPath(workspace?: string, windowSessionId?: string): string {
+    return workspace && windowSessionId
+        ? workspaceWindowDataPath(workspace, windowSessionId, 'memory-global.json')
+        : path.join(os.homedir(), '.mimo', 'memory.json');
+}
+
+function workspaceMemoryPath(workspace: string, windowSessionId?: string): string {
+    return windowSessionId
+        ? workspaceWindowDataPath(workspace, windowSessionId, 'memory.json')
+        : workspaceDataPath(workspace, 'memory.json');
 }
 
 function nowIso(): string {
@@ -66,9 +75,8 @@ function isSensitive(text: string): boolean {
     return SECRET_PATTERNS.some(pattern => pattern.test(text));
 }
 
-function readMemoryFile(): MemoryFile {
+function readMemoryFile(p: string): MemoryFile {
     try {
-        const p = memoryPath();
         if (!fs.existsSync(p)) return { version: MEMORY_VERSION, items: [] };
         const parsed = JSON.parse(fs.readFileSync(p, 'utf-8'));
         if (!parsed || parsed.version !== MEMORY_VERSION || !Array.isArray(parsed.items)) {
@@ -97,8 +105,7 @@ function readMemoryFile(): MemoryFile {
     }
 }
 
-function writeMemoryFile(data: MemoryFile): void {
-    const p = memoryPath();
+function writeMemoryFile(p: string, data: MemoryFile): void {
     const dir = path.dirname(p);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     atomicWriteSync(p, JSON.stringify(data, null, 2), 'utf-8');
@@ -192,16 +199,17 @@ function extractWorkflowMemories(toolObservations: ToolObservation[], workspace:
 
 
 export class MemoryManager {
-    constructor(private workspace: string, private config: MemoryConfig) {}
+    constructor(private workspace: string, private config: MemoryConfig, private windowSessionId?: string) {}
 
-    updateConfig(workspace: string, config: MemoryConfig): void {
+    updateConfig(workspace: string, config: MemoryConfig, windowSessionId = this.windowSessionId): void {
         this.workspace = workspace;
         this.config = config;
+        this.windowSessionId = windowSessionId;
     }
 
     getRelevant(query: string): MemoryItem[] {
         if (!this.config.enabled) return [];
-        const data = readMemoryFile();
+        const data = this.readCombinedMemory();
         const workspace = normalizeWorkspace(this.workspace);
         return data.items
             .filter(item => item.scope === 'global' || item.workspace === workspace)
@@ -236,11 +244,32 @@ export class MemoryManager {
 
     addMemories(candidates: MemoryItem[]): number {
         if (!this.config.enabled || candidates.length === 0) return 0;
-        const p = memoryPath();
+        const globalCandidates = candidates.filter(candidate => candidate.scope === 'global');
+        const workspaceCandidates = candidates.filter(candidate => candidate.scope !== 'global');
+        return this.addMemoriesToFile(globalMemoryPath(this.workspace, this.windowSessionId), globalCandidates)
+            + this.addMemoriesToFile(workspaceMemoryPath(this.workspace, this.windowSessionId), workspaceCandidates);
+    }
+
+    private readCombinedMemory(): MemoryFile {
+        const globalData = readMemoryFile(globalMemoryPath(this.workspace, this.windowSessionId));
+        const workspaceData = readMemoryFile(workspaceMemoryPath(this.workspace, this.windowSessionId));
+        const seen = new Set<string>();
+        const items: MemoryItem[] = [];
+        for (const item of [...globalData.items, ...workspaceData.items]) {
+            const key = `${item.scope}|${item.workspace || ''}|${item.text.toLowerCase()}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            items.push(item);
+        }
+        return { version: MEMORY_VERSION, items };
+    }
+
+    private addMemoriesToFile(p: string, candidates: MemoryItem[]): number {
+        if (candidates.length === 0) return 0;
         const dir = path.dirname(p);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
         return withFileLockSync(p, () => {
-            const data = readMemoryFile();
+            const data = readMemoryFile(p);
             let added = 0;
             for (const candidate of candidates) {
                 const text = normalizeText(candidate.text);
@@ -262,7 +291,7 @@ export class MemoryManager {
             data.items = data.items
                 .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
                 .slice(0, Math.max(1, this.config.maxItems));
-            writeMemoryFile(data);
+            writeMemoryFile(p, data);
             return added;
         });
     }

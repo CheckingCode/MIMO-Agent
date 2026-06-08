@@ -18,6 +18,10 @@ const ERROR_MESSAGES: Record<string, string> = {
 export function getFriendlyError(error: Error): string {
     const msg = error.message || '';
 
+    if (/max_tokens|MaxTokens/i.test(msg) && /invalid|should be in|range|too large|exceed/i.test(msg)) {
+        return 'FAILED: The selected provider rejected the Max Tokens setting. Lower Generation > Max Tokens to 65536 or less, then retry.';
+    }
+
     for (const [pattern, friendly] of Object.entries(ERROR_MESSAGES)) {
         if (msg.includes(pattern)) {
             let result = `FAILED: ${friendly}`;

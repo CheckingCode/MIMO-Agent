@@ -13,7 +13,8 @@ export const Header = {
         document.getElementById('btn-history')!.addEventListener('click', () => bus.emit('togglePanel', 'history'));
         document.getElementById('btn-settings')!.addEventListener('click', () => vscode.post({ type: 'openSettings' }));
         document.getElementById('btn-lang')!.addEventListener('click', () => {
-            toggleLang();
+            const lang = toggleLang();
+            vscode.setUiLang(lang);
             const btn = document.getElementById('btn-lang');
             if (btn) btn.textContent = getLangToggleText();
             this.updateModeLabels();

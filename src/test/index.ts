@@ -11,6 +11,7 @@ require('./test-markdown');
 require('./test-personas');
 require('./test-safety');
 require('./test-dependency-install');
+require('./test-agent-convergence');
 
 console.log('\n  All tests completed.');
 finalSummary();

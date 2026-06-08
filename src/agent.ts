@@ -10,7 +10,7 @@ import { buildSystemPrompt, loadInstructions, validateInstructions } from './pro
 import { MiMoConfig } from './config';
 import { Skill, loadSkills, renderSkill, saveUserSkill, deleteUserSkill } from './skills';
 import { manageContext, getContextStats, summarizeContext, recordTokenUsage } from './context';
-import { McpManager } from './mcp';
+import { McpManager, McpServerConfig } from './mcp';
 import { detectPersona, buildPersonaPrompt, getPersona } from './personas';
 import { runSubAgent, SubAgentOptions, SubAgentResult, SubAgentEvents } from './subagent';
 import { HookManager } from './hooks';
@@ -18,7 +18,7 @@ import { TokenTracker, TokenUsage } from './tokenTracker';
 import { executeWorkflow, WorkflowPhase, WorkflowResult, WorkflowEvents } from './workflow';
 import { classifyIntent, IntentResult, checkAdversarialSuitability, quickClassifyIntent } from './router';
 import { MemoryManager, ToolObservation } from './memory';
-import { AgentEvents, AgentMode, CompletionGateDecision, ConversationState, PendingAsk, PendingEdit, PendingWrite, RoundProgress, TaskChangeSummary, TrackedIssue } from './agentTypes';
+import { AgentEvents, AgentMode, CompletionGateDecision, ConversationState, PendingAsk, PendingEdit, PendingWrite, RoundProgress, TaskChangeFile, TaskChangeSummary, TrackedIssue } from './agentTypes';
 import { DEFAULT_MODELS, MODEL_CAPABILITIES, ModelCapabilities, PREFERRED_CHAT_MODELS, inferModelCapabilities, normalizeModelName } from './modelCapabilities';
 import { getFriendlyError } from './agentErrors';
 import { buildUserFacingHandoff, stripInternalHandoffNoise } from './handoff';
@@ -44,6 +44,8 @@ export class MiMoAgent extends EventEmitter {
     private pendingWrites = new Map<string, PendingWrite>();
     private pendingAsks = new Map<string, PendingAsk>();
     private traceSessionId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    private lastPersistedConversationSnapshot = '';
+    private conversationSaveTimer: ReturnType<typeof setTimeout> | undefined;
 
     // ── Input boundary handling ──
     /** Max input length before truncation */
@@ -53,30 +55,137 @@ export class MiMoAgent extends EventEmitter {
     /** Track recent inputs for repeated input detection */
     private recentInputs = new Map<string, { count: number; lastTime: number }>();
 
-    getModelCapabilities(model: string): ModelCapabilities {
-        return MODEL_CAPABILITIES[model] || inferModelCapabilities(model, this.config.baseUrl);
+    private static readonly MODEL_ROUTE_SEPARATOR = '::';
+    private static readonly ARTIFACT_EXTENSIONS = [
+        'wav', 'mp3', 'm4a', 'flac', 'aac', 'ogg', 'opus',
+        'mp4', 'mov', 'webm', 'avi', 'mkv',
+        'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg',
+        'pdf', 'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx',
+        'csv', 'vtt', 'srt',
+    ];
+
+    private encodeModelRoute(endpointId: string, model: string): string {
+        return endpointId
+            ? `${endpointId}${MiMoAgent.MODEL_ROUTE_SEPARATOR}${model}`
+            : model;
     }
 
-    private shouldSendThinkingControl(model: string): boolean {
-        return this.getModelCapabilities(model).thinkingControl;
+    private decodeModelRoute(value: string): { endpointId: string; model: string } {
+        const raw = String(value || '').trim();
+        const sep = MiMoAgent.MODEL_ROUTE_SEPARATOR;
+        const idx = raw.indexOf(sep);
+        if (idx <= 0) return { endpointId: '', model: raw };
+        return {
+            endpointId: raw.slice(0, idx).trim(),
+            model: raw.slice(idx + sep.length).trim(),
+        };
+    }
+
+    private getProfile(endpointId?: string) {
+        const id = String(endpointId || '').trim();
+        if (!id) return undefined;
+        return (this.config.providerProfiles || []).find(profile => profile.id === id);
+    }
+
+    private getEndpointBaseUrl(endpointId?: string): string {
+        return this.getProfile(endpointId)?.base_url || this.config.baseUrl;
+    }
+
+    private getApiForEndpoint(endpointId?: string): MiMoAPI {
+        const profile = this.getProfile(endpointId);
+        if (!profile) return this.api;
+        return new MiMoAPI(profile.api_key || this.config.apiKey, profile.base_url || this.config.baseUrl);
+    }
+
+    private getConversationEndpointId(conv?: ConversationState): string {
+        return conv?.modelEndpointId || this.config.activeRoute?.endpoint_id || this.config.activeProviderProfile || '';
+    }
+
+    private normalizeReadFilePath(filePath: string): string {
+        return String(filePath || '').trim().replace(/\\/g, '/').replace(/\/+/g, '/').toLowerCase();
+    }
+
+    private getReadFileRange(args: Record<string, any>): { path: string; start: number; end: number; limit: number } | null {
+        const filePath = this.normalizeReadFilePath(args.path || args.file || '');
+        if (!filePath) return null;
+        const rawOffset = Number(args.offset ?? 0);
+        const rawLimit = Number(args.limit ?? 500);
+        const start = Math.max(0, Number.isFinite(rawOffset) ? Math.floor(rawOffset) : 0);
+        const limit = Math.max(1, Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 500);
+        return { path: filePath, start, end: start + limit, limit };
+    }
+
+    private mergeReadRanges(ranges: Array<{ start: number; end: number }>): Array<{ start: number; end: number }> {
+        const sorted = ranges
+            .filter(r => r.end > r.start)
+            .sort((a, b) => a.start - b.start || a.end - b.end);
+        const merged: Array<{ start: number; end: number }> = [];
+        for (const range of sorted) {
+            const last = merged[merged.length - 1];
+            if (!last || range.start > last.end) {
+                merged.push({ ...range });
+            } else {
+                last.end = Math.max(last.end, range.end);
+            }
+        }
+        return merged;
+    }
+
+    private readRangeCoveredLength(ranges: Array<{ start: number; end: number }>, start: number, end: number): number {
+        let covered = 0;
+        for (const range of this.mergeReadRanges(ranges)) {
+            const overlapStart = Math.max(start, range.start);
+            const overlapEnd = Math.min(end, range.end);
+            if (overlapEnd > overlapStart) covered += overlapEnd - overlapStart;
+        }
+        return covered;
+    }
+
+    private firstUnreadReadRange(ranges: Array<{ start: number; end: number }>, start: number, end: number): { start: number; end: number } | null {
+        let cursor = start;
+        for (const range of this.mergeReadRanges(ranges)) {
+            if (range.end <= cursor) continue;
+            if (range.start > cursor) return { start: cursor, end: Math.min(range.start, end) };
+            cursor = Math.max(cursor, range.end);
+            if (cursor >= end) return null;
+        }
+        return cursor < end ? { start: cursor, end } : null;
+    }
+
+    getModelCapabilities(model: string): ModelCapabilities {
+        const route = this.decodeModelRoute(model);
+        const actualModel = route.model || model;
+        return MODEL_CAPABILITIES[actualModel] || inferModelCapabilities(actualModel, this.getEndpointBaseUrl(route.endpointId));
+    }
+
+    private shouldSendThinkingControl(model: string, endpointId = ''): boolean {
+        const routedModel = endpointId ? this.encodeModelRoute(endpointId, model) : model;
+        return this.getModelCapabilities(routedModel).thinkingControl;
     }
 
     private buildChatParams(
         model: string,
         messages: ChatMessage[] | Array<{ role: 'system' | 'user' | 'assistant' | 'tool'; content: any }>,
         options: Record<string, any> = {},
+        endpointId = '',
     ): Record<string, any> {
+        const configuredMaxTokens = Number(options.max_tokens ?? this.config.maxTokens);
+        const maxOutputTokens = Math.max(1, Math.min(
+            Number.isFinite(configuredMaxTokens) ? configuredMaxTokens : 8192,
+            65536,
+        ));
         const params: Record<string, any> = {
             model,
             messages,
-            max_tokens: options.max_tokens ?? this.config.maxTokens,
+            max_tokens: maxOutputTokens,
             temperature: options.temperature ?? this.config.temperature,
             top_p: options.top_p ?? this.config.topP,
             stream_options: options.stream_options ?? { include_usage: true },
             ...options,
         };
+        params.max_tokens = maxOutputTokens;
         if (params.stream_options === null) delete params.stream_options;
-        if (!this.config.enableThinking && this.shouldSendThinkingControl(model)) {
+        if (!this.config.enableThinking && this.shouldSendThinkingControl(model, endpointId)) {
             params.extra_body = {
                 ...(params.extra_body || {}),
                 thinking: { type: 'disabled' },
@@ -85,24 +194,44 @@ export class MiMoAgent extends EventEmitter {
         return params;
     }
 
-    private findVisionModel(currentModel: string): string | null {
-        const candidates = [currentModel, ...this.getModelList()];
+    private findVisionModel(currentModel: string, endpointId = ''): string | null {
+        const configuredModels = this.getModelsForEndpoint(endpointId);
+        const currentIsMimo = this.isMimoModel(currentModel);
+        const candidates = [
+            currentModel,
+            ...configuredModels.filter(model => this.isMimoModel(model) === currentIsMimo),
+        ];
+        const seen = new Set<string>();
         for (const model of candidates) {
+            const key = normalizeModelName(model);
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
             if (this.getModelCapabilities(model).vision) return model;
         }
         return null;
+    }
+
+    private isMimoModel(model: string): boolean {
+        return /^mimo[-_]/i.test((model || '').trim());
     }
 
     private isKnownUnsupportedChatModel(model: string): boolean {
         return /^mimo-v2-(?:flash|lite)$/i.test((model || '').trim());
     }
 
-    private findChatModel(currentModel: string, excludeCurrent = false): string | null {
-        const candidates = [
-            ...PREFERRED_CHAT_MODELS,
-            ...this.getModelList(),
-            ...DEFAULT_MODELS,
-        ];
+    private findChatModel(currentModel: string, excludeCurrent = false, endpointId = ''): string | null {
+        const configuredModels = this.getModelsForEndpoint(endpointId);
+        const currentIsMimo = this.isMimoModel(currentModel);
+        const candidates = currentIsMimo
+            ? [
+                ...configuredModels.filter(model => this.isMimoModel(model)),
+                ...PREFERRED_CHAT_MODELS.filter(model => this.isMimoModel(model)),
+                ...DEFAULT_MODELS.filter(model => this.isMimoModel(model)),
+            ]
+            : [
+                currentModel,
+                ...configuredModels.filter(model => !this.isMimoModel(model)),
+            ];
         const seen = new Set<string>();
         for (const model of candidates) {
             const key = normalizeModelName(model);
@@ -199,10 +328,92 @@ export class MiMoAgent extends EventEmitter {
         }
     }
 
+    private collectStringValues(value: any): string[] {
+        if (value === null || value === undefined) return [];
+        if (typeof value === 'string') return [value];
+        if (Array.isArray(value)) return value.flatMap(item => this.collectStringValues(item));
+        if (typeof value === 'object') {
+            return Object.values(value).flatMap(item => this.collectStringValues(item));
+        }
+        return [];
+    }
+
+    private cleanArtifactPath(candidate: string): string {
+        return String(candidate || '')
+            .trim()
+            .replace(/^[`"'“”‘’]+|[`"'“”‘’]+$/g, '')
+            .replace(/[.,，。:：;；)\]}]+$/g, '')
+            .trim();
+    }
+
+    private extractArtifactPathsFromText(text: string): string[] {
+        const raw = String(text || '');
+        if (!raw) return [];
+        const ext = MiMoAgent.ARTIFACT_EXTENSIONS.join('|');
+        const patterns = [
+            new RegExp(`["']([^"'\\r\\n]+\\.(?:${ext}))["']`, 'gi'),
+            new RegExp(`([A-Za-z]:[\\\\/][^\\r\\n"'<>|]+?\\.(?:${ext}))`, 'gi'),
+            new RegExp(`((?:/|\\.{1,2}[\\\\/])[^\\s"'<>|]+\\.(?:${ext}))`, 'gi'),
+            new RegExp(`\\b((?:output|outputs|dist|build|release|releases|tmp|temp)[\\\\/][^\\s"'<>|]+\\.(?:${ext}))`, 'gi'),
+        ];
+        const found: string[] = [];
+        for (const pattern of patterns) {
+            for (const match of raw.matchAll(pattern)) {
+                const value = this.cleanArtifactPath(match[1] || match[0] || '');
+                if (value) found.push(value);
+            }
+        }
+        return found;
+    }
+
+    private collectRecentArtifactPaths(conv: ConversationState, lookback = 80): string[] {
+        const seen = new Set<string>();
+        const artifacts: string[] = [];
+        const add = (candidate: string) => {
+            const clean = this.cleanArtifactPath(candidate);
+            if (!clean) return;
+            const key = clean.replace(/\\/g, '/').toLowerCase();
+            if (seen.has(key)) return;
+            seen.add(key);
+            artifacts.push(clean);
+        };
+
+        for (const msg of conv.messages.slice(-lookback)) {
+            if (msg.role === 'assistant' && msg.tool_calls?.length) {
+                for (const tc of msg.tool_calls) {
+                    const args = this.parseToolArgs(tc);
+                    for (const value of this.collectStringValues(args)) {
+                        for (const artifact of this.extractArtifactPathsFromText(value)) add(artifact);
+                    }
+                }
+                continue;
+            }
+            if (msg.role === 'tool') {
+                for (const artifact of this.extractArtifactPathsFromText(this.extractMessageText(msg.content))) {
+                    add(artifact);
+                }
+            }
+        }
+        return artifacts.slice(-8);
+    }
+
+    private appendMissingArtifactSummary(conv: ConversationState, finalText: string): string {
+        const cleanFinal = String(finalText || '');
+        const artifacts = this.collectRecentArtifactPaths(conv)
+            .filter(filePath => !cleanFinal.includes(filePath));
+        if (artifacts.length === 0) return finalText;
+
+        const useChinese = conv.uiLang !== 'en' || /[\u4e00-\u9fff]/.test(cleanFinal);
+        const heading = useChinese ? '交付文件：' : 'Artifacts:';
+        const lines = artifacts.map(filePath => `- \`${filePath}\``);
+        return `${cleanFinal.trim()}\n\n${heading}\n${lines.join('\n')}`;
+    }
+
     constructor(
         private config: MiMoConfig,
         private extensionPath: string,
         private context?: vscode.ExtensionContext,
+        private windowSessionId?: string,
     ) {
         super();
         this.api = new MiMoAPI(config.apiKey, config.baseUrl);
@@ -210,8 +421,8 @@ export class MiMoAgent extends EventEmitter {
         this.skills = loadSkills(extensionPath);
         this.mcpManager = new McpManager();
         this.hookManager = new HookManager(config.settings || {});
-        this.tokenTracker = new TokenTracker();
-        this.memoryManager = new MemoryManager(config.workspace, config.memory);
+        this.tokenTracker = new TokenTracker(config.workspace, windowSessionId);
+        this.memoryManager = new MemoryManager(config.workspace, config.memory, windowSessionId);
         if (this.context) {
             this.loadConversations();
         }
@@ -221,6 +432,8 @@ export class MiMoAgent extends EventEmitter {
 
     /** Public cleanup method for extension deactivation */
     dispose(): void {
+        this.flushConversationState();
+        this.tokenTracker.flush();
         this.mcpManager.disconnectAll();
     }
 
@@ -230,11 +443,13 @@ export class MiMoAgent extends EventEmitter {
         this.api = new MiMoAPI(newConfig.apiKey, newConfig.baseUrl);
         this.systemPrompt = buildSystemPrompt(newConfig.workspace);
         this.hookManager = new HookManager(newConfig.settings || {});
-        this.memoryManager.updateConfig(newConfig.workspace, newConfig.memory);
+        this.memoryManager.updateConfig(newConfig.workspace, newConfig.memory, this.windowSessionId);
+        this.mcpManager.disconnectAll();
+        this.initMcp();
     }
 
     private async initMcp(): Promise<void> {
-        const mcpServers = this.config.mcpServers || [];
+        const mcpServers = this.buildMcpServers();
         if (mcpServers.length === 0) return;
         try {
             const tools = await this.mcpManager.connectAll(mcpServers);
@@ -246,37 +461,191 @@ export class MiMoAgent extends EventEmitter {
         }
     }
 
+    private buildMcpServers(): McpServerConfig[] {
+        const servers = [...(this.config.mcpServers || [])];
+        const disabled = this.config.settings?.mcp?.builtin_multimodal === false
+            || process.env.MIMO_DISABLE_BUILTIN_MULTIMODAL_MCP === '1';
+        const hasBuiltin = servers.some(server => server.name === 'mimo_multimodal');
+        if (!disabled && !hasBuiltin) {
+            servers.push({
+                name: 'mimo_multimodal',
+                command: process.execPath,
+                args: [path.join(this.extensionPath, 'out', 'mcpMultimodalServer.js')],
+                env: {
+                    MIMO_API_KEY: this.config.apiKey,
+                    MIMO_BASE_URL: this.config.baseUrl,
+                    MIMO_WORKSPACE: this.config.workspace,
+                },
+                timeoutMs: 180_000,
+            });
+        }
+        return servers;
+    }
+
     // ── Persistence ──
+
+    private stateKey(name: string): string {
+        return this.windowSessionId ? `mimo.${name}.${this.windowSessionId}` : `mimo.${name}`;
+    }
 
     private loadConversations(): void {
         if (!this.context) return;
-        const saved = this.context.globalState.get<Record<string, ConversationState>>('mimo.conversations');
+        const saved = this.context.globalState.get<Record<string, ConversationState>>(this.stateKey('conversations'));
         if (saved) {
             for (const [id, conv] of Object.entries(saved)) {
                 this.conversations.set(id, conv);
             }
-            const lastActive = this.context.globalState.get<string>('mimo.activeConversationId');
+            const lastActive = this.context.globalState.get<string>(this.stateKey('activeConversationId'));
             if (lastActive && this.conversations.has(lastActive)) {
                 this.activeId = lastActive;
             }
         }
     }
 
-    private saveConversations(): void {
+    private trimPersistedText(text: string, maxChars: number): string {
+        if (!text || text.length <= maxChars) return text || '';
+        const head = text.slice(0, Math.floor(maxChars * 0.55));
+        const tail = text.slice(-Math.floor(maxChars * 0.35));
+        return `${head}\n\n... (${text.length - head.length - tail.length} chars omitted from VS Code state; full transcript is in MiMo history) ...\n\n${tail}`;
+    }
+
+    private trimPersistedContent(content: ChatMessage['content'] | null | undefined, maxChars: number): ChatMessage['content'] {
+        if (typeof content === 'string') {
+            return this.trimPersistedText(content, maxChars);
+        }
+        if (Array.isArray(content)) {
+            return content.map((part) => {
+                if (part.type === 'text') {
+                    return { ...part, text: this.trimPersistedText(part.text || '', maxChars) };
+                }
+                const url = part.image_url?.url || '';
+                if (url.length > 750_000) {
+                    return {
+                        type: 'image_url' as const,
+                        image_url: { url: '[large image omitted from VS Code state; full image is kept in MiMo history]' },
+                    };
+                }
+                return part;
+            });
+        }
+        return '';
+    }
+
+    private buildPersistedConversationSnapshot(): Record<string, ConversationState> {
+        const MAX_CONVERSATIONS = 30;
+        const MAX_MESSAGES_PER_CONVERSATION = 48;
+        const entries = Array.from(this.conversations.entries())
+            .sort(([a], [b]) => b.localeCompare(a));
+        const selected = entries.slice(0, MAX_CONVERSATIONS);
+        if (this.activeId && !selected.some(([id]) => id === this.activeId)) {
+            const active = this.conversations.get(this.activeId);
+            if (active) selected.push([this.activeId, active]);
+        }
+
+        const snapshot: Record<string, ConversationState> = {};
+        for (const [id, conv] of selected) {
+            const firstUser = conv.messages.find(m => m.role === 'user');
+            const recent = conv.messages.slice(-MAX_MESSAGES_PER_CONVERSATION);
+            const messages = firstUser && !recent.includes(firstUser)
+                ? [firstUser, ...recent]
+                : recent;
+            snapshot[id] = {
+                ...conv,
+                messages: messages.map((msg) => {
+                    const maxContent = msg.role === 'tool' ? 2_000 : msg.role === 'assistant' ? 8_000 : 10_000;
+                    return {
+                        ...msg,
+                        content: this.trimPersistedContent(msg.content as any, maxContent),
+                        reasoning_content: msg.reasoning_content
+                            ? this.trimPersistedText(msg.reasoning_content, 1_200)
+                            : msg.reasoning_content,
+                    };
+                }),
+                contextSummary: conv.contextSummary
+                    ? this.trimPersistedText(conv.contextSummary, 6_000)
+                    : conv.contextSummary,
+            };
+        }
+        return snapshot;
+    }
+
+    private flushConversationState(): void {
         if (!this.context) return;
-        const data = Object.fromEntries(this.conversations);
-        this.context.globalState.update('mimo.conversations', data);
-        this.context.globalState.update('mimo.activeConversationId', this.activeId);
+        if (this.conversationSaveTimer) {
+            clearTimeout(this.conversationSaveTimer);
+            this.conversationSaveTimer = undefined;
+        }
+        const data = this.buildPersistedConversationSnapshot();
+        const serialized = JSON.stringify({ activeId: this.activeId, data });
+        if (serialized === this.lastPersistedConversationSnapshot) return;
+        this.lastPersistedConversationSnapshot = serialized;
+        this.context.globalState.update(this.stateKey('conversations'), data);
+        this.context.globalState.update(this.stateKey('activeConversationId'), this.activeId);
+    }
+
+    private saveConversations(): void {
+        if (!this.context || this.conversationSaveTimer) return;
+        this.conversationSaveTimer = setTimeout(() => {
+            this.flushConversationState();
+        }, 1000);
     }
 
     hasApiKey(): boolean {
         return !!this.config.apiKey;
     }
 
+    private getModelsForEndpoint(endpointId = ''): string[] {
+        const profile = this.getProfile(endpointId);
+        const configured = profile
+            ? [profile.model, ...(profile.models || [])]
+            : this.config.models.length > 0
+                ? [this.config.model, ...this.config.models]
+                : [this.config.model, ...DEFAULT_MODELS];
+        const seen = new Set<string>();
+        const models: string[] = [];
+        for (const model of configured) {
+            const key = normalizeModelName(model);
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            models.push(model);
+        }
+        return models;
+    }
+
     getModelList(): string[] {
-        return this.config.models.length > 0
-            ? this.config.models
-            : DEFAULT_MODELS;
+        return this.getModelsForEndpoint(this.config.activeRoute?.endpoint_id || this.config.activeProviderProfile || '');
+    }
+
+    getModelOptions(): Array<{ value: string; label: string; model: string; endpointId: string; endpointName: string }> {
+        const profiles = this.config.providerProfiles || [];
+        const options: Array<{ value: string; label: string; model: string; endpointId: string; endpointName: string }> = [];
+        const add = (endpointId: string, endpointName: string, model: string) => {
+            if (!model) return;
+            const value = this.encodeModelRoute(endpointId, model);
+            if (options.some(option => option.value === value)) return;
+            options.push({ value, label: endpointId ? `${endpointName || endpointId} / ${model}` : model, model, endpointId, endpointName });
+        };
+        for (const profile of profiles) {
+            const models = profile.model
+                ? [profile.model]
+                : this.getModelsForEndpoint(profile.id);
+            for (const model of models) add(profile.id, profile.name || profile.id, model);
+        }
+        if (options.length === 0) {
+            const endpointId = this.config.activeRoute?.endpoint_id || this.config.activeProviderProfile || '';
+            const endpointName = this.getProfile(endpointId)?.name || endpointId;
+            for (const model of this.getModelsForEndpoint(endpointId)) add(endpointId, endpointName, model);
+        }
+        const activeValue = this.encodeModelRoute(this.config.activeRoute?.endpoint_id || '', this.config.model);
+        if (this.config.model && !options.some(option => option.value === activeValue)) {
+            add(this.config.activeRoute?.endpoint_id || '', this.getProfile(this.config.activeRoute?.endpoint_id)?.name || '', this.config.model);
+        }
+        return options;
+    }
+
+    getModelSelectionValue(id: string): string {
+        const conv = this.conversations.get(id);
+        return this.encodeModelRoute(this.getConversationEndpointId(conv), conv?.model || this.config.model);
     }
 
     // ── Conversation management ──
@@ -289,6 +658,7 @@ export class MiMoAgent extends EventEmitter {
             title: '新对话',
             messages: [],
             model: this.config.model,
+            modelEndpointId: this.config.activeRoute?.endpoint_id || this.config.activeProviderProfile || '',
             mode: 'auto',
         });
         // DO NOT set this.activeId — panels manage their own active conversation
@@ -322,13 +692,14 @@ export class MiMoAgent extends EventEmitter {
         title: string,
         messages: ChatMessage[],
         model: string,
-        options: Partial<Pick<ConversationState, 'mode' | 'personaId' | 'activeSkillPrompt'>> = {},
+        options: Partial<Pick<ConversationState, 'mode' | 'personaId' | 'activeSkillPrompt' | 'modelEndpointId'>> = {},
     ): void {
         this.conversations.set(id, {
             id,
             title,
             messages: [...messages],
             model,
+            modelEndpointId: options.modelEndpointId,
             mode: options.mode || 'auto',
             personaId: options.personaId,
             activeSkillPrompt: options.activeSkillPrompt,
@@ -368,12 +739,22 @@ export class MiMoAgent extends EventEmitter {
         return conv?.mode || 'auto';
     }
 
+    setUiLang(lang: 'en' | 'zh', id?: string): void {
+        const convId = id || this.activeId;
+        const conv = this.conversations.get(convId);
+        if (!conv) return;
+        conv.uiLang = lang;
+        this.saveConversations();
+    }
+
     // ── Per-conversation setters ──
 
     setModel(model: string, convId?: string): void {
         const conv = this.conversations.get(convId || this.activeId);
         if (conv) {
-            conv.model = model;
+            const route = this.decodeModelRoute(model);
+            conv.model = route.model || model;
+            conv.modelEndpointId = route.endpointId || conv.modelEndpointId || this.config.activeRoute?.endpoint_id || '';
             this.saveConversations();
         }
     }
@@ -465,6 +846,8 @@ export class MiMoAgent extends EventEmitter {
 
         const conv = this.conversations.get(convId || this.activeId);
         const model = conv?.model || this.config.model;
+        const endpointId = this.getConversationEndpointId(conv);
+        const api = this.getApiForEndpoint(endpointId);
 
         // Inject model into tasks that don't specify one
         for (const phase of phases) {
@@ -498,7 +881,7 @@ export class MiMoAgent extends EventEmitter {
 
         const result = await executeWorkflow(
             phases,
-            this.api,
+            api,
             this.config.workspace,
             this.mcpManager,
             {
@@ -1011,6 +1394,11 @@ Updated summary:`;
             /\s+/g, ' '
         ).trim();
 
+        const repeatedChunk = this.detectRepeatedReasoningChunk(cleaned);
+        if (repeatedChunk.detected) {
+            return repeatedChunk;
+        }
+
         // Try multiple pattern lengths: shorter patterns catch more loop types
         for (const patLen of [20, 30, 40, 60]) {
             if (cleaned.length < patLen * MIN_REPEATS) continue;
@@ -1057,6 +1445,32 @@ Updated summary:`;
                 }
             }
         }
+
+        return { detected: false, count: 0 };
+    }
+
+    private detectRepeatedReasoningChunk(text: string): { detected: boolean; count: number } {
+        const recent = String(text || '').slice(-5000);
+        if (recent.length < 300) return { detected: false, count: 0 };
+
+        const chunks = recent
+            .split(/(?:\r?\n+|(?<=[.!?。！？])\s+)/)
+            .map(chunk => chunk.replace(/\s+/g, ' ').trim())
+            .filter(chunk => chunk.length >= 40 && /[A-Za-z\u4e00-\u9fff]/.test(chunk));
+
+        const counts = new Map<string, number>();
+        for (const chunk of chunks) {
+            const normalized = chunk
+                .replace(/^(?:The user wants me to|I need to|Let me|Now I|用户希望|我需要|让我)\s*/i, '')
+                .slice(0, 240);
+            if (normalized.length < 40) continue;
+            const count = (counts.get(normalized) || 0) + 1;
+            if (count >= 4) return { detected: true, count };
+            counts.set(normalized, count);
+        }
+
+        const intentLoopCount = (recent.match(/The user wants me to|I need to check|Let me check|用户希望我|我需要检查|让我检查/gi) || []).length;
+        if (intentLoopCount >= 5) return { detected: true, count: intentLoopCount };
 
         return { detected: false, count: 0 };
     }
@@ -1116,11 +1530,138 @@ Updated summary:`;
             'edit_file',
             'write_file',
             'delete_file',
+            'schedule_tasks',
+            'update_todos',
             'execute_command',
             'git_commit',
             'run_workflow',
             'spawn_subagent',
         ].includes(toolName);
+    }
+
+    private parseToolArgs(toolCall: ToolCall): Record<string, any> {
+        try {
+            const parsed = JSON.parse(toolCall.function.arguments || '{}');
+            return parsed && typeof parsed === 'object' ? parsed : {};
+        } catch {
+            return {};
+        }
+    }
+
+    private normalizeCommandForIntent(command: string): string {
+        return String(command || '')
+            .replace(/`/g, '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+    }
+
+    private isReadOnlyExecuteCommand(args: Record<string, any>): boolean {
+        const command = this.normalizeCommandForIntent(args.command || '');
+        if (!command || !/\bgit\b/.test(command)) return false;
+
+        const mutatingGit = /\bgit\b[\s\S]{0,120}\b(add|commit|push|pull|fetch|merge|rebase|checkout|switch|restore|reset|clean|stash|tag|branch|remote\s+(?:add|set-url|remove|rename|prune)|submodule\s+(?:update|add|sync))\b/i;
+        if (mutatingGit.test(command)) return false;
+
+        return /\bgit\b[\s\S]{0,120}\b(status|log|diff|show|remote\s+-v|rev-parse|branch(?:\s+--show-current)?|ls-files)\b/i.test(command);
+    }
+
+    private isProgressToolCall(toolCall: ToolCall, result: string): boolean {
+        if (!this.isProgressTool(toolCall.function.name, result)) return false;
+        if (toolCall.function.name !== 'execute_command') return true;
+        return !this.isReadOnlyExecuteCommand(this.parseToolArgs(toolCall));
+    }
+
+    private isGitPushDeliveryRequest(text: string): boolean {
+        const normalized = String(text || '').toLowerCase();
+        const hasGit = /\bgit\b|提交|commit|暂存|推送|同步|push/.test(normalized);
+        const wantsPush = /\bpush\b|推送|同步到远程|同步远程|上传到远程|提交并推送|git\s*并\s*push|git\s*and\s*push|commit\s+and\s+push/.test(normalized);
+        return hasGit && wantsPush;
+    }
+
+    private extractRecentGitToolEvidence(conv: ConversationState, lookback = 80): {
+        text: string;
+        commitHash?: string;
+        pushed: boolean;
+        clean: boolean;
+        upToDate: boolean;
+        blocked: boolean;
+        hardFailure: boolean;
+    } {
+        const gitTexts: string[] = [];
+        for (const msg of conv.messages.slice(-lookback)) {
+            if (msg.role !== 'tool') continue;
+            const name = msg._toolName || '';
+            const text = this.extractMessageText(msg.content);
+            if (
+                name.startsWith('git_')
+                || name === 'execute_command'
+                || /\bgit\b|Everything up-to-date|nothing to commit|working tree clean|Your branch is up to date with|up to date with 'origin\//i.test(text)
+            ) {
+                gitTexts.push(text);
+            }
+        }
+        const text = gitTexts.join('\n');
+        const commitMatches = Array.from(text.matchAll(/(?:\[[^\]\r\n]*\]\s*)?([0-9a-f]{7,40})\s+([^\r\n]+)/gi));
+        const commitHash = commitMatches.length > 0 ? commitMatches[commitMatches.length - 1][1] : undefined;
+        const pushed = /Everything up-to-date|To\s+\S+[\s\S]{0,800}(?:\b[0-9a-f]{7,40}\.\.[0-9a-f]{7,40}\b|\*\s+\[new branch\])|branch .*set up to track|up to date with 'origin\/|Your branch is up to date with/i.test(text);
+        const clean = /nothing to commit, working tree clean|working tree clean|nothing added to commit/i.test(text);
+        const upToDate = /Everything up-to-date|Your branch is up to date with|up to date with 'origin\/|origin\/\S+.*(?:[0-9a-f]{7,40})/i.test(text);
+        const blocked = /Safety:|Blocked by|Force push|forbidden|protected branch|Permission denied|Authentication failed|Repository not found|fatal: Authentication failed/i.test(text);
+        const hardFailure = /Git error:|Tool error:|fatal:|rejected|failed to push|could not read Username|Could not resolve host|unable to access/i.test(text)
+            && !/Everything up-to-date|Your branch is up to date with|nothing to commit, working tree clean/i.test(text);
+        return { text, commitHash, pushed, clean, upToDate, blocked, hardFailure };
+    }
+
+    private detectGitPushDeliveryComplete(conv: ConversationState, userInput: string): { done: boolean; summary?: string; reason?: string } {
+        if (!this.isGitPushDeliveryRequest(userInput)) return { done: false };
+        const evidence = this.extractRecentGitToolEvidence(conv);
+        if (!evidence.text.trim()) return { done: false };
+        if (evidence.blocked || evidence.hardFailure) return { done: false };
+
+        const remoteVerified = evidence.pushed || evidence.upToDate;
+        const worktreeSettled = evidence.clean || remoteVerified;
+        if (!remoteVerified || !worktreeSettled) return { done: false };
+
+        const useChinese = this.prefersChinese(userInput, conv);
+        const commitLine = evidence.commitHash
+            ? (useChinese ? `提交: ${evidence.commitHash}` : `Commit: ${evidence.commitHash}`)
+            : (useChinese ? '未检测到新的本地提交哈希，远端同步状态已确认。' : 'No new local commit hash was detected; remote sync state was verified.');
+        const statusLine = evidence.clean
+            ? (useChinese ? '工作区状态: clean' : 'Workspace: clean')
+            : (useChinese ? '工作区状态: 未看到未提交改动阻塞交付' : 'Workspace: no blocking uncommitted changes detected');
+        const remoteLine = evidence.upToDate || evidence.pushed
+            ? (useChinese ? '远端状态: 已与 origin 同步或无需推送。' : 'Remote: synced with origin or already up to date.')
+            : '';
+        const summary = useChinese
+            ? `已完成 git 提交/推送检查并确认任务可以收口。\n\n- ${commitLine}\n- ${statusLine}\n- ${remoteLine}\n\n后续不会继续重复执行 git log/status/diff 检查。`
+            : `Git commit/push delivery is complete.\n\n- ${commitLine}\n- ${statusLine}\n- ${remoteLine}\n\nMIMO will stop instead of repeating git log/status/diff checks.`;
+        return { done: true, summary, reason: 'remote verified and workspace settled' };
+    }
+
+    private finishWithLocalSummary(
+        conv: ConversationState,
+        userInput: string,
+        summary: string,
+        events: AgentEvents,
+        toolObservations: ToolObservation[],
+        convId: string,
+        traceType: string,
+        traceData: Record<string, any> = {},
+    ): string {
+        const summaryWithArtifacts = this.appendMissingArtifactSummary(conv, summary);
+        const finalOutput = this.maybeSaveLongFinalResponse(summaryWithArtifacts, events);
+        conv.messages.push({ role: 'assistant', content: finalOutput, reasoning_content: '' } as any);
+        this.saveConversations();
+        this.traceEvent(conv, traceType, {
+            ...traceData,
+            responseChars: finalOutput.length,
+        });
+        this.learnFromCompletedTurn(userInput, finalOutput, events, toolObservations);
+        events.onFinalAnswer?.(finalOutput);
+        events.onDone(finalOutput);
+        this.finishChat(convId);
+        return finalOutput;
     }
 
     private isNoProgressToolResult(result: string): boolean {
@@ -1133,6 +1674,7 @@ Updated summary:`;
 
     private isLoopGuardReadOnlyTool(toolName: string): boolean {
         return [
+            'schedule_tasks',
             'read_file', 'search_files', 'glob_files', 'list_directory',
             'get_file_info', 'git_status', 'git_diff', 'git_log',
             'fetch_url', 'web_search', 'git_worktree_list', 'read_notebook',
@@ -1142,7 +1684,7 @@ Updated summary:`;
     private isLoopGuardStateChangingTool(toolName: string): boolean {
         return [
             'edit_file', 'write_file', 'delete_file', 'move_file', 'copy_file',
-            'execute_command', 'git_commit', 'run_workflow', 'spawn_subagent',
+            'schedule_tasks', 'update_todos', 'execute_command', 'git_commit', 'run_workflow', 'spawn_subagent',
         ].includes(toolName);
     }
 
@@ -1212,6 +1754,69 @@ Updated summary:`;
         return count;
     }
 
+    private collectReadFileRangesThisTurn(conv: ConversationState): Map<string, Array<{ start: number; end: number }>> {
+        const ranges = new Map<string, Array<{ start: number; end: number }>>();
+        let currentUserIndex = -1;
+        for (let i = conv.messages.length - 1; i >= 0; i--) {
+            if (conv.messages[i].role === 'user') {
+                currentUserIndex = i;
+                break;
+            }
+        }
+        if (currentUserIndex < 0) return ranges;
+
+        const endIndex = conv.messages.length - 1;
+        for (let i = currentUserIndex + 1; i < endIndex; i++) {
+            const msg = conv.messages[i];
+            if (msg.role !== 'assistant' || !msg.tool_calls?.length) continue;
+            for (const tc of msg.tool_calls) {
+                if (this.isLoopGuardStateChangingTool(tc.function.name)) {
+                    ranges.clear();
+                    continue;
+                }
+                if (tc.function.name !== 'read_file') continue;
+                let priorArgs: Record<string, any> = {};
+                try { priorArgs = JSON.parse(tc.function.arguments || '{}'); } catch { priorArgs = {}; }
+                const range = this.getReadFileRange(priorArgs);
+                if (!range) continue;
+                const list = ranges.get(range.path) || [];
+                list.push({ start: range.start, end: range.end });
+                ranges.set(range.path, list);
+            }
+        }
+        return ranges;
+    }
+
+    private shouldSkipOverlappingReadFile(
+        args: Record<string, any>,
+        readRanges: Map<string, Array<{ start: number; end: number }>>,
+    ): string | null {
+        const range = this.getReadFileRange(args);
+        if (!range) return null;
+        const prior = readRanges.get(range.path) || [];
+        if (prior.length === 0) {
+            readRanges.set(range.path, [{ start: range.start, end: range.end }]);
+            return null;
+        }
+
+        const requested = range.end - range.start;
+        const covered = this.readRangeCoveredLength(prior, range.start, range.end);
+        const overlapRatio = requested > 0 ? covered / requested : 0;
+        if (covered >= requested || overlapRatio >= 0.72) {
+            const gap = this.firstUnreadReadRange(prior, range.start, range.end);
+            const shownStart = range.start + 1;
+            const shownEnd = range.end;
+            const gapHint = gap
+                ? ` If more context is needed, read only the uncovered gap with offset=${gap.start}, limit=${Math.max(1, gap.end - gap.start)}.`
+                : ' Use the earlier read_file result instead of rereading this range.';
+            return `Skipped overlapping read_file range for ${args.path || range.path} [L${shownStart}-${shownEnd}]; ${Math.round(overlapRatio * 100)}% was already read in this user turn.${gapHint}`;
+        }
+
+        prior.push({ start: range.start, end: range.end });
+        readRanges.set(range.path, prior);
+        return null;
+    }
+
     private summarizeRoundProgress(
         toolCalls: ToolCall[],
         toolResults: string[],
@@ -1221,12 +1826,15 @@ Updated summary:`;
         const errors = completed.filter(result => this.isToolResultError(result));
         const noProgress = completed.filter(result => this.isNoProgressToolResult(result));
         const progressTools = toolCalls.filter((tc, index) =>
-            this.isProgressTool(tc.function.name, toolResults[index] || ''),
+            this.isProgressToolCall(tc, toolResults[index] || ''),
         );
         const readOnlySuccessCount = toolCalls.filter((tc, index) =>
             !this.isToolResultError(toolResults[index] || '')
             && !this.isNoProgressToolResult(toolResults[index] || '')
-            && ['read_file', 'search_files', 'glob_files', 'list_directory', 'get_file_info', 'git_status', 'git_diff', 'git_log', 'fetch_url', 'web_search'].includes(tc.function.name),
+            && (
+                ['read_file', 'search_files', 'glob_files', 'list_directory', 'get_file_info', 'git_status', 'git_diff', 'git_log', 'fetch_url', 'web_search'].includes(tc.function.name)
+                || (tc.function.name === 'execute_command' && this.isReadOnlyExecuteCommand(this.parseToolArgs(tc)))
+            ),
         ).length;
         const readOnlySuccess = readOnlySuccessCount > 0;
         const valuableProgress = progressTools.length > 0;
@@ -1268,6 +1876,18 @@ Updated summary:`;
         hardMaxRounds: number,
         unlimitedRounds: boolean,
     ): string {
+        const useChinese = this.prefersChinese('', conv);
+        const mode = conv.mode === 'infinite' ? 'Infinite' : conv.mode === 'auto' ? 'Auto' : conv.mode;
+        const budgetHint = unlimitedRounds ? 'no fixed cap' : `${softMaxRounds}/${hardMaxRounds}`;
+        const roundStallHint = stallRounds > 0 ? `, low-progress streak ${stallRounds}` : '';
+        if (useChinese) {
+            const zhMode = conv.mode === 'infinite' ? '无限' : conv.mode === 'auto' ? '自动' : conv.mode;
+            const zhBudget = unlimitedRounds ? '无固定轮次上限' : `${softMaxRounds}/${hardMaxRounds}`;
+            const zhStall = stallRounds > 0 ? `，低进展连续 ${stallRounds} 轮` : '';
+            return `[第 ${round} 轮] ${zhMode}模式，任务复杂度 ${taskComplexity}，预算 ${zhBudget}${zhStall}。正在选择下一步具体动作。`;
+        }
+        return `[Round ${round}] ${mode}, ${taskComplexity}, budget ${budgetHint}${roundStallHint}. Choosing the next concrete action.`;
+
         const budget = unlimitedRounds
             ? '当前没有软轮次预算，但仍会监测停滞和重复。'
             : `软预算 ${softMaxRounds} 轮，硬上限 ${hardMaxRounds} 轮。`;
@@ -1280,11 +1900,22 @@ Updated summary:`;
         return `[第 ${round} 轮] 任务复杂度：${taskComplexity}。${budget} ${modeHint} ${stallHint}`;
     }
 
+    private buildRoundStatus(round: number, conv: ConversationState): string {
+        return conv.uiLang === 'en'
+            ? `Round ${round}: planning next step...`
+            : `第 ${round} 轮：规划下一步...`;
+    }
+
     private describeToolAction(name: string, args: Record<string, any>): string {
         const pathArg = args.path || args.filePath || args.directory || args.dir || args.cwd;
         switch (name) {
-            case 'read_file':
-                return `读取 ${pathArg || '文件'}`;
+            case 'read_file': {
+                const offset = Number(args.offset ?? 0);
+                const limit = Number(args.limit ?? 500);
+                const start = Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) + 1 : 1;
+                const end = Number.isFinite(limit) ? start + Math.max(1, Math.floor(limit)) - 1 : '...';
+                return `读取 ${pathArg || '文件'} [L${start}-${end}]`;
+            }
             case 'write_file':
                 return `写入 ${pathArg || '文件'}`;
             case 'edit_file':
@@ -1298,6 +1929,15 @@ Updated summary:`;
             case 'execute_command': {
                 const command = String(args.command || '').replace(/\s+/g, ' ').trim();
                 return `运行命令 ${command.slice(0, 90)}${command.length > 90 ? '...' : ''}`;
+            }
+            case 'schedule_tasks': {
+                const tasks = Array.isArray(args.tasks) ? args.tasks : [];
+                return `分析任务顺序 ${tasks.length} 项`;
+            }
+            case 'update_todos': {
+                const todos = Array.isArray(args.todos) ? args.todos : [];
+                const done = todos.filter((item: any) => /completed|done/i.test(String(item?.status || ''))).length;
+                return `更新任务清单 ${done}/${todos.length}`;
             }
             case 'git_status':
                 return '查看 git 状态';
@@ -1432,6 +2072,29 @@ Change strategy now:
         return { shouldContinue: false, reason: '' };
     }
 
+    private hasPendingActionStatement(conv: ConversationState, lookback = 8): boolean {
+        for (const msg of conv.messages.slice(-lookback).reverse()) {
+            if (msg.role === 'tool') return false;
+            if (msg.role !== 'assistant' || msg.tool_calls?.length) continue;
+            const text = this.extractMessageText(msg.content);
+            if (this.isUnexecutedActionStatement(text)) return true;
+        }
+        return false;
+    }
+
+    private isUnexecutedActionStatement(text: string): boolean {
+        const trimmed = this.extractMessageText(text).trim();
+        if (!trimmed) return false;
+        if (this.isDeliverySummary(trimmed) || this.isSubstantialFinalReport(trimmed)) return false;
+
+        const saysWillInspect = /(?:let me|i(?:'|’)ll|i will|i need to|first i|now i).{0,120}(?:inspect|check|read|list|search|look|open|scan|run|verify|diff)|(?:我来|我先|让我|先|现在|接下来).{0,120}(?:看看|查看|检查|读取|列出|浏览|搜索|找|运行|验证|确认|diff|审核)/i.test(trimmed);
+        const referencesToolTarget = /[A-Za-z]:[\\/]|(?:^|[\s"'`])\.{1,2}[\\/]|(?:read_file|list_directory|search_files|glob_files|git diff|git status|execute_command)|(?:\.pptx?|\.pdf|\.docx?|\.xlsx?|\.html?|\.tsx?|\.jsx?|\.ts|\.js|\.py|\.json|\.md)\b|(?:目录|文件|文件夹|项目|代码|改动|变更|diff|暂存|git|工作区|开题)/i.test(trimmed);
+        const asksUserToWait = /稍等|等我|马上|我先看|我检查后|after I|once I|let me first/i.test(trimmed);
+        const tooShortToBeDeliverable = trimmed.length < 900;
+
+        return (saysWillInspect || asksUserToWait) && referencesToolTarget && tooShortToBeDeliverable;
+    }
+
     private shouldContinueAutoAfterTextFinal(
         conv: ConversationState,
         taskComplexity: 'simple' | 'moderate' | 'complex',
@@ -1440,10 +2103,14 @@ Change strategy now:
         hardMaxRounds: number,
     ): CompletionGateDecision {
         if (conv.mode !== 'auto') return { shouldContinue: false, reason: '' };
-        if (taskComplexity === 'simple') return { shouldContinue: false, reason: '' };
         if (round >= hardMaxRounds) return { shouldContinue: false, reason: '' };
 
         const recentTools = conv.messages.slice(-40).filter(msg => msg.role === 'tool');
+        if (this.isUnexecutedActionStatement(finalText)) {
+            return { shouldContinue: true, reason: 'assistant announced a pending tool-backed step instead of a final answer' };
+        }
+
+        if (taskComplexity === 'simple') return { shouldContinue: false, reason: '' };
         const hasExploration = this.hasRecentTool(conv, [
             'read_file', 'search_files', 'glob_files', 'list_directory',
             'get_file_info', 'git_status', 'git_diff', 'git_log',
@@ -1495,7 +2162,7 @@ The previous assistant response looked like a final answer, but the completion g
 Previous final draft:
 ${finalText.slice(0, 1600)}
 
-Continue the task now. Do not repeat the final draft. Use tools if needed to inspect files, validate changes, or close the missing evidence. Only produce a final answer after the user requirements, file evidence, and validation status are clear.`,
+Continue the task now. Do not repeat the final draft. Use tools if needed to inspect files, validate changes, or close the missing evidence. Keep user-visible progress concise and in the user's language. Avoid "Let me..." narration; state only the concrete next action. Only produce a final answer after the user requirements, file evidence, and validation status are clear.`,
         } as any;
     }
 
@@ -1522,6 +2189,17 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
     /** Check if a specific conversation is running */
     isConvRunning(convId: string): boolean {
         return this.abortControllers.has(convId);
+    }
+
+    /** Check if a conversation is still occupied by an in-flight chat promise. */
+    isConvBusy(convId: string): boolean {
+        return this.abortControllers.has(convId) || this.activeChats.has(convId);
+    }
+
+    /** Force-clear runtime busy markers after a provider/runtime failure has been surfaced to the UI. */
+    releaseConversation(convId: string): void {
+        this.finishChat(convId);
+        this.activeChats.delete(convId);
     }
 
     getTokenTracker(): TokenTracker {
@@ -1566,30 +2244,136 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
         });
     }
 
+    private parseGitNumstat(numstat: string): TaskChangeFile[] {
+        return numstat
+            .split(/\r?\n/)
+            .map(line => line.trim())
+            .filter(Boolean)
+            .map(line => {
+                const parts = line.split('\t');
+                const addedRaw = parts[0] || '0';
+                const removedRaw = parts[1] || '0';
+                const filePath = parts.slice(2).join('\t') || '(unknown)';
+                const binary = addedRaw === '-' || removedRaw === '-';
+                return {
+                    path: filePath,
+                    added: binary ? 0 : (parseInt(addedRaw, 10) || 0),
+                    removed: binary ? 0 : (parseInt(removedRaw, 10) || 0),
+                    binary,
+                };
+            });
+    }
+
+    private mergeTaskChangeFiles(files: TaskChangeFile[]): TaskChangeFile[] {
+        const map = new Map<string, TaskChangeFile>();
+        for (const file of files) {
+            const existing = map.get(file.path);
+            if (!existing) {
+                map.set(file.path, { ...file });
+                continue;
+            }
+            existing.added += file.added || 0;
+            existing.removed += file.removed || 0;
+            existing.binary = existing.binary || file.binary;
+            existing.staged = existing.staged || file.staged;
+        }
+        return Array.from(map.values()).sort((a, b) => a.path.localeCompare(b.path));
+    }
+
+    private isTextBufferForPatch(buffer: Buffer): boolean {
+        if (buffer.length === 0) return true;
+        const sample = buffer.subarray(0, Math.min(buffer.length, 8192));
+        let nul = 0;
+        for (const byte of sample) {
+            if (byte === 0) nul++;
+        }
+        return nul <= sample.length * 0.05;
+    }
+
+    private escapeGitPathForPatch(filePath: string): string {
+        return filePath.replace(/\\/g, '/').replace(/\t/g, ' ');
+    }
+
+    private buildUntrackedFilePatch(filePath: string, content: string): string {
+        const safePath = this.escapeGitPathForPatch(filePath);
+        const normalized = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        const lines = normalized.length ? normalized.split('\n') : [''];
+        const addLines = lines.map(line => `+${line}`).join('\n');
+        const finalNewline = normalized.endsWith('\n') ? '' : '\n\\ No newline at end of file';
+        return [
+            `diff --git a/${safePath} b/${safePath}`,
+            'new file mode 100644',
+            'index 0000000..0000000',
+            '--- /dev/null',
+            `+++ b/${safePath}`,
+            `@@ -0,0 +1,${lines.length} @@`,
+            addLines + finalNewline,
+        ].join('\n') + '\n';
+    }
+
+    private async getUntrackedChangeSummary(existingPaths: Set<string>): Promise<{ files: TaskChangeFile[]; patch: string; warning?: string }> {
+        const output = await this.execGit(['ls-files', '--others', '--exclude-standard', '--', '.'], 1024 * 1024);
+        const untracked = output
+            .split(/\r?\n/)
+            .map(line => line.trim())
+            .filter(Boolean)
+            .filter(file => !existingPaths.has(file));
+        const files: TaskChangeFile[] = [];
+        const patches: string[] = [];
+        let skipped = 0;
+
+        for (const file of untracked) {
+            const fullPath = path.resolve(this.config.workspace, file);
+            let buffer: Buffer;
+            try {
+                const stat = fs.statSync(fullPath);
+                if (!stat.isFile()) continue;
+                buffer = fs.readFileSync(fullPath);
+            } catch {
+                continue;
+            }
+
+            if (buffer.length > 512 * 1024 || !this.isTextBufferForPatch(buffer)) {
+                skipped++;
+                files.push({ path: file, added: 0, removed: 0, binary: true });
+                continue;
+            }
+
+            const content = buffer.toString('utf8');
+            const lineCount = content.length ? content.split(/\r\n|\r|\n/).length : 0;
+            files.push({ path: file, added: lineCount, removed: 0, binary: false });
+            patches.push(this.buildUntrackedFilePatch(file, content));
+        }
+
+        return {
+            files,
+            patch: patches.join('\n'),
+            warning: skipped > 0 ? `${skipped} 个未跟踪的大文件或二进制文件已列入列表，但无法生成可安全撤销的文本 patch。` : undefined,
+        };
+    }
+
     async getWorkspaceChangeSummary(): Promise<TaskChangeSummary | null> {
         try {
             await this.execGit(['rev-parse', '--is-inside-work-tree'], 256 * 1024);
-            const patch = await this.execGit(['diff', '--binary', '--', '.']);
-            if (!patch.trim()) return null;
+            const trackedPatch = await this.execGit(['diff', '--binary', '--', '.']);
             const numstat = await this.execGit(['diff', '--numstat', '--', '.'], 1024 * 1024);
-            const files = numstat
-                .split(/\r?\n/)
-                .map(line => line.trim())
+            const stagedPatch = await this.execGit(['diff', '--cached', '--binary', '--', '.']);
+            const stagedNumstat = await this.execGit(['diff', '--cached', '--numstat', '--', '.'], 1024 * 1024);
+            const unstagedFiles = this.parseGitNumstat(numstat);
+            const stagedFiles = this.parseGitNumstat(stagedNumstat).map(file => ({ ...file, staged: true }));
+            let files = this.mergeTaskChangeFiles([...unstagedFiles, ...stagedFiles]);
+            const existingPaths = new Set(files.map(file => file.path));
+            const untracked = await this.getUntrackedChangeSummary(existingPaths);
+            files = this.mergeTaskChangeFiles([...files, ...untracked.files]);
+            const patch = [trackedPatch.trimEnd(), stagedPatch.trimEnd(), untracked.patch.trimEnd()]
                 .filter(Boolean)
-                .map(line => {
-                    const parts = line.split('\t');
-                    const addedRaw = parts[0] || '0';
-                    const removedRaw = parts[1] || '0';
-                    const filePath = parts.slice(2).join('\t') || '(unknown)';
-                    const binary = addedRaw === '-' || removedRaw === '-';
-                    return {
-                        path: filePath,
-                        added: binary ? 0 : (parseInt(addedRaw, 10) || 0),
-                        removed: binary ? 0 : (parseInt(removedRaw, 10) || 0),
-                        binary,
-                    };
-                });
+                .join('\n');
             if (files.length === 0) return null;
+            const hasStaged = stagedFiles.length > 0;
+            const warnings = [
+                hasStaged ? '检测到暂存区改动；Diff 会展示 staged 内容，但无法安全自动撤销暂存状态，请按需手动处理。' : '',
+                untracked.warning || '',
+            ].filter(Boolean).join('\n');
             return {
                 id: `changes_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
                 files,
@@ -1597,6 +2381,8 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
                 totalRemoved: files.reduce((sum, file) => sum + file.removed, 0),
                 patch,
                 createdAt: Date.now(),
+                canUndo: hasStaged || untracked.warning ? false : undefined,
+                warning: warnings || undefined,
             };
         } catch {
             return null;
@@ -1708,11 +2494,15 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
     ): Promise<string> {
         const effectiveConvId = convId || this.activeId;
         const chatStartedAt = Date.now();
+        const endpointId = this.getConversationEndpointId(conv);
+        const api = this.getApiForEndpoint(endpointId);
         this.traceEvent(conv, 'chat.start', {
             inputChars: userInput.length,
             hasImages: !!images?.length,
             skill: !!skillPrompt,
             existingMessages: conv.messages.length,
+            endpointId,
+            model: conv.model,
         });
 
         const emitSystemNote = (note: string) => {
@@ -1749,7 +2539,7 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
         // Some configured models are not usable for normal text chat on the chat endpoint.
         const activeCaps = this.getModelCapabilities(conv.model);
         if (activeCaps.tts || this.isKnownUnsupportedChatModel(conv.model)) {
-            const fallbackModel = this.findChatModel(conv.model, true);
+            const fallbackModel = this.findChatModel(conv.model, true, endpointId);
             if (!fallbackModel || fallbackModel === conv.model) {
                 const msg = `Current model "${conv.model}" cannot be used for chat on this endpoint. Switch to a chat model such as mimo-v2.5-pro.`;
                 events.onDone(msg);
@@ -1758,9 +2548,10 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
             }
             const oldModel = conv.model;
             conv.model = fallbackModel;
+            conv.modelEndpointId = endpointId;
             emitSystemNote(`Model auto-switched: ${oldModel} -> ${fallbackModel} for chat`);
             events.onStatus(`Model auto-switched to ${fallbackModel} for chat`);
-            events.onModelSwitched?.(fallbackModel, 'chat');
+            events.onModelSwitched?.(this.encodeModelRoute(endpointId, fallbackModel), 'chat');
             this.saveConversations();
         }
 
@@ -1768,7 +2559,7 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
         if (images && images.length > 0) {
             const caps = this.getModelCapabilities(conv.model);
             if (!caps.vision) {
-                const fallbackModel = this.findVisionModel(conv.model);
+                const fallbackModel = this.findVisionModel(conv.model, endpointId);
                 if (!fallbackModel) {
                     const msg = `Current model "${conv.model}" is not known to support images. Add a vision-capable model to settings (api.models) or switch models before sending images.`;
                     events.onDone(msg);
@@ -1777,9 +2568,10 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
                 }
                 const oldModel = conv.model;
                 conv.model = fallbackModel;
+                conv.modelEndpointId = endpointId;
                 emitSystemNote(`Model auto-switched: ${oldModel} -> ${fallbackModel} for image support`);
                 events.onStatus(`Model auto-switched to ${fallbackModel} for vision`);
-                events.onModelSwitched?.(fallbackModel, 'image');
+                events.onModelSwitched?.(this.encodeModelRoute(endpointId, fallbackModel), 'image');
                 this.saveConversations();
             }
         }
@@ -1813,12 +2605,13 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
         const _input = userInput.trim();
         const _lower = _input.toLowerCase();
         const PURE_GREETINGS = ['hi', 'hello', 'hey', '你好', '嗨', '哈喽', 'ok', '好的', '嗯', '收到', '谢谢', 'thx', 'thanks'];
+        let forceContinuePendingAction = this.hasPendingActionStatement(conv);
         const isTrivial =
             PURE_GREETINGS.includes(_lower) ||                          // exact greeting match
             _input.length <= 3 ||                                       // very short: "?", "？", "hi!", "ok"
             /^[!?！？。，、.\-~～…]+$/.test(_input) ||                  // pure punctuation
             /^[\p{Emoji}\s]+$/u.test(_input);                           // pure emoji
-        if (isTrivial) {
+        if (isTrivial && !forceContinuePendingAction) {
             return this.handleDirectResponse(userInput, conv, events, signal, effectiveConvId);
         }
 
@@ -1849,7 +2642,7 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
             if (conv.mode === 'auto') {
                 events.onStatus('分析意图...');
                 const quickIntent = quickClassifyIntent(userInput);
-                const intent = quickIntent || await classifyIntent(this.api, userInput, conv.model, signal);
+                const intent = quickIntent || await classifyIntent(api, userInput, conv.model, signal);
                 this.traceEvent(conv, 'router.intent', {
                     category: intent.category,
                     needsTools: intent.needsTools,
@@ -1889,8 +2682,12 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
                 }
 
                 // If no tools needed: simple text-only response (with persona)
-                if (!intent.needsTools) {
+                if (!intent.needsTools && !forceContinuePendingAction) {
                     return this.handleDirectResponse(userInput, conv, events, signal, effectiveConvId, persona);
+                }
+                if (!intent.needsTools && forceContinuePendingAction) {
+                    taskComplexity = 'moderate';
+                    events.onReasoning('[Completion gate] Previous response announced a tool-backed step but did not execute it; continuing with tools.');
                 }
             }
         } catch (e: any) {
@@ -1908,13 +2705,15 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
         // Max Rounds: 0 means no round budget. Stall and loop guards still protect
         // the extension from repeated no-progress work.
         const COMPLEXITY_ROUNDS = { simple: 10, moderate: 30, complex: 50 };
+        const MIN_AUTO_ROUND_BUDGET = 200;
+        const MIN_AUTO_STOP_GUARD_ROUND = 200;
         const rawConfiguredMaxRounds = conv.mode === 'infinite'
             ? this.getInfiniteSoftMaxRounds()
             : Math.floor(this.config.maxRounds ?? 0);
         const unlimitedRounds = conv.mode !== 'infinite' && rawConfiguredMaxRounds <= 0;
         const configuredMaxRounds = unlimitedRounds
             ? Number.MAX_SAFE_INTEGER
-            : Math.max(1, rawConfiguredMaxRounds);
+            : Math.max(conv.mode === 'auto' ? MIN_AUTO_ROUND_BUDGET : 1, rawConfiguredMaxRounds);
         const suggestedRounds = COMPLEXITY_ROUNDS[taskComplexity] || 30;
         const SOFT_MAX_ROUNDS = configuredMaxRounds;
         const HARD_MAX_ROUNDS = conv.mode === 'infinite'
@@ -1922,7 +2721,7 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
             : unlimitedRounds
                 ? Number.MAX_SAFE_INTEGER
                 : Math.max(SOFT_MAX_ROUNDS + 10, SOFT_MAX_ROUNDS * 3, suggestedRounds * 2);
-        const STALL_LIMIT = conv.mode === 'infinite' ? this.getInfiniteStallLimit() : 3;
+        const STALL_LIMIT = conv.mode === 'infinite' ? this.getInfiniteStallLimit() : (conv.mode === 'auto' ? 12 : 3);
         const POST_BUDGET_STALL_LIMIT = conv.mode === 'infinite' ? Math.max(2, Math.ceil(STALL_LIMIT / 2)) : STALL_LIMIT;
         if (taskComplexity !== 'moderate') {
             events.onReasoning(unlimitedRounds
@@ -1966,17 +2765,26 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
                 HARD_MAX_ROUNDS,
                 unlimitedRounds,
             );
-            events.onStatus(`第 ${round} 轮：规划下一步...`);
+            events.onStatus(this.buildRoundStatus(round, conv));
             events.onReasoning(roundNarration);
 
             let systemContent = persona
                 ? buildPersonaPrompt(this.systemPrompt, persona)
                 : this.systemPrompt;
+            systemContent += `\n\n## Runtime Language Discipline\n${this.languageInstruction(userInput, conv)}`;
             systemContent = this.appendMemoryPrompt(systemContent, userInput);
+            if (this.isGitPushDeliveryRequest(userInput)) {
+                systemContent += `\n\n[Git delivery convergence]
+For explicit git commit/push requests, stop as soon as the commit/push delivery is verified. Evidence such as "Everything up-to-date", a clean working tree, "Your branch is up to date with", or a remote log containing the commit is enough to finalize. Do not keep repeating git status/log/diff checks after delivery is verified.`;
+            }
 
             // Inject active skill prompt into system content (not user message)
             if (conv.activeSkillPrompt) {
                 systemContent += `\n\n## Active Skill\n${conv.activeSkillPrompt}`;
+            }
+            if (forceContinuePendingAction) {
+                systemContent += `\n\n[Pending action recovery]\nThe previous assistant message announced an inspection/read/list/search step but no tool was executed. Continue that prior task now. Do not answer with another promise to inspect; call the appropriate file/search/directory tool first, then complete the user's requested output.`;
+                forceContinuePendingAction = false;
             }
             let toolChoice: string | undefined = 'auto';
             let tools: typeof TOOL_DEFINITIONS | undefined = TOOL_DEFINITIONS;
@@ -1999,7 +2807,8 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
             if (conv.mode === 'plan' && !conv.planConfirmed) {
                 // Plan mode, phase 1: Analyze + output plan, read-only + web search tools
                 tools = TOOL_DEFINITIONS.filter(t =>
-                    ['read_file', 'search_files', 'glob_files', 'list_directory',
+                    ['schedule_tasks', 'update_todos',
+                     'read_file', 'search_files', 'glob_files', 'list_directory',
                      'get_file_info', 'git_status', 'git_diff', 'git_log',
                      'web_search', 'fetch_url', 'ask_user'].includes(t.function.name)
                 );
@@ -2097,7 +2906,7 @@ Do not ask the user for clarification or confirmation during this run. If a choi
             if (this.shouldUseSummarization(contextSourceMessages, conv.model, taskComplexity, systemContent.length)) {
                 events.onReasoning(`[上下文：压缩前估算 ${preStats.percent}%，正在摘要压缩...]`);
                 try {
-                    managedMessages = await summarizeContext(contextSourceMessages, this.api, conv.model, {}, signal);
+                    managedMessages = await summarizeContext(contextSourceMessages, api, conv.model, {}, signal);
                 } catch (e: any) {
                     events.onReasoning(`[上下文压缩失败：${String(e?.message || e).slice(0, 120)}。改用滑动窗口。]`);
                     managedMessages = manageContext(contextSourceMessages, conv.model);
@@ -2116,7 +2925,7 @@ Do not ask the user for clarification or confirmation during this run. If a choi
             const params: Record<string, any> = this.buildChatParams(conv.model, [
                 { role: 'system' as const, content: systemContent },
                 ...managedMessages,
-            ]);
+            ], {}, endpointId);
 
             // Log context usage
             const stats = getContextStats(managedMessages, conv.model, systemContent.length);
@@ -2138,7 +2947,7 @@ Do not ask the user for clarification or confirmation during this run. If a choi
             try {
                 loopAbortController = new AbortController();
                 signal.addEventListener('abort', () => loopAbortController?.abort(), { once: true });
-                const result = await this.api.chatCompletionsStream(params, {
+                const result = await api.chatCompletionsStream(params, {
                     onToken: (t) => events.onToken(t),
                     onReasoning: (t) => {
                         // Guard: stop processing after loop detection to avoid duplicate triggers
@@ -2166,8 +2975,9 @@ Do not ask the user for clarification or confirmation during this run. If a choi
                             }
                         }
 
-                        // Only emit reasoning in chunks, not every token
-                        if (reasoningBuffer.length > 50) {
+                        // Only emit reasoning in coarse chunks. Fine-grained updates make
+                        // the webview main thread hard to use during long thinking streams.
+                        if (reasoningBuffer.length > 1_200) {
                             events.onReasoning(reasoningBuffer);
                             reasoningBuffer = '';
                         }
@@ -2212,6 +3022,20 @@ Do not ask the user for clarification or confirmation during this run. If a choi
                 if (reasoningLoopDetected) {
                     this.clearInternalStop(effectiveConvId);
                     reasoningLoopCount++;
+
+                    const gitPushDone = this.detectGitPushDeliveryComplete(conv, userInput);
+                    if (gitPushDone.done && gitPushDone.summary) {
+                        return this.finishWithLocalSummary(
+                            conv,
+                            userInput,
+                            gitPushDone.summary,
+                            events,
+                            memoryToolObservations,
+                            effectiveConvId,
+                            'git_push_delivery.done_after_reasoning_loop',
+                            { round, loopCount: reasoningLoopCount, reason: gitPushDone.reason },
+                        );
+                    }
 
                     // Remove incomplete assistant message if it was pushed (safety check)
                     const lastMsg = conv.messages[conv.messages.length - 1];
@@ -2283,6 +3107,29 @@ Do not ask the user for clarification or confirmation during this run. If a choi
                     return '(stopped by user)';
                 }
                 // 429 rate limit — wait and retry (max 3 times per round)
+                const errorMessage = String(e?.message || e || '');
+                const maxTokensParamInvalid = /API error\s+400|invalid_request_error|field\s+MaxTokens\s+invalid|param["']?\s*:\s*["']?max_tokens|max_tokens/i.test(errorMessage)
+                    && /invalid|should be in|must be|range|too large|exceed/i.test(errorMessage)
+                    && !/context|too long/i.test(errorMessage);
+                if (maxTokensParamInvalid) {
+                    const limit = 65536;
+                    const hint = `Model/API rejected max_tokens. Current configured max_tokens is ${this.config.maxTokens}; set Generation > Max Tokens to ${limit} or lower, then retry.`;
+                    const summary = `${this.buildProgressSummary(conv, 'model generation parameter rejected by provider', {
+                        round,
+                        maxRounds: HARD_MAX_ROUNDS,
+                        softMaxRounds: SOFT_MAX_ROUNDS,
+                    })}
+${hint}`;
+                    this.learnFromCompletedTurn(userInput, summary, events, memoryToolObservations);
+                    events.onDone(summary);
+                    events.onError(hint);
+                    const lastMsg = conv.messages[conv.messages.length - 1];
+                    if (lastMsg?.role === 'assistant' && !lastMsg.content && !lastMsg.tool_calls) {
+                        conv.messages.pop();
+                    }
+                    this.finishChat(effectiveConvId);
+                    return summary;
+                }
                 if (e.message?.includes('429')) {
                     consecutiveRateRetries++;
                     if (consecutiveRateRetries > 3) {
@@ -2303,6 +3150,16 @@ Do not ask the user for clarification or confirmation during this run. If a choi
                     round--; // Repeat this round
                     continue;
                 }
+                if (/Request timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket hang up|fetch failed|unexpected end of data|aborted before complete/i.test(String(e?.message || e))
+                    && consecutiveRateRetries < 2
+                    && !this.isStopping(effectiveConvId, signal)) {
+                    consecutiveRateRetries++;
+                    const waitSec = 2 + consecutiveRateRetries * 2;
+                    events.onReasoning(`[连接恢复] ${String(e?.message || e).slice(0, 120)}。${waitSec}s 后重试本轮。`);
+                    await new Promise(r => setTimeout(r, waitSec * 1000));
+                    round--;
+                    continue;
+                }
                 // Don't retry if user clicked stop
                 if (this.isStopping(effectiveConvId, signal)) {
                     events.onDone('(stopped by user)');
@@ -2311,14 +3168,15 @@ Do not ask the user for clarification or confirmation during this run. If a choi
                 }
                 // Context overflow — try aggressive compression
                 if (this.isModelUnsupportedError(e)) {
-                    const fallbackModel = this.findChatModel(conv.model, true);
+                    const fallbackModel = this.findChatModel(conv.model, true, endpointId);
                     if (fallbackModel) {
                         const oldModel = conv.model;
                         conv.model = fallbackModel;
+                        conv.modelEndpointId = endpointId;
                         this.saveConversations();
                         events.onReasoning(`[Model fallback] ${oldModel} is not usable for chat on this endpoint. Switched to ${fallbackModel} and retrying.`);
                         events.onStatus(`Model auto-switched to ${fallbackModel} for chat`);
-                        events.onModelSwitched?.(fallbackModel, 'chat');
+                        events.onModelSwitched?.(this.encodeModelRoute(endpointId, fallbackModel), 'chat');
                         const lastMsg = conv.messages[conv.messages.length - 1];
                         if (lastMsg?.role === 'assistant' && !lastMsg.content && !lastMsg.tool_calls) {
                             conv.messages.pop();
@@ -2426,12 +3284,13 @@ ${friendlyError}`;
                     events.onReasoning(`[Completion gate] ${completionGate.reason}; continuing instead of finalizing.`);
                     continue;
                 }
+                const finalWithArtifacts = this.appendMissingArtifactSummary(conv, finalResponse);
                 this.traceEvent(conv, 'chat.done', {
                     round,
                     elapsedMs: Date.now() - chatStartedAt,
-                    responseChars: finalResponse.length,
+                    responseChars: finalWithArtifacts.length,
                 });
-                const finalOutput = this.maybeSaveLongFinalResponse(finalResponse, events);
+                const finalOutput = this.maybeSaveLongFinalResponse(finalWithArtifacts, events);
                 if (finalOutput !== finalResponse) {
                     const last = conv.messages[conv.messages.length - 1];
                     if (last?.role === 'assistant') {
@@ -2464,6 +3323,7 @@ ${friendlyError}`;
             interface ToolTask { index: number; tc: ToolCall; args: Record<string, any>; parallel: boolean; }
             const skippedToolResults = new Map<number, string>();
             const seenReadOnlyCalls = new Map<string, number>();
+            const readFileRanges = this.collectReadFileRangesThisTurn(conv);
             const tasks: ToolTask[] = [];
             toolCalls.forEach((tc, i) => {
                 let args: Record<string, any> = {};
@@ -2473,6 +3333,19 @@ ${friendlyError}`;
                     // Note: PARALLEL_TOOLS only contains read-only tools, safe to parallelize even in polling mode.
                     // Mutating tools (edit_file, write_file, delete_file) are never in PARALLEL_TOOLS.
                 if (isParallel) {
+                    if (tc.function.name === 'read_file') {
+                        const overlapSkip = this.shouldSkipOverlappingReadFile(args, readFileRanges);
+                        if (overlapSkip) {
+                            skippedToolResults.set(i, overlapSkip);
+                            this.traceEvent(conv, 'tool.skip_overlapping_read_file', {
+                                round,
+                                path: args.path,
+                                offset: args.offset,
+                                limit: args.limit,
+                            });
+                            return;
+                        }
+                    }
                     const key = this.normalizeToolArgsForLoopGuard(tc.function.name, args);
                     const firstIndex = seenReadOnlyCalls.get(key);
                     if (firstIndex !== undefined) {
@@ -2698,7 +3571,7 @@ ${friendlyError}`;
             const lowValueReadOnlyLoop = !readOnlyAuditTask && readonlyOnlyRounds >= 2;
             const progressKeepsGoing = overSoftBudget
                 ? (roundProgress.valuableProgress || (readOnlyAuditTask && roundProgress.madeProgress))
-                : (roundProgress.madeProgress && !lowValueReadOnlyLoop);
+                : roundProgress.madeProgress;
             stallRounds = progressKeepsGoing ? 0 : stallRounds + 1;
             let shouldStopAfterSaving = false;
             let shouldRetryWithProgressRecovery = false;
@@ -2738,7 +3611,8 @@ ${friendlyError}`;
                     : `[软轮次预算已达到] 仍检测到具体进展，继续执行。`);
             }
 
-            if (stallRounds >= (overSoftBudget ? POST_BUDGET_STALL_LIMIT : STALL_LIMIT)) {
+            const stopGuardAllowed = conv.mode !== 'auto' || round >= MIN_AUTO_STOP_GUARD_ROUND;
+            if (stopGuardAllowed && stallRounds >= (overSoftBudget ? POST_BUDGET_STALL_LIMIT : STALL_LIMIT)) {
                 stopReason = overSoftBudget
                     ? '达到软轮次预算，且未检测到进一步进展'
                     : '达到软轮次预算前已连续停滞';
@@ -2771,6 +3645,19 @@ ${friendlyError}`;
             }
             this.saveConversations();
             reasoningLoopCount = 0;
+            const gitPushDone = this.detectGitPushDeliveryComplete(conv, userInput);
+            if (gitPushDone.done && gitPushDone.summary) {
+                return this.finishWithLocalSummary(
+                    conv,
+                    userInput,
+                    gitPushDone.summary,
+                    events,
+                    memoryToolObservations,
+                    effectiveConvId,
+                    'git_push_delivery.done',
+                    { round, reason: gitPushDone.reason },
+                );
+            }
             if (shouldRetryWithProgressRecovery && progressRecoveryInstruction && !shouldStopAfterSaving) {
                 continue;
             }
@@ -2786,7 +3673,8 @@ ${friendlyError}`;
             softMaxRounds: SOFT_MAX_ROUNDS,
         });
         const finalSummary = await this.finalizeWithFreshModel(conv, progressSummary, events, signal);
-        const summary = this.maybeSaveLongFinalResponse(finalSummary || progressSummary, events);
+        const summaryWithArtifacts = this.appendMissingArtifactSummary(conv, finalSummary || progressSummary);
+        const summary = this.maybeSaveLongFinalResponse(summaryWithArtifacts, events);
         conv.messages.push({ role: 'assistant', content: summary });
         this.saveConversations();
         this.traceEvent(conv, 'chat.handoff', {
@@ -3015,10 +3903,12 @@ ISSUE: [severity:critical/high/medium/low] [文件路径:行号] [问题描述]
         if (!conv) return 'No active conversation';
 
         const effectiveConvId = convId || this.activeId;
+        const endpointId = this.getConversationEndpointId(conv);
+        const api = this.getApiForEndpoint(endpointId);
 
         // ── 适用性检测：不适合的任务自动降级为 Auto 模式 ──
         try {
-            const suitability = await checkAdversarialSuitability(this.api, userInput, conv.model);
+            const suitability = await checkAdversarialSuitability(api, userInput, conv.model);
             if (!suitability.suitable) {
                 // 降级提示
                 events.onReasoning(`[🎭→⚡ 降级] 识别为「${suitability.category}」— ${suitability.reason}，对决模式不适合此任务，自动切换为 Auto 模式`);
@@ -3078,7 +3968,7 @@ ISSUE: [severity:critical/high/medium/low] [文件路径:行号] [问题描述]
                     task: `分析以下任务涉及的代码文件、依赖关系和项目结构。找到相关的源文件、配置文件、测试文件。\n\n任务：${userInput}\n\n请输出：\n1. 相关文件列表（路径+简要说明）\n2. 关键代码结构（类/函数/模块关系）\n3. 需要特别注意的边界情况`,
                     maxRounds: 5,
                 },
-                this.api, this.config.workspace, this.mcpManager,
+                api, this.config.workspace, this.mcpManager,
                 {
                     maxTokens: this.config.maxTokens,
                     temperature: this.config.temperature,
@@ -3173,7 +4063,7 @@ ISSUE: [severity:critical/high/medium/low] [文件路径:行号] [问题描述]
                                 task: `验证以下问题是否已被修复。读取相关文件，检查代码是否已正确修改。\n\n待验证的问题：\n${criticalIssues.map(i => `- ${i.id} ${i.file}:${i.line || '?'} [${i.severity}] ${i.description}`).join('\n')}\n\n对每个问题，输出：\n- FIXED: [问题ID] [简要说明如何确认已修复]\n或\n- NOT_FIXED: [问题ID] [为什么认为未修复]`,
                                 maxRounds: 3,
                             },
-                            this.api, this.config.workspace, this.mcpManager,
+                            api, this.config.workspace, this.mcpManager,
                             {
                                 maxTokens: this.config.maxTokens,
                                 temperature: this.config.temperature,
@@ -3233,7 +4123,7 @@ ISSUE: [severity:critical/high/medium/low] [文件路径:行号] [问题描述]
                             task: `${dimDef.prompt}\n\n---\n原始需求：${userInput}\n\n${coder.name}的实现：\n${codeSnippet}${contextSnippet}`,
                             maxRounds: 3,
                         },
-                        this.api, this.config.workspace, this.mcpManager, subAgentConfig,
+                        api, this.config.workspace, this.mcpManager, subAgentConfig,
                         { onStatus: (s) => events.onStatus(`[${dimDef.icon} ${dimDef.label}] ${s}`) },
                         signal,
                     );
@@ -3424,6 +4314,8 @@ ISSUE: [severity:critical/high/medium/low] [文件路径:行号] [问题描述]
         existingMessages?: ChatMessage[],
     ): Promise<{ response: string; messages: ChatMessage[] }> {
         const signal = this.abortControllers.get(convId || this.activeId)?.signal;
+        const endpointId = this.getConversationEndpointId(conv);
+        const api = this.getApiForEndpoint(endpointId);
 
         // Copy existing messages so manageContext compression doesn't corrupt the persistent history
         const messages: ChatMessage[] = existingMessages ? [...existingMessages] : [];
@@ -3480,7 +4372,7 @@ ISSUE: [severity:critical/high/medium/low] [文件路径:行号] [问题描述]
             const params: Record<string, any> = this.buildChatParams(conv.model, [
                 { role: 'system' as const, content: advSystemContent },
                 ...managed,
-            ]);
+            ], {}, endpointId);
 
             // After tool budget exhausted: NO tools, force text-only response
             if (forceText) {
@@ -3502,7 +4394,7 @@ ISSUE: [severity:critical/high/medium/low] [文件路径:行号] [问题描述]
             // Stream with persona-specific events
             let roundText = '';
             let reasoningText = '';
-            const result = await this.api.chatCompletionsStream(params, {
+            const result = await api.chatCompletionsStream(params, {
                 onToken: (t) => {
                     roundText += t;
                     events.onAdversarialTurn?.(persona.id, persona.name, persona.icon, phase, t, iteration);
@@ -3592,6 +4484,9 @@ ISSUE: [severity:critical/high/medium/low] [文件路径:行号] [问题描述]
     ): Promise<string> {
         events.onStatus('正在思考...');
 
+        const endpointId = this.getConversationEndpointId(conv);
+        const api = this.getApiForEndpoint(endpointId);
+
         // Include persona in system prompt if detected
         let systemContent = persona
             ? buildPersonaPrompt(this.systemPrompt, persona)
@@ -3608,10 +4503,10 @@ ISSUE: [severity:critical/high/medium/low] [文件路径:行号] [问题描述]
         const params: Record<string, any> = this.buildChatParams(conv.model, [
             { role: 'system' as const, content: systemContent },
             ...managedMessages,
-        ]);
+        ], {}, endpointId);
 
         let content = '';
-        const result = await this.api.chatCompletionsStream(params, {
+        const result = await api.chatCompletionsStream(params, {
             onToken: (t) => {
                 content += t;
                 events.onToken(t);
@@ -3940,6 +4835,23 @@ ISSUE: [severity:critical/high/medium/low] [文件路径:行号] [问题描述]
         return '';
     }
 
+    private prefersChinese(userInput: string, conv?: ConversationState): boolean {
+        const samples = [
+            userInput || '',
+            ...((conv?.messages || [])
+                .filter(m => m.role === 'user')
+                .slice(-3)
+                .map(m => this.extractMessageText(m.content))),
+        ].join('\n');
+        return /[\u4e00-\u9fff]/.test(samples);
+    }
+
+    private languageInstruction(userInput: string, conv?: ConversationState): string {
+        return this.prefersChinese(userInput, conv)
+            ? 'Language requirement: the user is using Chinese. Keep all user-visible progress, intermediate prose, recovery messages, and final answers in Chinese. Do not switch to English after tool calls unless quoting source text or code.'
+            : 'Language requirement: use the same language as the user for user-visible progress and final answers.';
+    }
+
     private clearInternalStop(convId: string): void {
         this.stoppingConversations.delete(convId);
         this.abortControllers.delete(convId);
@@ -3956,11 +4868,20 @@ ISSUE: [severity:critical/high/medium/low] [文件路径:行号] [问题描述]
         events: AgentEvents,
     ): Promise<string | null> {
         try {
-            // Build a fresh message list with clear instructions
-            const freshMessages: ChatMessage[] = [
-                {
-                    role: 'system',
-                    content: `[RECOVERY MODE] The previous model call got stuck in a reasoning loop. You are a fresh model call in the same conversation.
+            const endpointId = this.getConversationEndpointId(conv);
+            const api = this.getApiForEndpoint(endpointId);
+            const useChinese = this.prefersChinese('', conv);
+            const recoveryPrompt = useChinese
+                ? `[恢复模式] 上一次模型调用陷入了推理循环。你是同一会话中的一次全新模型调用。
+停止继续思考。不要重新规划。不要解释内部推理。基于当前进展立即行动。
+
+${progressSummary}
+
+必须遵守：
+1. 如果工作已经足够完成，直接输出面向用户的最终中文总结。
+2. 如果工作尚未完成，输出简洁中文交接：已完成什么、改动/检查了哪些文件、验证状态、下一步具体命令或动作。
+3. 不要重复之前的分析。标题使用“恢复：”或“总结：”，不要使用英文 RECOVERY/SUMMARY。`
+                : `[RECOVERY MODE] The previous model call got stuck in a reasoning loop. You are a fresh model call in the same conversation.
 Stop thinking. Do not plan again. Do not explain internal reasoning. Act immediately from the current progress.
 
 ${progressSummary}
@@ -3968,7 +4889,12 @@ ${progressSummary}
 Required behavior:
 1. If enough work is already done, output a final user-facing summary now.
 2. If work is incomplete, output a concise recovery handoff: completed work, changed files, validation status, exact next command/action.
-3. Do not repeat prior analysis. Start the answer with "RECOVERY:" or "SUMMARY:".`,
+3. Do not repeat prior analysis. Start the answer with "RECOVERY:" or "SUMMARY:".`;
+            // Build a fresh message list with clear instructions
+            const freshMessages: ChatMessage[] = [
+                {
+                    role: 'system',
+                    content: recoveryPrompt,
                 },
                 // Include the original user request
                 ...conv.messages.filter(m => m.role === 'user').slice(0, 1),
@@ -3985,9 +4911,9 @@ Required behavior:
                 max_tokens: 2000,
             };
 
-            events.onReasoning(`\n\n[Recovery] Starting a fresh model call...`);
+            events.onReasoning(useChinese ? `\n\n[恢复] 正在切换到新的模型调用。` : `\n\n[Recovery] Starting a fresh model call...`);
 
-            const content = await this.api.chatCompletion(params);
+            const content = await api.chatCompletion(params);
 
             if (content && content.length > 10) {
                 return content;
@@ -4012,13 +4938,26 @@ Required behavior:
         signal?: AbortSignal,
     ): Promise<string | null> {
         try {
+            const endpointId = this.getConversationEndpointId(conv);
+            const api = this.getApiForEndpoint(endpointId);
+            const useChinese = this.prefersChinese('', conv);
             const recentMessages = conv.messages
                 .filter(m => m.role === 'assistant' || m.role === 'tool')
                 .slice(-8);
-            const messages: ChatMessage[] = [
-                {
-                    role: 'system',
-                    content: `[HANDOFF MODE] The agent reached its tool-round budget before a clean final answer.
+            const handoffPrompt = useChinese
+                ? `[交接模式] 代理在给出干净最终答案前达到了工具轮次预算。
+停止继续思考。不要调用工具。不要继续实现。现在输出一段有用的中文用户交接。
+
+${progressSummary}
+
+输出要求：
+- 如果任务看起来基本完成，以“总结：”开头；否则以“恢复：”开头。
+- 说明已经完成了什么。
+- 说明可能改动或检查过的文件。
+- 说明已知验证状态。
+- 给出恢复任务的下一步具体动作。
+- 保持简洁，不要道歉。`
+                : `[HANDOFF MODE] The agent reached its tool-round budget before a clean final answer.
 Stop thinking. Do not call tools. Do not continue implementation. Produce a useful user-facing handoff now.
 
 ${progressSummary}
@@ -4029,14 +4968,18 @@ Output format:
 - Mention files likely changed or inspected.
 - Mention validation status if known.
 - Give the next concrete step to resume.
-- Keep it concise and do not apologize.`,
+- Keep it concise and do not apologize.`;
+            const messages: ChatMessage[] = [
+                {
+                    role: 'system',
+                    content: handoffPrompt,
                 },
                 ...conv.messages.filter(m => m.role === 'user').slice(0, 1),
                 ...recentMessages,
             ];
 
-            events.onReasoning(`\n\n[Handoff] Generating final recovery summary...`);
-            const content = await this.api.chatCompletion({
+            events.onReasoning(useChinese ? `\n\n[交接] 正在生成最终进度摘要。` : `\n\n[Handoff] Generating final recovery summary...`);
+            const content = await api.chatCompletion({
                 model: conv.model,
                 messages,
                 stream: false,
@@ -4165,6 +5108,8 @@ Output format:
 
         const conv = this.conversations.get(convId || this.activeId);
         const model = args.model || conv?.model || this.config.model;
+        const endpointId = this.getConversationEndpointId(conv);
+        const api = this.getApiForEndpoint(endpointId);
 
         events.onReasoning(`[Sub-agent] Spawning ${subType} agent: "${task.substring(0, 80)}..."`);
 
@@ -4183,7 +5128,7 @@ Output format:
                 maxRounds: subType === 'explore' ? 5 : 10,
                 worktree: args.worktree,
             },
-            this.api,
+            api,
             args.worktree || this.config.workspace,
             this.mcpManager,
             {
@@ -4235,9 +5180,11 @@ Output format:
         events: SubAgentEvents = {},
         signal?: AbortSignal,
     ): Promise<SubAgentResult> {
+        const endpointId = this.config.activeRoute?.endpoint_id || this.config.activeProviderProfile || '';
+        const api = this.getApiForEndpoint(endpointId);
         return runSubAgent(
             options,
-            this.api,
+            api,
             options.worktree || this.config.workspace,
             this.mcpManager,
             {

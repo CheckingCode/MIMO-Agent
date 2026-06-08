@@ -174,6 +174,11 @@ function init(): void {
             case 'tabList':
                 store.set('tabs', msg.tabs);
                 store.set('activeTabId', msg.activeId);
+                vscode.setWindowState({
+                    kind: 'mimo-chat',
+                    convIds: Array.isArray(msg.tabs) ? msg.tabs.map((tab: any) => tab.id).filter(Boolean) : [],
+                    activeConvId: msg.activeId || '',
+                });
                 bus.emit('tabList', msg.tabs, msg.activeId);
                 break;
 
@@ -360,7 +365,13 @@ function init(): void {
                 // Auto-switched model for chat or image support.
                 store.set('currentModel', msg.model);
                 bus.emit('modelList', store.get('models'), msg.model);
-                bus.emit('system', `${t('model.switched')} ${msg.model} ${t(msg.reason === 'image' ? 'model.image.support' : 'model.chat.support')}`);
+                {
+                    const option = (store.get('models') as any[]).find(item =>
+                        typeof item === 'object' && item && item.value === msg.model
+                    );
+                    const label = option?.label || msg.model;
+                    bus.emit('system', `${t('model.switched')} ${label} ${t(msg.reason === 'image' ? 'model.image.support' : 'model.chat.support')}`);
+                }
                 break;
 
             // 閳光偓閳光偓 History 閳光偓閳光偓

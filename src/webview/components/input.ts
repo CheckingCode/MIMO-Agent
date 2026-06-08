@@ -11,6 +11,9 @@ export const InputArea = {
         const input = document.getElementById('input') as HTMLTextAreaElement;
         const sendBtn = document.getElementById('send') as HTMLButtonElement;
         const modelSelect = document.getElementById('model-select') as HTMLSelectElement;
+        const modelTrigger = document.getElementById('model-picker-trigger') as HTMLButtonElement | null;
+        const modelPopup = document.getElementById('model-picker-popup') as HTMLElement | null;
+        const modelLabel = document.getElementById('model-picker-label') as HTMLElement | null;
         const voiceBtn = document.getElementById('voice-btn') as HTMLButtonElement;
         const reasoningBtn = document.getElementById('reasoning-effort-btn') as HTMLButtonElement;
 
@@ -124,6 +127,25 @@ export const InputArea = {
             modePopup.classList.toggle('show');
         });
 
+        modePopup.addEventListener('click', (e) => {
+            e.stopPropagation();
+        });
+
+        document.addEventListener('click', (e) => {
+            if (!modePopup.classList.contains('show')) return;
+            const target = e.target as HTMLElement | null;
+            if (!target) return;
+            if (modePopup.contains(target) || modeTrigger.contains(target)) return;
+            modePopup.classList.remove('show');
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                modePopup.classList.remove('show');
+                modelPopup?.classList.remove('show');
+            }
+        });
+
         const modeOptions = modePopup.querySelectorAll('.mode-option');
         for (let i = 0; i < modeOptions.length; i++) {
             modeOptions[i].addEventListener('click', (e) => {
@@ -144,6 +166,34 @@ export const InputArea = {
             vscode.setModel(modelSelect.value);
         });
 
+        if (modelTrigger && modelPopup) {
+            modelTrigger.addEventListener('click', (e) => {
+                e.stopPropagation();
+                modePopup.classList.remove('show');
+                modelPopup.classList.toggle('show');
+            });
+            modelPopup.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const item = (e.target as HTMLElement | null)?.closest?.('[data-model-value]') as HTMLElement | null;
+                if (!item) return;
+                const value = item.getAttribute('data-model-value') || '';
+                if (!value) return;
+                modelSelect.value = value;
+                modelPopup.querySelectorAll('.model-picker-item').forEach(el => el.classList.remove('active'));
+                item.classList.add('active');
+                if (modelLabel) modelLabel.textContent = item.getAttribute('data-model-label') || value;
+                modelPopup.classList.remove('show');
+                vscode.setModel(value);
+            });
+            document.addEventListener('click', (e) => {
+                if (!modelPopup.classList.contains('show')) return;
+                const target = e.target as HTMLElement | null;
+                if (!target) return;
+                if (modelPopup.contains(target) || modelTrigger.contains(target)) return;
+                modelPopup.classList.remove('show');
+            });
+        }
+
         if (reasoningBtn) {
             reasoningBtn.addEventListener('click', () => {
                 const current = store.get('reasoningEffort');
@@ -156,15 +206,93 @@ export const InputArea = {
             });
         }
 
-        bus.on('modelList', (models: string[], current: string) => {
+        bus.on('modelList', (models: Array<string | { value: string; label?: string; model?: string; endpointId?: string; endpointName?: string }>, current: string) => {
             modelSelect.innerHTML = '';
-            for (const m of models) {
-                const opt = document.createElement('option');
-                opt.value = m;
-                opt.textContent = m;
-                if (m === current) opt.selected = true;
-                modelSelect.appendChild(opt);
+            const seen = new Set<string>();
+            const flatOptions: Array<{ value: string; label: string; model?: string; endpointId?: string; endpointName?: string }> = [];
+            const decodeRoute = (value: string): { endpointId: string; model: string } => {
+                const text = String(value || '');
+                const idx = text.indexOf('::');
+                if (idx <= 0) return { endpointId: '', model: text };
+                return { endpointId: text.slice(0, idx), model: text.slice(idx + 2) };
+            };
+            const cleanLabel = (option: { value: string; label?: string; model?: string; endpointName?: string }): string => {
+                const decoded = decodeRoute(option.value);
+                return option.model || decoded.model || option.label || option.value;
+            };
+
+            for (const item of models) {
+                const value = typeof item === 'string' ? item : item?.value;
+                if (!value) continue;
+                const decoded = decodeRoute(value);
+                const model = typeof item === 'string' ? decoded.model || value : (item?.model || decoded.model || value);
+                const endpointId = typeof item === 'string' ? decoded.endpointId : (item?.endpointId || decoded.endpointId);
+                const endpointName = typeof item === 'string' ? '' : item?.endpointName;
+                const key = `${endpointId || ''}::${model}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                flatOptions.push({
+                    value,
+                    label: cleanLabel({ value, label: typeof item === 'string' ? value : item?.label, model, endpointName }),
+                    model,
+                    endpointId,
+                    endpointName,
+                });
             }
+
+            const resolvedCurrent = flatOptions.find(option => option.value === current)?.value
+                || flatOptions.find(option => option.model === current)?.value
+                || current;
+            const routed = flatOptions.filter(option => option.endpointId || option.endpointName);
+            if (routed.length > 0) {
+                const groups = new Map<string, { label: string; options: typeof flatOptions }>();
+                for (const option of flatOptions) {
+                    const key = option.endpointId || option.endpointName || '';
+                    if (!groups.has(key)) {
+                        groups.set(key, { label: option.endpointName || option.endpointId || t('model.label'), options: [] });
+                    }
+                    groups.get(key)!.options.push(option);
+                }
+                for (const group of groups.values()) {
+                    const optgroup = document.createElement('optgroup');
+                    optgroup.label = group.label;
+                    for (const option of group.options) {
+                        const opt = document.createElement('option');
+                        opt.value = option.value;
+                        opt.textContent = option.model || option.label || option.value;
+                        if (option.value === resolvedCurrent) opt.selected = true;
+                        optgroup.appendChild(opt);
+                    }
+                    modelSelect.appendChild(optgroup);
+                }
+            } else {
+                for (const option of flatOptions) {
+                    const opt = document.createElement('option');
+                    opt.value = option.value;
+                    opt.textContent = option.label || option.value;
+                    if (option.value === resolvedCurrent) opt.selected = true;
+                    modelSelect.appendChild(opt);
+                }
+            }
+            const currentRoute = decodeRoute(resolvedCurrent || '');
+            const currentKey = `${currentRoute.endpointId || ''}::${currentRoute.model || resolvedCurrent || ''}`;
+            if (resolvedCurrent && !seen.has(currentKey)) {
+                const opt = document.createElement('option');
+                opt.value = resolvedCurrent;
+                opt.textContent = `${currentRoute.model || resolvedCurrent} (current)`;
+                opt.selected = true;
+                modelSelect.appendChild(opt);
+                flatOptions.push({
+                    value: resolvedCurrent,
+                    label: `${currentRoute.model || resolvedCurrent} (current)`,
+                    model: currentRoute.model || resolvedCurrent,
+                    endpointId: currentRoute.endpointId,
+                    endpointName: '',
+                });
+            }
+            store.set('models', flatOptions);
+            store.set('currentModel', resolvedCurrent || modelSelect.value || '');
+            this.renderModelPicker(flatOptions, resolvedCurrent || modelSelect.value || '');
         });
 
         bus.on('settingsData', (settings: Record<string, any>) => {
@@ -202,10 +330,16 @@ export const InputArea = {
         bus.on('busy', () => this.setBusy(true));
         bus.on('idle', () => {
             this.setBusy(false);
+            if (store.get('skipNextQueueAutoSend')) {
+                store.set('skipNextQueueAutoSend', false);
+                return;
+            }
             const queued = store.get('queuedMsgs');
             if (queued.length > 0) {
                 const next = queued[0];
-                store.set('queuedMsgs', queued.slice(1));
+                const remaining = queued.slice(1);
+                store.set('queuedMsgs', remaining);
+                bus.emit('queueProcessed', remaining.length);
                 vscode.send(next.text, next.images);
             }
         });
@@ -231,6 +365,69 @@ export const InputArea = {
         if (value === 'auto' || value === 'medium') return 'balanced';
         if (value === 'high') return 'deep';
         return enableThinking ? 'deep' : 'balanced';
+    },
+
+    escapeHtml(value: string): string {
+        return String(value || '').replace(/[&<>"']/g, (ch) => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;',
+        }[ch] || ch));
+    },
+
+    modelBadges(model: string): string[] {
+        const text = String(model || '').toLowerCase();
+        const badges: string[] = [];
+        if (/tts|voice|speech|audio/.test(text)) badges.push('TTS');
+        if (/asr|transcribe|whisper/.test(text)) badges.push('ASR');
+        if (/vision|vl|omni|image/.test(text)) badges.push('Vision');
+        if (/pro|reasoner|deep|r1/.test(text)) badges.push('Reason');
+        if (/flash|lite|mini/.test(text)) badges.push('Fast');
+        return badges.slice(0, 2);
+    },
+
+    renderModelPicker(options: Array<{ value: string; label: string; model?: string; endpointId?: string; endpointName?: string }>, current: string): void {
+        const popup = document.getElementById('model-picker-popup') as HTMLElement | null;
+        const label = document.getElementById('model-picker-label') as HTMLElement | null;
+        if (!popup || !label) return;
+        const currentOption = options.find(option => option.value === current) || options[0];
+        label.textContent = currentOption?.model || currentOption?.label || current || 'Model';
+
+        const groups = new Map<string, { label: string; options: typeof options }>();
+        for (const option of options) {
+            const key = option.endpointId || option.endpointName || 'default';
+            if (!groups.has(key)) {
+                groups.set(key, {
+                    label: option.endpointName || option.endpointId || t('model.label'),
+                    options: [],
+                });
+            }
+            groups.get(key)!.options.push(option);
+        }
+
+        const html: string[] = [];
+        for (const group of groups.values()) {
+            html.push(`<div class="model-picker-group"><div class="model-picker-group-title">${this.escapeHtml(group.label)}</div>`);
+            for (const option of group.options) {
+                const model = option.model || option.label || option.value;
+                const active = option.value === current ? ' active' : '';
+                const badges = this.modelBadges(model)
+                    .map(badge => `<span class="model-picker-badge">${this.escapeHtml(badge)}</span>`)
+                    .join('');
+                html.push(
+                    `<button class="model-picker-item${active}" type="button" data-model-value="${this.escapeHtml(option.value)}" data-model-label="${this.escapeHtml(model)}">` +
+                    `<span class="model-picker-dot"></span>` +
+                    `<span class="model-picker-main"><span class="model-picker-name">${this.escapeHtml(model)}</span>` +
+                    `<span class="model-picker-meta">${this.escapeHtml(option.endpointName || option.endpointId || '')}</span></span>` +
+                    `<span class="model-picker-badges">${badges}</span>` +
+                    `</button>`,
+                );
+            }
+            html.push('</div>');
+        }
+        popup.innerHTML = html.join('');
     },
 
     updateReasoningButton(): void {
@@ -287,6 +484,7 @@ export const InputArea = {
             const queued = store.get('queuedMsgs');
             store.set('queuedMsgs', [...queued, { text, images: imgs.length > 0 ? imgs : null }]);
             bus.emit('messageQueued', text, queued.length + 1);
+            this.updateSendButton();
             return;
         }
 
@@ -321,11 +519,16 @@ export const InputArea = {
         const input = document.getElementById('input') as HTMLTextAreaElement;
         const busy = store.get('isBusy');
         const hasText = input && input.value.trim().length > 0;
+        const hasQueued = store.get('queuedMsgs').length > 0;
 
         if (busy && !hasText) {
             sendBtn.textContent = '';
             sendBtn.className = 'stop-btn';
             sendBtn.title = t('stop');
+        } else if (busy && !hasText && hasQueued) {
+            sendBtn.textContent = '▶';
+            sendBtn.className = 'run-queued-btn';
+            sendBtn.title = t('queue.run.next.title');
         } else {
             sendBtn.textContent = '▶';
             sendBtn.className = '';
