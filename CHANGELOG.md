@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.6.6 (2026-06-09)
+
+### Improvements
+- Added more provider presets to Settings and Add Model, covering Qwen/DashScope, Zhipu GLM, Moonshot/Kimi, Volcengine Ark, SiliconFlow, Baidu Qianfan, Tencent Hunyuan, OpenRouter, Groq, Google Gemini, Mistral AI, and xAI Grok.
+- Extended provider detection for saved profiles so common OpenAI-compatible domestic and international endpoints keep their provider labels instead of falling back to Custom.
+- Updated README version notes for the expanded provider preset list.
+
 ## 1.6.5 (2026-06-09)
 
 ### Improvements

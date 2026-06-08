@@ -16,7 +16,7 @@ const settingsTranslations: Record<SettingsLang, Record<string, string>> = {
         'open.config': 'Open Config File',
         'save.apply': 'Save and Apply',
         'provider': 'Provider Preset',
-        'provider.hint': 'OpenAI-compatible endpoint. Deepseek works with https://api.deepseek.com/v1 plus a Deepseek API key.',
+        'provider.hint': 'OpenAI-compatible endpoint presets are provided for common domestic and international model services. You can still choose Custom compatible for any other provider.',
         'api.connection': 'API Connection',
         'active.profile': 'Active Profile ID',
         'provider.profiles': 'Provider Profiles JSON',
@@ -27,6 +27,18 @@ const settingsTranslations: Record<SettingsLang, Record<string, string>> = {
         'provider.mimo': 'MiMo',
         'provider.deepseek': 'DeepSeek',
         'provider.openai': 'OpenAI',
+        'provider.qwen': 'Qwen / DashScope',
+        'provider.zhipu': 'Zhipu GLM',
+        'provider.moonshot': 'Moonshot / Kimi',
+        'provider.volcengine': 'Volcengine Ark',
+        'provider.siliconflow': 'SiliconFlow',
+        'provider.qianfan': 'Baidu Qianfan',
+        'provider.hunyuan': 'Tencent Hunyuan',
+        'provider.openrouter': 'OpenRouter',
+        'provider.groq': 'Groq',
+        'provider.gemini': 'Google Gemini',
+        'provider.mistral': 'Mistral AI',
+        'provider.xai': 'xAI Grok',
         'provider.custom': 'Custom compatible',
         'provider.add.with': 'Provider',
         'profile.add': 'Add',
@@ -110,7 +122,7 @@ const settingsTranslations: Record<SettingsLang, Record<string, string>> = {
         'open.config': '打开配置文件',
         'save.apply': '保存并应用',
         'provider': '提供商预设',
-        'provider.hint': 'OpenAI 兼容接口。Deepseek 可使用 https://api.deepseek.com/v1 并填写 Deepseek API Key。',
+        'provider.hint': '为常见国内外模型服务提供 OpenAI 兼容接口预设；未覆盖的服务仍可选择自定义兼容。',
         'active.profile': '当前配置 ID',
         'provider.profiles': '模型配置 Profiles JSON',
         'provider.profiles.hint': '可选的 CC-switch 风格配置。每个 profile 支持 id、name、base_url、model、api_key 和 models。',
@@ -187,6 +199,18 @@ function t(key: string): string {
             'provider.mimo': 'MiMo',
             'provider.deepseek': 'DeepSeek',
             'provider.openai': 'OpenAI',
+            'provider.qwen': '通义千问 / DashScope',
+            'provider.zhipu': '智谱 GLM',
+            'provider.moonshot': 'Moonshot / Kimi',
+            'provider.volcengine': '火山方舟',
+            'provider.siliconflow': '硅基流动',
+            'provider.qianfan': '百度千帆',
+            'provider.hunyuan': '腾讯混元',
+            'provider.openrouter': 'OpenRouter',
+            'provider.groq': 'Groq',
+            'provider.gemini': 'Google Gemini',
+            'provider.mistral': 'Mistral AI',
+            'provider.xai': 'xAI Grok',
             'provider.custom': '自定义兼容',
             'provider.add.with': '新增服务商',
         };
@@ -234,6 +258,18 @@ function detectProviderFromBaseUrl(baseUrl: string): string {
     if (normalized.includes('xiaomimimo') || normalized.includes('mimo')) return 'mimo';
     if (normalized.includes('deepseek')) return 'deepseek';
     if (normalized.includes('openai.com')) return 'openai';
+    if (normalized.includes('dashscope.aliyuncs.com')) return 'qwen';
+    if (normalized.includes('open.bigmodel.cn') || normalized.includes('api.z.ai')) return 'zhipu';
+    if (normalized.includes('moonshot.cn') || normalized.includes('moonshot.ai')) return 'moonshot';
+    if (normalized.includes('volces.com')) return 'volcengine';
+    if (normalized.includes('siliconflow')) return 'siliconflow';
+    if (normalized.includes('qianfan.baidubce.com')) return 'qianfan';
+    if (normalized.includes('hunyuan.cloud.tencent.com')) return 'hunyuan';
+    if (normalized.includes('openrouter.ai')) return 'openrouter';
+    if (normalized.includes('groq.com')) return 'groq';
+    if (normalized.includes('generativelanguage.googleapis.com')) return 'gemini';
+    if (normalized.includes('mistral.ai')) return 'mistral';
+    if (normalized.includes('api.x.ai')) return 'xai';
     return 'custom';
 }
 
@@ -379,6 +415,30 @@ function applySettings(input: unknown): boolean {
     if (s.memory_max_items !== undefined) ok = saveSetting('memory.max_items', s.memory_max_items) && ok;
     if (s.memory_max_injected !== undefined) ok = saveSetting('memory.max_injected', s.memory_max_injected) && ok;
     return ok;
+}
+
+function providerPresetOptionsHtml(): string {
+    const entries = [
+        'mimo',
+        'deepseek',
+        'openai',
+        'qwen',
+        'zhipu',
+        'moonshot',
+        'volcengine',
+        'siliconflow',
+        'qianfan',
+        'hunyuan',
+        'openrouter',
+        'groq',
+        'gemini',
+        'mistral',
+        'xai',
+        'custom',
+    ];
+    return entries
+        .map((value) => `<option value="${value}">${t(`provider.${value}`)}</option>`)
+        .join('');
 }
 
 export class SettingsProvider {
@@ -538,10 +598,7 @@ textarea{min-height:96px;resize:vertical}
         <div class="hint">${t('model.manager.hint')}</div>
         <div class="model-add-controls">
           <select id="profile_add_provider" aria-label="${t('provider.add.with')}">
-            <option value="mimo">${t('provider.mimo')}</option>
-            <option value="deepseek">${t('provider.deepseek')}</option>
-            <option value="openai">${t('provider.openai')}</option>
-            <option value="custom">${t('provider.custom')}</option>
+            ${providerPresetOptionsHtml()}
           </select>
           <button class="secondary" id="profile_add" type="button">${t('model.add.card')}</button>
           <button class="secondary" id="toggle_raw_profiles" type="button">${t('profile.json')}</button>
@@ -658,8 +715,21 @@ const providerDefaults = {
   mimo:{provider:'mimo',id:'mimo',name:'MiMo',base_url:'https://token-plan-cn.xiaomimimo.com/v1',model:'mimo-v2.5-pro',models:['mimo-v2.5-pro','mimo-v2.5','mimo-v2-pro','mimo-v2-mini']},
   deepseek:{provider:'deepseek',id:'deepseek',name:'DeepSeek',base_url:'https://api.deepseek.com/v1',model:'deepseek-chat',models:['deepseek-chat','deepseek-reasoner']},
   openai:{provider:'openai',id:'openai',name:'OpenAI',base_url:'https://api.openai.com/v1',model:'gpt-4o',models:['gpt-4o','gpt-4o-mini']},
+  qwen:{provider:'qwen',id:'qwen',name:'Qwen / DashScope',base_url:'https://dashscope.aliyuncs.com/compatible-mode/v1',model:'qwen-plus',models:['qwen-plus','qwen-max','qwen-turbo','qwen-long']},
+  zhipu:{provider:'zhipu',id:'zhipu',name:'Zhipu GLM',base_url:'https://open.bigmodel.cn/api/paas/v4',model:'glm-4-plus',models:['glm-4-plus','glm-4-air','glm-4-flash']},
+  moonshot:{provider:'moonshot',id:'moonshot',name:'Moonshot / Kimi',base_url:'https://api.moonshot.cn/v1',model:'moonshot-v1-8k',models:['moonshot-v1-8k','moonshot-v1-32k','moonshot-v1-128k']},
+  volcengine:{provider:'volcengine',id:'volcengine',name:'Volcengine Ark',base_url:'https://ark.cn-beijing.volces.com/api/v3',model:'doubao-1-5-pro-32k-250115',models:['doubao-1-5-pro-32k-250115','doubao-1-5-lite-32k-250115']},
+  siliconflow:{provider:'siliconflow',id:'siliconflow',name:'SiliconFlow',base_url:'https://api.siliconflow.cn/v1',model:'Qwen/Qwen2.5-72B-Instruct',models:['Qwen/Qwen2.5-72B-Instruct','deepseek-ai/DeepSeek-V3','deepseek-ai/DeepSeek-R1']},
+  qianfan:{provider:'qianfan',id:'qianfan',name:'Baidu Qianfan',base_url:'https://qianfan.baidubce.com/v2',model:'ernie-4.0-turbo-8k',models:['ernie-4.0-turbo-8k','ernie-3.5-8k','ernie-speed-8k']},
+  hunyuan:{provider:'hunyuan',id:'hunyuan',name:'Tencent Hunyuan',base_url:'https://api.hunyuan.cloud.tencent.com/v1',model:'hunyuan-turbos-latest',models:['hunyuan-turbos-latest','hunyuan-large','hunyuan-standard']},
+  openrouter:{provider:'openrouter',id:'openrouter',name:'OpenRouter',base_url:'https://openrouter.ai/api/v1',model:'openai/gpt-4o-mini',models:['openai/gpt-4o-mini','anthropic/claude-3.5-sonnet','google/gemini-2.0-flash-001','deepseek/deepseek-chat']},
+  groq:{provider:'groq',id:'groq',name:'Groq',base_url:'https://api.groq.com/openai/v1',model:'llama-3.3-70b-versatile',models:['llama-3.3-70b-versatile','llama-3.1-8b-instant','mixtral-8x7b-32768']},
+  gemini:{provider:'gemini',id:'gemini',name:'Google Gemini',base_url:'https://generativelanguage.googleapis.com/v1beta/openai',model:'gemini-2.0-flash',models:['gemini-2.0-flash','gemini-1.5-pro','gemini-1.5-flash']},
+  mistral:{provider:'mistral',id:'mistral',name:'Mistral AI',base_url:'https://api.mistral.ai/v1',model:'mistral-large-latest',models:['mistral-large-latest','mistral-small-latest','codestral-latest']},
+  xai:{provider:'xai',id:'xai',name:'xAI Grok',base_url:'https://api.x.ai/v1',model:'grok-3-mini',models:['grok-3-mini','grok-3','grok-2-vision-1212']},
   custom:{provider:'custom',id:'custom',name:'Custom Model',base_url:'https://api.example.com/v1',model:'custom-model',models:['custom-model']},
 };
+const providerEntries = ['mimo','deepseek','openai','qwen','zhipu','moonshot','volcengine','siliconflow','qianfan','hunyuan','openrouter','groq','gemini','mistral','xai','custom'];
 let profiles = [];
 let activeProfileId = '';
 function trimTrailingSlashes(value){
@@ -672,8 +742,7 @@ function providerLabel(provider){
   return translations[key] || translations['provider.custom'] || 'Custom compatible';
 }
 function providerOptions(selected){
-  const entries = ['mimo','deepseek','openai','custom'];
-  return entries.map(value => '<option value="'+escapeAttr(value)+'"'+(value === selected ? ' selected' : '')+'>'+escapeHtml(providerLabel(value))+'</option>').join('');
+  return providerEntries.map(value => '<option value="'+escapeAttr(value)+'"'+(value === selected ? ' selected' : '')+'>'+escapeHtml(providerLabel(value))+'</option>').join('');
 }
 function normalizeProvider(profile){
   const raw = String(profile?.provider || '').trim().toLowerCase();
@@ -721,6 +790,18 @@ function detectProvider(s){
   if (base.includes('deepseek')) return 'deepseek';
   if (base.includes('openai.com')) return 'openai';
   if (base.includes('xiaomimimo')) return 'mimo';
+  if (base.includes('dashscope.aliyuncs.com')) return 'qwen';
+  if (base.includes('open.bigmodel.cn') || base.includes('api.z.ai')) return 'zhipu';
+  if (base.includes('moonshot.cn') || base.includes('moonshot.ai')) return 'moonshot';
+  if (base.includes('volces.com')) return 'volcengine';
+  if (base.includes('siliconflow')) return 'siliconflow';
+  if (base.includes('qianfan.baidubce.com')) return 'qianfan';
+  if (base.includes('hunyuan.cloud.tencent.com')) return 'hunyuan';
+  if (base.includes('openrouter.ai')) return 'openrouter';
+  if (base.includes('groq.com')) return 'groq';
+  if (base.includes('generativelanguage.googleapis.com')) return 'gemini';
+  if (base.includes('mistral.ai')) return 'mistral';
+  if (base.includes('api.x.ai')) return 'xai';
   return 'custom';
 }
 function applyProviderToProfile(profile, provider){

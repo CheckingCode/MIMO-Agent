@@ -104,6 +104,18 @@ function detectProviderFromBaseUrl(baseUrl: string): string {
     if (normalized.includes('xiaomimimo') || normalized.includes('mimo')) return 'mimo';
     if (normalized.includes('deepseek')) return 'deepseek';
     if (normalized.includes('openai.com')) return 'openai';
+    if (normalized.includes('dashscope.aliyuncs.com')) return 'qwen';
+    if (normalized.includes('open.bigmodel.cn') || normalized.includes('api.z.ai')) return 'zhipu';
+    if (normalized.includes('moonshot.cn') || normalized.includes('moonshot.ai')) return 'moonshot';
+    if (normalized.includes('volces.com')) return 'volcengine';
+    if (normalized.includes('siliconflow')) return 'siliconflow';
+    if (normalized.includes('qianfan.baidubce.com')) return 'qianfan';
+    if (normalized.includes('hunyuan.cloud.tencent.com')) return 'hunyuan';
+    if (normalized.includes('openrouter.ai')) return 'openrouter';
+    if (normalized.includes('groq.com')) return 'groq';
+    if (normalized.includes('generativelanguage.googleapis.com')) return 'gemini';
+    if (normalized.includes('mistral.ai')) return 'mistral';
+    if (normalized.includes('api.x.ai')) return 'xai';
     return 'custom';
 }
 
