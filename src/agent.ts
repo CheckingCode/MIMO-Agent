@@ -200,6 +200,7 @@ export class MiMoAgent extends EventEmitter {
         const candidates = [
             currentModel,
             ...configuredModels.filter(model => this.isMimoModel(model) === currentIsMimo),
+            ...(currentIsMimo ? DEFAULT_MODELS.filter(model => this.isMimoModel(model)) : []),
         ];
         const seen = new Set<string>();
         for (const model of candidates) {

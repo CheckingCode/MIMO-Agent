@@ -144,6 +144,31 @@ describe('agent convergence guards', () => {
         expect(agent.findVisionModel('mimo-v2.5-pro')).toBe('mimo-v2.5');
     });
 
+    it('uses the built-in MiMo vision fallback when a profile only lists the Pro model', () => {
+        const agent = makeAgent();
+        agent.updateConfig({
+            ...agent.config,
+            model: 'mimo-v2.5-pro',
+            models: ['mimo-v2.5-pro'],
+            activeProviderProfile: 'mimo-cn',
+            activeRoute: { endpoint_id: 'mimo-cn', model: 'mimo-v2.5-pro' },
+            baseUrl: 'https://token-plan-cn.xiaomimimo.com/v1',
+            providerProfiles: [
+                {
+                    id: 'mimo-cn',
+                    name: 'MiMo CN',
+                    provider: 'mimo',
+                    base_url: 'https://token-plan-cn.xiaomimimo.com/v1',
+                    api_key: 'cn-key',
+                    model: 'mimo-v2.5-pro',
+                    models: ['mimo-v2.5-pro'],
+                },
+            ],
+        });
+
+        expect(agent.findVisionModel('mimo-v2.5-pro', 'mimo-cn')).toBe('mimo-v2.5');
+    });
+
     it('distinguishes the same model id on different endpoints', () => {
         const agent = makeAgent();
         agent.updateConfig({

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.7 (2026-06-09)
+
+### Fixes
+- Fixed MiMo image messages on `mimo-v2.5-pro` so they can auto-switch to the built-in `mimo-v2.5` vision fallback even when the active model profile only lists the Pro model.
+
 ## 1.6.6 (2026-06-09)
 
 ### Improvements
