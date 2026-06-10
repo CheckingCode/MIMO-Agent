@@ -263,9 +263,35 @@ export const Messages = {
         }).observe(messagesDiv, { childList: true });
         requestAnimationFrame(updateStickyPrompt);
 
-        // Code block copy (event delegation)
+        // Copy buttons (event delegation for both fresh and history-rendered messages)
         messagesDiv.addEventListener('click', (e) => {
-            const btn = (e.target as HTMLElement).closest('.copy-btn') as HTMLElement | null;
+            const target = e.target as HTMLElement;
+
+            const msgCopyBtn = target.closest('.msg-copy') as HTMLElement | null;
+            if (msgCopyBtn) {
+                e.stopPropagation();
+                const bubble = msgCopyBtn.closest('.msg');
+                if (!bubble) return;
+                const text = Array.from(bubble.querySelectorAll<HTMLElement>('.text-content'))
+                    .map(el => el.textContent || '')
+                    .filter(Boolean)
+                    .join('\n');
+                navigator.clipboard.writeText(text).then(() => {
+                    setCopyButtonState(msgCopyBtn, true);
+                    setTimeout(() => setCopyButtonState(msgCopyBtn, false), 1600);
+                }).catch(() => {
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.style.cssText = 'position:fixed;opacity:0';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    try { document.execCommand('copy'); } catch { /* ignore */ }
+                    document.body.removeChild(ta);
+                });
+                return;
+            }
+
+            const btn = target.closest('.copy-btn') as HTMLElement | null;
             if (!btn) return;
             const block = btn.closest('.code-block');
             if (!block) return;
@@ -1354,7 +1380,7 @@ export const Messages = {
         const userMessages = Array.from(messagesDiv.querySelectorAll<HTMLElement>('.msg-user'));
         const user = userMessages[userMessages.length - 1] || null;
         const snapshotNodes = [assistant, ...this.collectFollowingTaskChangeCards(assistant)];
-        const html = snapshotNodes.map(node => node.outerHTML).join('');
+        const html = snapshotNodes.map(node => node.outerHTML).join('\n');
         if (!html || html.length > HISTORY_SNAPSHOT_MAX_HTML) return null;
         const userHtml = user?.outerHTML || '';
         return {
@@ -1421,7 +1447,7 @@ export const Messages = {
         const metaHtml = [
             totalElapsed > 0 ? `<span class="execution-meta">${this.formatDuration(totalElapsed)}</span>` : '',
             messageTokens > 0 ? `<span class="execution-meta">${formatTokenCount(messageTokens)} tokens</span>` : '',
-        ].filter(Boolean).join('');
+        ].filter(Boolean).join('\n');
 
         const drawer = createElement('div', 'execution-drawer');
         const header = createElement('button', 'execution-drawer-header');
@@ -1627,7 +1653,7 @@ export const Messages = {
                 `<span class="task-change-path">${escapeHtml(file.path)}</span>` +
                 `<span class="task-change-row-stats">${binary}${staged}${external}${action}<span class="diff-stats-add">+${file.added} lines</span> <span class="diff-stats-del">-${file.removed} lines</span></span>` +
                 `</button>`;
-        }).join('');
+        }).join('\n');
 
         card.insertAdjacentHTML('beforeend', `
             <div class="task-changes-head">
@@ -1825,7 +1851,7 @@ export const Messages = {
                     meta.elapsedSec ? `<span class="execution-meta">${this.formatDuration(Number(meta.elapsedSec))}</span>` : '',
                     meta.tokens ? `<span class="execution-meta">${formatTokenCount(Number(meta.tokens))} tokens</span>` : '',
                     `<span class="execution-chevron">&rsaquo;</span>`,
-                ].filter(Boolean).join('');
+                ].filter(Boolean).join('\n');
                 drawer.appendChild(header);
                 const body = createElement('div', 'execution-drawer-body');
                 body.appendChild(this.renderHistoryProcessOverview(meta.details || []));
@@ -1840,6 +1866,7 @@ export const Messages = {
             const content = createElement('div', 'md-content');
             content.innerHTML = this.enhanceTaskChecklists(this.stripRawToolCalls(turn.assistantHtml || ''));
             msg.appendChild(content);
+            this.rebindHistoryCopyButtons(msg);
             messagesDiv.appendChild(msg);
     },
 
@@ -1875,6 +1902,7 @@ export const Messages = {
             el.setAttribute('data-status', 'success');
         });
         this.rebindHistorySnapshotInteractions(wrap, turn.meta?.details || []);
+        this.rebindHistoryCopyButtons(wrap);
         for (const node of nodes) {
             messagesDiv.appendChild(node);
         }
@@ -1908,6 +1936,46 @@ export const Messages = {
             card.classList.toggle('expanded');
         });
         messagesDiv.appendChild(card);
+    },
+
+    rebindHistoryCopyButtons(root: HTMLElement): void {
+        root.querySelectorAll<HTMLElement>('.msg-copy').forEach(btn => {
+            btn.replaceWith(btn.cloneNode(true));
+        });
+        root.querySelectorAll<HTMLElement>('.copy-btn').forEach(btn => {
+            btn.replaceWith(btn.cloneNode(true));
+        });
+
+        root.querySelectorAll<HTMLElement>('.msg-copy').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const bubble = btn.closest('.msg');
+                if (!bubble) return;
+                const text = Array.from(bubble.querySelectorAll<HTMLElement>('.text-content'))
+                    .map(el => el.textContent || '')
+                    .filter(Boolean)
+                    .join('\n');
+                navigator.clipboard.writeText(text).then(() => {
+                    setCopyButtonState(btn, true);
+                    setTimeout(() => setCopyButtonState(btn, false), 1600);
+                }).catch(() => {});
+            });
+        });
+
+        root.querySelectorAll<HTMLElement>('.copy-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const block = btn.closest('.code-block');
+                const code = block?.querySelector('code');
+                if (!code) return;
+                const text = code.textContent || '';
+                navigator.clipboard.writeText(text).then(() => {
+                    btn.textContent = 'Copied!';
+                    btn.classList.add('copied');
+                    setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
+                }).catch(() => {});
+            });
+        });
     },
 
     sanitizeHistorySnapshot(root: HTMLElement): void {
@@ -2113,7 +2181,7 @@ export const Messages = {
             thoughts.length ? `<span class="history-process-pill thought">${thoughts.length} ${escapeHtml(t('thought'))}</span>` : '',
             tools.length ? `<span class="history-process-pill tool">${tools.length} Tools</span>` : '',
             errors.length ? `<span class="history-process-pill error">${errors.length} Error</span>` : '',
-        ].filter(Boolean).join('');
+        ].filter(Boolean).join('\n');
         if (stats.innerHTML) wrap.appendChild(stats);
 
         if (thoughtPreview) {

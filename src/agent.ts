@@ -1,4 +1,4 @@
-import { EventEmitter } from 'events';
+﻿import { EventEmitter } from 'events';
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -438,9 +438,25 @@ export class MiMoAgent extends EventEmitter {
     private cleanArtifactPath(candidate: string): string {
         return String(candidate || '')
             .trim()
-            .replace(/^[`"'“”‘’]+|[`"'“”‘’]+$/g, '')
-            .replace(/[.,????????;:?\]}]+$/g, '')
+            .replace(/^[`"'\u201c\u201d\u2018\u2019]+|[`"'\u201c\u201d\u2018\u2019]+$/g, '')
+            .replace(/[.,;:?\]}]+$/g, '')
             .trim();
+    }
+
+    private looksLikeRealArtifactPath(filePath: string): boolean {
+        const normalized = String(filePath || '').trim().replace(/\\/g, '/');
+        if (!normalized) return false;
+        if (/[^\S\r\n]{2,}/.test(normalized)) return false;
+        if (/[{};]/.test(normalized)) return false;
+        if (/=>|==|!=|<=|>=/.test(normalized)) return false;
+        if (/\b(?:const|let|var|function|return|if|for|while|class|ctx)\b/i.test(normalized)) return false;
+
+        const segments = normalized.split('/').filter(Boolean);
+        if (segments.length === 0) return false;
+        return segments.every((segment, index) => {
+            if (index === 0 && /^[A-Za-z]:$/.test(segment)) return true;
+            return /^[\p{L}\p{N}._\-+()\[\] :]+$/u.test(segment);
+        });
     }
 
     private isDeliverablePath(filePath: string): boolean {
@@ -451,29 +467,28 @@ export class MiMoAgent extends EventEmitter {
         const sourceCodeExtensions = new Set([
             'html', 'htm', 'css', 'scss', 'sass', 'less', 'js', 'jsx', 'ts', 'tsx', 'json', 'md', 'txt', 'xml', 'yml', 'yaml', 'py', 'java', 'c', 'cc', 'cpp', 'h', 'hpp', 'rs', 'go', 'php', 'rb', 'sh', 'ps1', 'bat'
         ]);
-        return !sourceCodeExtensions.has(ext);
+        return !sourceCodeExtensions.has(ext) && this.looksLikeRealArtifactPath(normalized);
     }
 
     private extractArtifactPathsFromText(text: string): string[] {
         const raw = String(text || '');
         if (!raw) return [];
         const ext = MiMoAgent.ARTIFACT_EXTENSIONS.join('|');
-        const patterns = [
-            new RegExp(`["']([^"'\\r\\n]+\\.(?:${ext}))["']`, 'gi'),
-            new RegExp(`([A-Za-z]:[\\\\/][^\\r\\n"'<>|]+?\\.(?:${ext}))`, 'gi'),
-            new RegExp(`((?:/|\\.{1,2}[\\\\/])[^\\s"'<>|]+\\.(?:${ext}))`, 'gi'),
-            new RegExp(`\\b((?:output|outputs|dist|build|release|releases|tmp|temp)[\\\\/][^\\s"'<>|]+\\.(?:${ext}))`, 'gi'),
+        const evidencePatterns = [
+            new RegExp(String.raw`(?:artifacts?|generated file|updated file|saved(?: to)?|written to|exported(?: to)?|output(?: file)?|outputs?)\s*[:?-]?\s*['"]?([^'"\r\n]+\.(?:${ext}))`, 'giu'),
+            new RegExp(String.raw`(?:from)\s+['"]([^'"\r\n]+\.(?:${ext}))['"](?::)?`, 'giu'),
+            new RegExp(String.raw`(?:^|\n)\s*[-*]\s+([^\r\n]+\.(?:${ext}))\s*$`, 'gimu'),
         ];
+
         const found: string[] = [];
-        for (const pattern of patterns) {
+        for (const pattern of evidencePatterns) {
             for (const match of raw.matchAll(pattern)) {
-                const value = this.cleanArtifactPath(match[1] || match[0] || '');
+                const value = this.cleanArtifactPath(match[1] || '');
                 if (value && this.isDeliverablePath(value)) found.push(value);
             }
         }
         return found;
     }
-
     private collectRecentArtifactPaths(conv: ConversationState, lookback = 80): string[] {
         const seen = new Set<string>();
         const artifacts: string[] = [];
@@ -521,7 +536,7 @@ export class MiMoAgent extends EventEmitter {
         if (artifacts.length === 0) return finalText;
 
         const useChinese = conv.uiLang !== 'en' || /[\u4e00-\u9fff]/.test(cleanFinal);
-        const heading = 'Artifacts:';
+        const heading = useChinese ? '交付文件：' : 'Artifacts:';
         const lines = artifacts.map(filePath => `- \`${filePath}\``);
         return `${cleanFinal.trim()}\n\n${heading}\n${lines.join('\n')}`;
     }
@@ -1791,7 +1806,14 @@ Updated summary:`;
     }
 
     private isReadOnlyAuditRequest(text: string): boolean {
-        return /只读|不要修改|不要执行会改变|不要改变|审计|审核|评估|分析|检查|review|audit|read-?only|do not modify|no changes/i.test(text || '');
+        const raw = String(text || '');
+        if (!raw.trim()) return false;
+        const lower = raw.toLowerCase();
+        const english = /(read-?only|review|audit|do not modify|no changes|analy[sz]e|analysis|inspect|explain)/i.test(lower);
+        const chinese = ['??', '????', '?????', '???', '???', '???', '??', '??', '??', '??', '??'].some(token => raw.includes(token));
+        const fileMention = /(.(html|htm|css|js|ts|tsx|jsx|json|md|py|java|cpp|c|h|hpp|rs|go|php|rb|sh))/i.test(lower);
+        const analysisVerb = /(analy[sz]e|analysis|inspect|review|explain)/i.test(lower) || ['?', '??', '??', '??', '??'].some(token => raw.includes(token));
+        return english || chinese || (fileMention && analysisVerb);
     }
 
     private isLoopGuardReadOnlyTool(toolName: string): boolean {
@@ -2154,6 +2176,16 @@ Change strategy now:
         });
     }
 
+    private isReadOnlyAnalysisFinal(finalText: string): boolean {
+        const text = String(finalText || '');
+        if (!text.trim()) return false;
+        const lower = text.toLowerCase();
+        const saysNoChanges = /(read-?only analysis|no changes were made|did not modify|not modify|analysis only|pure analysis)/i.test(text);
+        const isAnalysisStyle = /(analysis|review|audit|inspection|explain)/i.test(text);
+        const avoidsAction = !this.isUnexecutedActionStatement(text);
+        const avoidsChangeClaims = !/(changed|modified|updated|implemented|fixed|created|wrote|edited)/i.test(lower);
+        return saysNoChanges && isAnalysisStyle && avoidsAction && avoidsChangeClaims;
+    }
     private shouldContinueInfiniteAfterTextFinal(
         conv: ConversationState,
         taskComplexity: 'simple' | 'moderate' | 'complex',
@@ -5364,3 +5396,5 @@ Output format:
         );
     }
 }
+
+

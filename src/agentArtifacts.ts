@@ -94,8 +94,24 @@ export class AgentArtifactManager {
         return String(candidate || '')
             .trim()
             .replace(/^[`"'\u201c\u201d\u2018\u2019]+|[`"'\u201c\u201d\u2018\u2019]+$/g, '')
-            .replace(/[.,，。！？、】【；;:：\]}]+$/g, '')
+            .replace(/[.,;:?\]}]+$/g, '')
             .trim();
+    }
+
+    private looksLikeRealArtifactPath(filePath: string): boolean {
+        const normalized = String(filePath || '').trim().replace(/\\/g, '/');
+        if (!normalized) return false;
+        if (/[^\S\r\n]{2,}/.test(normalized)) return false;
+        if (/[{};]/.test(normalized)) return false;
+        if (/=>|==|!=|<=|>=/.test(normalized)) return false;
+        if (/\b(?:const|let|var|function|return|if|for|while|class|ctx)\b/i.test(normalized)) return false;
+
+        const segments = normalized.split('/').filter(Boolean);
+        if (segments.length === 0) return false;
+        return segments.every((segment, index) => {
+            if (index === 0 && /^[A-Za-z]:$/.test(segment)) return true;
+            return /^[\p{L}\p{N}._\-+()\[\] :]+$/u.test(segment);
+        });
     }
 
     private isDeliverablePath(filePath: string): boolean {
@@ -103,29 +119,28 @@ export class AgentArtifactManager {
         if (!normalized) return false;
         const ext = path.extname(normalized).replace(/^\./, '').toLowerCase();
         if (!ext) return false;
-        return !SOURCE_CODE_EXTENSIONS.has(ext);
+        return !SOURCE_CODE_EXTENSIONS.has(ext) && this.looksLikeRealArtifactPath(normalized);
     }
 
     private extractArtifactPathsFromText(text: string): string[] {
         const raw = String(text || '');
         if (!raw) return [];
         const ext = ARTIFACT_EXTENSIONS.join('|');
-        const patterns = [
-            new RegExp(`['\"]([^'\"\\r\\n]+\\.(?:${ext}))['\"]`, 'gi'),
-            new RegExp(`([A-Za-z]:[\\\\/][^\\r\\n'\"<>|]+?\\.(?:${ext}))`, 'gi'),
-            new RegExp(`((?:/|\\.{1,2}[\\\\/])[^\\s'\"<>|]+\\.(?:${ext}))`, 'gi'),
-            new RegExp(`\\b((?:output|outputs|dist|build|release|releases|tmp|temp)[\\\\/][^\\s'\"<>|]+\\.(?:${ext}))`, 'gi'),
+        const evidencePatterns = [
+            new RegExp(String.raw`(?:artifacts?|generated file|updated file|saved(?: to)?|written to|exported(?: to)?|output(?: file)?|outputs?)\s*[:?-]?\s*['"]?([^'"\r\n]+\.(?:${ext}))`, 'giu'),
+            new RegExp(String.raw`(?:from)\s+['"]([^'"\r\n]+\.(?:${ext}))['"](?::)?`, 'giu'),
+            new RegExp(String.raw`(?:^|\n)\s*[-*]\s+([^\r\n]+\.(?:${ext}))\s*$`, 'gimu'),
         ];
+
         const found: string[] = [];
-        for (const pattern of patterns) {
+        for (const pattern of evidencePatterns) {
             for (const match of raw.matchAll(pattern)) {
-                const value = this.cleanArtifactPath(match[1] || match[0] || '');
+                const value = this.cleanArtifactPath(match[1] || '');
                 if (value && this.isDeliverablePath(value)) found.push(value);
             }
         }
         return found;
     }
-
     private collectRecentArtifactPaths(conv: ConversationState, lookback = 80): string[] {
         const seen = new Set<string>();
         const artifacts: string[] = [];
@@ -184,3 +199,5 @@ export class AgentArtifactManager {
         return '';
     }
 }
+
+

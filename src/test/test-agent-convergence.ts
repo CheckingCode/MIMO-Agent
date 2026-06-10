@@ -432,6 +432,24 @@ describe('agent convergence guards', () => {
         expect(finalText.includes(currentArtifact)).toBe(true);
         expect(finalText.includes(previousAudio)).toBe(false);
     });
+
+    it('ignores code-like shell fragments that merely end with artifact extensions', () => {
+        const agent = makeAgent();
+        const realArtifact = 'ramanujan_pi_convergence.csv';
+        const conv = makeConv([
+            { role: 'user', content: 'Analyze the html file.' } as any,
+            {
+                role: 'tool',
+                _toolName: 'execute_command',
+                content: `Artifacts:\n- ${realArtifact}\n- /4)*i;ctx.beginPath();ctx.mov\n- /15)pv,y-p.t+ph-(conv[i].c/mx)ph;i===0?ctx.mov`,
+            } as any,
+        ]);
+
+        const finalText = agent.appendMissingArtifactSummary(conv, 'Task completed.');
+        expect(finalText.includes(realArtifact)).toBe(true);
+        expect(finalText.includes('ctx.beginPath')).toBe(false);
+        expect(finalText.includes('ctx.mov')).toBe(false);
+    });
 });
 
 summary();

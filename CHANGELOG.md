@@ -1,8 +1,16 @@
 # Changelog
 
-## 1.6.8 (2026-06-09)
+## 1.6.9 (2026-06-10)
 
 ### Improvements
+- Added the new adversarial, chat-loop, progress-summary, and input-preprocessing agent modules to support richer long-running workflows and recovery handoffs.
+- Expanded internal progress and reasoning orchestration so multi-stage runs share clearer summaries and state handoff logic.
+
+### Fixes
+- Fixed artifact summary extraction so final responses no longer append code-like shell fragments such as canvas or command snippets as fake deliverable files.
+- Kept Chinese final summaries using the localized 交付文件： heading while preserving real generated file paths.
+
+## 1.6.8 (2026-06-09)`r`n`r`n### Improvements
 - Added visible command-purpose narration for shell commands and richer workflow task progress so long runs no longer appear as unexplained Bash-only activity.
 - Expanded interrupted-run handoff summaries with validation status plus changed and inspected file context.
 
@@ -264,3 +272,4 @@
 - 设置界面支持多语言（跟随 VS Code 语言设置）
 - 推理循环检测优化：循环时自动切换新模型继续任务，避免会话中断
 - 新增三级循环恢复机制（强引导 -> 新模型调用 -> 退出总结）
+

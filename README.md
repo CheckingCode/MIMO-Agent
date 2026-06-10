@@ -33,7 +33,7 @@
 
 MiMo Agent 是一个运行在 VS Code 内的本地 AI 编程助手。它可以阅读项目、搜索代码、编辑文件、运行命令、查看 Git diff、管理多轮任务，并通过 OpenAI 兼容 API 调用小米 MiMo、DeepSeek、OpenAI 或自定义模型端点。
 
-当前版本：`v1.6.8`。
+当前版本：`v1.6.9`。
 
 ## ✨ 当前核心能力
 
@@ -361,7 +361,7 @@ npm run compile
 
 详细版本记录见 [CHANGELOG.md](CHANGELOG.md)。
 
-`v1.6.8` 重点：
+`v1.6.9` 重点：
 
 - Shell 命令和 workflow 子任务会输出更明确的执行目的与阶段进度，减少只有 Bash 卡片但缺少说明的情况。
 - 项目/用户指令校验降低误报和重复警告，同时仍会拦截会破坏 agent 能力的指令。
@@ -381,7 +381,7 @@ npm run compile
 
 MiMo Agent is a local AI coding assistant for VS Code. It can inspect your workspace, search code, edit files, run commands, review Git diffs, manage long-running tasks, and call Xiaomi MiMo, DeepSeek, OpenAI, or custom OpenAI-compatible endpoints.
 
-Current version: `v1.6.8`.
+Current version: `v1.6.9`.
 
 ## ✨ Highlights
 
@@ -467,3 +467,4 @@ See [CHANGELOG.md](CHANGELOG.md) for release notes.
 ## 📄 License
 
 [MIT](LICENSE)
+

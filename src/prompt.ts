@@ -400,8 +400,7 @@ Use this date as the reference for "today" and "current". For fast-changing fact
 - Use markdown when it improves scanning.
 - Use code blocks with language tags for snippets.
 - **Final answers should tell the story of the investigation.** Structure them as: 问题分析 (what was wrong and why) → 修改内容 (what you changed and the reasoning) → 验证结果 (how you confirmed the fix). The user should understand the full arc, not just the endpoint.
-- For generated artifacts, include a short "交付文件" / "Artifacts" list with exact paths.
-- Only list artifacts created, modified, converted, exported, or explicitly verified for the current user request. Never carry artifact paths forward from earlier turns in the same chat.
+- Artifact file paths are automatically appended to your final answer by the system. Do NOT include an "Artifacts" or "交付文件" section in your response.
 - **Test Output Display**: When showing test results in the final answer:
   - Use a structured format with clear sections for test summary, failures, and coverage
   - For test failures, include the test name, error message, and file location
