@@ -7,24 +7,38 @@ import { bus } from '../../core/bus';
 import { createElement } from '../../utils/dom';
 import { createCopyButton } from './CodeBlock';
 
+export function isRenderableImageDataUrl(value: string): boolean {
+    return /^data:image\/(?:png|jpe?g|webp|gif);base64,[a-z0-9+/=\s]+$/i.test(String(value || '').trim());
+}
+
 export function createUserBubble(text: string, images?: ImageData[] | null, className = 'msg msg-user'): HTMLElement {
     const bubble = createElement('div', className);
+    const validImages = (images || []).filter(img => isRenderableImageDataUrl(img?.dataUrl));
+    const invalidImageCount = Math.max(0, (images?.length || 0) - validImages.length);
 
-    if (images && images.length > 0) {
+    if (validImages.length > 0) {
         const imgRow = createElement('div');
         imgRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-bottom:2px';
-        for (let i = 0; i < images.length; i++) {
+        for (let i = 0; i < validImages.length; i++) {
             const img = createElement('img', 'msg-img') as HTMLImageElement;
-            img.src = images[i].dataUrl;
-            img.title = `#${i + 1} ${images[i].name}`;
+            img.src = validImages[i].dataUrl;
+            img.title = `#${i + 1} ${validImages[i].name}`;
             img.style.cssText = 'height:40px;width:auto;border-radius:4px;cursor:pointer;vertical-align:middle';
             img.addEventListener('click', (e) => {
                 e.stopPropagation();
-                bus.emit('showOverlay', images[i].dataUrl);
+                bus.emit('showOverlay', validImages[i].dataUrl);
             });
             imgRow.appendChild(img);
         }
         bubble.appendChild(imgRow);
+    }
+
+    if (invalidImageCount > 0) {
+        const note = createElement('div', 'msg-image-note');
+        note.textContent = invalidImageCount === 1
+            ? '[1 image omitted in this view]'
+            : `[${invalidImageCount} images omitted in this view]`;
+        bubble.appendChild(note);
     }
 
     if (text) {

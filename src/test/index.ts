@@ -12,10 +12,13 @@ require('./test-mcp-multimodal-server');
 require('./test-markdown');
 require('./test-personas');
 require('./test-safety');
+require('./test-tools');
 require('./test-instructions');
 require('./test-dependency-install');
+require('./test-agent-errors');
 require('./test-agent-convergence');
 require('./test-router');
+require('./test-webview-chat-bubble');
 
 console.log('\n  All tests completed.');
 finalSummary();

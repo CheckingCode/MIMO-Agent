@@ -412,6 +412,10 @@ function init(): void {
                 bus.emit('conversationUsage', msg.usage);
                 break;
 
+            case 'contextUsage':
+                bus.emit('contextUsage', msg.usage);
+                break;
+
             // 閳光偓閳光偓 Edit Preview 閳光偓閳光偓
             case 'editPreview':
                 bus.emit('editPreview', msg.previewId, msg.path, msg.oldText, msg.newText, msg.matchCount);

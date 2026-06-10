@@ -51,6 +51,16 @@ describe('getContextStats', () => {
         expect(stats.percent).toBeGreaterThanOrEqual(0);
         expect(stats.percent).toBeLessThanOrEqual(100);
     });
+
+    it('should use 1M context for MiMo V2.5 Pro', () => {
+        const msgs: ChatMessage[] = [
+            { role: 'user', content: 'Hello' },
+            { role: 'assistant', content: 'Hi there!' },
+        ];
+        const stats = getContextStats(msgs, 'mimo-v2.5-pro');
+        expect(stats.model).toBe('mimo-v2.5-pro');
+        expect(stats.total).toBe(1000000);
+    });
 });
 
 summary();

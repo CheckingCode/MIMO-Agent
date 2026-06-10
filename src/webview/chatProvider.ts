@@ -9,6 +9,7 @@ import { HistoryManager } from '../history';
 import { readSettings, saveSetting, getSettingsPanel, loadConfig } from '../config';
 import { renderMarkdown } from '../markdown';
 import { ApiEndpointMode, ContentPart, ChatMessage, MiMoAPI, normalizeApiEndpointMode } from '../api';
+import { getContextStats } from '../context';
 
 /**
  * Auto-clean old plan files in ~/.mimo/plans/
@@ -78,6 +79,19 @@ function extractInputHistory(messages: ChatMessage[]): string[] {
         if (result.length >= 50) break;
     }
     return result;
+}
+
+function formatContextTokenCount(n: number): string {
+    if (!Number.isFinite(n) || n <= 0) return '0';
+    if (n >= 1_000_000) {
+        const v = n / 1_000_000;
+        return `${Number.isInteger(v) ? v.toFixed(0) : v.toFixed(1)}M`;
+    }
+    if (n >= 1_000) {
+        const v = n / 1_000;
+        return `${Number.isInteger(v) ? v.toFixed(0) : v.toFixed(1)}k`;
+    }
+    return String(Math.round(n));
 }
 
 function isPathInside(parent: string, child: string): boolean {
@@ -482,6 +496,7 @@ export class ChatViewProvider {
     private cssContent: string = '';
     private replaySeq = 0;
     private windowReasoningEffort: ReasoningEffort;
+    private activeTurnTokens = new Map<string, string>();
     private pendingHistorySaves = new Map<string, {
         title: string;
         messages: ChatMessage[];
@@ -866,6 +881,7 @@ export class ChatViewProvider {
                     post(this.modelListMessage(myConvId));
                     post({ type: 'modelCaps', caps: this.agent.getModelCapabilities(model) });
                     post({ type: 'settingsData', settings: this.getWindowSettingsPanel() });
+                    post(this.contextUsageMessage(myConvId));
 
                     // 4. Skills
                     post({
@@ -911,6 +927,7 @@ export class ChatViewProvider {
                         post(this.modelListMessage(msg.id));
                         post({ type: 'modelCaps', caps: this.agent.getModelCapabilities(this.agent.getModelSelectionValue(msg.id)) });
                         post({ type: 'restoreMode', mode: conv.mode, label: conv.mode });
+                        post(this.contextUsageMessage(msg.id));
                         // Restore busy state (only if THIS conversation is running)
                         post(this.agent.isConvRunning(msg.id) ? { type: 'busy' } : { type: 'idle' });
                     }
@@ -937,6 +954,7 @@ export class ChatViewProvider {
                             post(this.modelListMessage(nextId));
                             post({ type: 'modelCaps', caps: this.agent.getModelCapabilities(this.agent.getModelSelectionValue(nextId)) });
                             post({ type: 'restoreMode', mode: nextConv.mode, label: nextConv.mode });
+                            post(this.contextUsageMessage(nextId));
                         }
                     }
                     break;
@@ -1005,6 +1023,7 @@ export class ChatViewProvider {
                     const stClear = this.panels.get(panelId);
                     this.agent.reset(stClear?.activeConvId);
                     post({ type: 'clearMessages' });
+                    post(this.contextUsageMessage(stClear?.activeConvId));
                     break;
                 }
                 case 'skill': {
@@ -1018,6 +1037,7 @@ export class ChatViewProvider {
                     this.agent.setModel(msg.model, modelConvId);
                     if (modelConvId) post(this.modelListMessage(modelConvId));
                     post({ type: 'modelCaps', caps: this.agent.getModelCapabilities(msg.model) });
+                    post(this.contextUsageMessage(modelConvId));
                     break;
                 }
                 case 'setMode': {
@@ -1134,6 +1154,7 @@ export class ChatViewProvider {
                             this.replayConversation(histConv.messages, foundPanel.panel);
                             foundPanel.panel.webview.postMessage(this.modelListMessage(id));
                             foundPanel.panel.webview.postMessage({ type: 'modelCaps', caps: this.agent.getModelCapabilities(this.agent.getModelSelectionValue(id)) });
+                            foundPanel.panel.webview.postMessage(this.contextUsageMessage(id));
                             foundPanel.panel.webview.postMessage({ type: 'restoreMode', mode: histConv.mode || 'auto', label: histConv.mode || 'auto' });
                             foundPanel.panel.webview.postMessage({ type: 'restoreInputHistory', items: histConv.inputHistory || extractInputHistory(histConv.messages) });
                         } else {
@@ -1155,6 +1176,7 @@ export class ChatViewProvider {
                             this.replayConversation(histConv.messages, newState.panel);
                             newState.panel.webview.postMessage(this.modelListMessage(id));
                             newState.panel.webview.postMessage({ type: 'modelCaps', caps: this.agent.getModelCapabilities(this.agent.getModelSelectionValue(id)) });
+                            newState.panel.webview.postMessage(this.contextUsageMessage(id));
                             newState.panel.webview.postMessage({ type: 'restoreMode', mode: histConv.mode || 'auto', label: histConv.mode || 'auto' });
                             newState.panel.webview.postMessage({ type: 'restoreInputHistory', items: histConv.inputHistory || extractInputHistory(histConv.messages) });
                         }
@@ -1285,14 +1307,6 @@ export class ChatViewProvider {
                                 filePath = path.join(workspace, filePath);
                             }
                         }
-                        const workspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-                        const mimoPlansDir = path.join(os.homedir(), '.mimo', 'plans');
-                        const allowOutsideWorkspace = isPathInside(mimoPlansDir, filePath);
-                        if (workspace && !allowOutsideWorkspace && !isPathInside(workspace, filePath)) {
-                            vscode.window.showWarningMessage('Cannot open file outside the current workspace.');
-                            post({ type: 'fileOpenResult', path: msg.path, ok: false, error: 'outside_workspace' });
-                            break;
-                        }
                         const uri = vscode.Uri.file(filePath);
                         const position = new vscode.Position(Math.max(0, line - 1), 0);
                         const range = new vscode.Range(position, position);
@@ -1416,6 +1430,36 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         }));
     }
 
+    private contextUsageMessage(
+        convId?: string,
+        pending?: { text?: string; images?: Array<{ dataUrl: string; name: string; size: number }> | null },
+    ): any {
+        if (!convId) return { type: 'contextUsage', usage: null };
+        const conv = this.agent.getConversation(convId);
+        if (!conv) return { type: 'contextUsage', usage: null };
+        const messages = this.agent.getMessages(convId);
+        if (pending && (pending.text || pending.images?.length)) {
+            const parts: ContentPart[] = [];
+            if (pending.text) parts.push({ type: 'text', text: pending.text });
+            for (const image of pending.images || []) {
+                parts.push({ type: 'image_url', image_url: { url: image.dataUrl } });
+            }
+            messages.push({
+                role: 'user',
+                content: parts.length > 1 ? parts : (pending.text || ''),
+            } as ChatMessage);
+        }
+        const stats = getContextStats(messages, this.agent.getModel(convId));
+        return {
+            type: 'contextUsage',
+            usage: {
+                ...stats,
+                usedLabel: formatContextTokenCount(stats.used),
+                totalLabel: formatContextTokenCount(stats.total),
+            },
+        };
+    }
+
     /** Find the PanelState that owns a given panel */
     private findStateByPanel(panel: vscode.WebviewPanel): PanelState | undefined {
         for (const [, st] of this.panels) {
@@ -1427,18 +1471,26 @@ while ($true) { Start-Sleep -Milliseconds 100 }
     async handleUserMessage(text: string, images?: Array<{dataUrl: string; name: string; size: number}>, convId?: string, targetPanel?: vscode.WebviewPanel) {
         const panel = targetPanel || this.panel;
         if (!panel) return;
-        // Local post function 鈥?always sends to THIS panel, no race condition
-        const post = (msg: any) => panel.webview.postMessage(msg);
+        // Local post function - always sends to THIS panel, no race condition.
+        const rawPost = (msg: any) => panel.webview.postMessage(msg);
         // MUST have a valid convId 鈥?never fall back to global activeId
         if (!convId) return;
         const activeId = convId;
         console.log(`[MiMo] handleUserMessage: convId=${activeId}, msgCount=${this.agent.getConversation(activeId)?.messages.length ?? 'N/A'}`);
         const conv = this.agent.getConversation(activeId);
         if (!conv) return;
-        if (this.agent.isConvBusy(activeId)) {
-            post({ type: 'system', text: 'This conversation is already running. Wait for completion or stop it first.' });
+        if (this.activeTurnTokens.has(activeId) || this.agent.isConvBusy(activeId)) {
+            rawPost({ type: 'system', text: 'This conversation is already running. Wait for completion or stop it first.' });
             return;
         }
+        const turnToken = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        this.activeTurnTokens.set(activeId, turnToken);
+        const isCurrentTurn = () => this.activeTurnTokens.get(activeId) === turnToken;
+        const post = (msg: any) => {
+            if (!isCurrentTurn()) return false;
+            panel.webview.postMessage(msg);
+            return true;
+        };
 
         // Auto-title from the first user message. Use message state instead of
         // title text so restored placeholder/mojibake titles cannot skip AI naming.
@@ -1463,6 +1515,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         const baselinePatch = baselineChanges?.patch || '';
         const turnToolChanges: TurnChangeTracker = { files: new Map() };
         post({ type: 'userMessage', text, images: images || null });
+        post(this.contextUsageMessage(activeId, { text, images: images || null }));
         post({ type: 'busy' });
 
         let responseText = '';
@@ -1497,6 +1550,13 @@ while ($true) { Start-Sleep -Milliseconds 100 }
             }
             finalAnswerEmitted = true;
             responseText = '';
+        };
+        const finalizePartialAssistant = () => {
+            reasoningPost.flush();
+            streamRender.cancel();
+            if (responseText.trim()) {
+                commitAssistantUpdate();
+            }
         };
         try {
         // Build event handlers 鈥?store for potential reconnection
@@ -1560,6 +1620,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                 },
                 onTokenUsage: (usage: any) => {
                     post({ type: 'tokenUsage', usage });
+                    post(this.contextUsageMessage(activeId));
                 },
                 onEditPreview: (previewId: string, path: string, oldText: string, newText: string, matchCount: number) => {
                     post({ type: 'editPreview', previewId, path, oldText, newText, matchCount });
@@ -1623,6 +1684,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     // Auto-save to history
                     const msgs = this.agent.getMessages(activeId);
                     this.queueHistorySave(activeId, conv.title, msgs, conv.model, this.historyMetadata(conv));
+                    post(this.contextUsageMessage(activeId));
                     this.postTaskChanges(post, baselinePatch, turnToolChanges);
                     // Plan mode: auto-save plan text to ~/.mimo/plans/, show confirm buttons
                     // Skip if response is a greeting/direct reply (not an actual plan)
@@ -1652,6 +1714,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                 onError: (error: string) => {
                     turnHadError = true;
                     this.agent.releaseConversation(activeId);
+                    finalizePartialAssistant();
                     reasoningPost.flush();
                     this.saveRecoverySnapshot(activeId, conv);
                     const stErr = this.findStateByPanel(panel);
@@ -1659,6 +1722,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     post({ type: 'systemI18n', key: 'recovery.snapshot.saved' });
                     post({ type: 'clearQueue' });
                     post({ type: 'error', error });
+                    post(this.contextUsageMessage(activeId));
                 },
             };
 
@@ -1666,22 +1730,35 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         } catch (e: any) {
             turnHadError = true;
             this.agent.releaseConversation(activeId);
+            finalizePartialAssistant();
             const stErr = this.findStateByPanel(panel);
             if (stErr) stErr.messageQueue = [];
             post({ type: 'clearQueue' });
             post({ type: 'error', error: e.message });
+            post(this.contextUsageMessage(activeId));
         } finally {
             reasoningPost.cancel();
             streamRender.cancel();
             if (turnHadError) this.agent.releaseConversation(activeId);
-            post({ type: 'idle' });
 
-            // Process next queued message only after successful completion.
-            // Failed provider/model calls should unlock the UI and wait for the user
-            // to adjust model or generation settings before retrying.
-            if (!turnHadError) {
-                this.processNextQueued(panel, convId);
-            }
+            const finishUiTurn = () => {
+                if (!isCurrentTurn()) return;
+                if (this.agent.isConvBusy(activeId)) {
+                    setTimeout(finishUiTurn, 120);
+                    return;
+                }
+                this.activeTurnTokens.delete(activeId);
+                rawPost(this.contextUsageMessage(activeId));
+                rawPost({ type: 'idle' });
+
+                // Process next queued message only after successful completion.
+                // Failed provider/model calls should unlock the UI and wait for the user
+                // to adjust model or generation settings before retrying.
+                if (!turnHadError) {
+                    this.processNextQueued(panel, convId);
+                }
+            };
+            finishUiTurn();
         }
     }
 
@@ -1878,13 +1955,26 @@ while ($true) { Start-Sleep -Milliseconds 100 }
     private async handleSkillInvocation(skillName: string, text: string, convId?: string, targetPanel?: vscode.WebviewPanel) {
         const panel = targetPanel || this.panel;
         if (!panel) return;
-        const post = (msg: any) => panel.webview.postMessage(msg);
+        const rawPost = (msg: any) => panel.webview.postMessage(msg);
         if (!convId) return;
         const activeId = convId;
         const conv = this.agent.getConversation(activeId);
         if (!conv) return;
+        if (this.activeTurnTokens.has(activeId) || this.agent.isConvBusy(activeId)) {
+            rawPost({ type: 'system', text: 'This conversation is already running. Wait for completion or stop it first.' });
+            return;
+        }
+        const turnToken = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        this.activeTurnTokens.set(activeId, turnToken);
+        const isCurrentTurn = () => this.activeTurnTokens.get(activeId) === turnToken;
+        const post = (msg: any) => {
+            if (!isCurrentTurn()) return false;
+            panel.webview.postMessage(msg);
+            return true;
+        };
 
         post({ type: 'userMessage', text: `[${skillName}] ${text}` });
+        post(this.contextUsageMessage(activeId, { text: `[${skillName}] ${text}` }));
         const turnStartedAt = Date.now();
         const baselineChanges = await this.agent.getWorkspaceChangeSummary();
         const baselinePatch = baselineChanges?.patch || '';
@@ -1921,6 +2011,13 @@ while ($true) { Start-Sleep -Milliseconds 100 }
             }
             finalAnswerEmitted = true;
             responseText = '';
+        };
+        const finalizePartialAssistant = () => {
+            reasoningPost.flush();
+            streamRender.cancel();
+            if (responseText.trim()) {
+                commitAssistantUpdate();
+            }
         };
         try {
             await this.agent.chatWithSkill(skillName, text, {
@@ -1972,6 +2069,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                 onModelSwitched: (model, reason) => post({ type: 'modelSwitched', model, reason }),
                 onTokenUsage: (usage) => {
                     post({ type: 'tokenUsage', usage });
+                    post(this.contextUsageMessage(activeId));
                 },
                 onEditPreview: (previewId: string, path: string, oldText: string, newText: string, matchCount: number) => {
                     post({ type: 'editPreview', previewId, path, oldText, newText, matchCount });
@@ -2032,22 +2130,37 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     }
                     const msgs = this.agent.getMessages(activeId);
                     this.queueHistorySave(activeId, conv.title, msgs, conv.model, this.historyMetadata(conv));
+                    post(this.contextUsageMessage(activeId));
                     this.postTaskChanges(post, baselinePatch, turnToolChanges);
                 },
                 onError: (error) => {
+                    finalizePartialAssistant();
                     reasoningPost.flush();
                     this.saveRecoverySnapshot(activeId, conv);
                     post({ type: 'systemI18n', key: 'recovery.snapshot.saved' });
                     post({ type: 'error', error });
+                    post(this.contextUsageMessage(activeId));
                 },
             });
         } catch (e: any) {
+            finalizePartialAssistant();
             post({ type: 'error', error: e.message });
+            post(this.contextUsageMessage(activeId));
         } finally {
             reasoningPost.cancel();
             streamRender.cancel();
-            post({ type: 'idle' });
-            this.processNextQueued(panel, convId);
+            const finishUiTurn = () => {
+                if (!isCurrentTurn()) return;
+                if (this.agent.isConvBusy(activeId)) {
+                    setTimeout(finishUiTurn, 120);
+                    return;
+                }
+                this.activeTurnTokens.delete(activeId);
+                rawPost(this.contextUsageMessage(activeId));
+                rawPost({ type: 'idle' });
+                this.processNextQueued(panel, convId);
+            };
+            finishUiTurn();
         }
     }
 
@@ -2108,6 +2221,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         const model = this.agent.getModelSelectionValue(convId);
         this.postToWebview(this.modelListMessage(convId), p);
         this.postToWebview({ type: 'modelCaps', caps: this.agent.getModelCapabilities(model) }, p);
+        this.postToWebview(this.contextUsageMessage(convId), p);
         this.postToWebview({ type: 'restoreMode', mode: conv.mode, label: conv.mode }, p);
         this.postToWebview(this.agent.isConvRunning(convId) ? { type: 'busy' } : { type: 'idle' }, p);
 
@@ -2272,6 +2386,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
 <body>
 <div id="header">
     <input type="text" id="conv-title" class="conv-title-input" value="New Chat" spellcheck="false">
+    <span id="context-usage" class="context-usage context-low" title="" aria-label="Context usage" style="display:none">0%</span>
     <div id="header-actions">
         <button class="tb-icon" id="btn-lang" title="Language"></button>
         <button class="tb-icon" id="btn-history" title="History"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></button>
@@ -2401,6 +2516,10 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     </div>
                 </div>
             </div>
+            <button id="reasoning-effort-btn" class="reasoning-effort-btn" title="Reasoning effort">推理: 均衡</button>
+            <input type="file" id="file-input" accept="image/*" multiple style="display:none">
+            <button class="tb-icon voice-btn" id="voice-btn" title="Voice input" style="display:none">Mic</button>
+            <div style="flex:1"></div>
             <span class="model-select-wrap">
                 <select id="model-select" aria-hidden="true" tabindex="-1"></select>
                 <button class="model-picker-trigger" id="model-picker-trigger" title="Model">
@@ -2409,11 +2528,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                 </button>
                 <div id="model-picker-popup" class="model-picker-popup" role="listbox"></div>
             </span>
-            <button id="reasoning-effort-btn" class="reasoning-effort-btn" title="Reasoning effort">推理: 均衡</button>
-            <input type="file" id="file-input" accept="image/*" multiple style="display:none">
-            <button class="tb-icon voice-btn" id="voice-btn" title="Voice input" style="display:none">Mic</button>
-            <div style="flex:1"></div>
-            <button id="send" title="Send">Send</button>
+            <button id="send" title="Send"><svg class="send-icon send-icon-plane" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4.5 12 19.5 5.5 13 20 10.6 13.4 4.5 12Z"/><path d="M10.6 13.4 19.5 5.5"/></svg></button>
         </div>
     </div>
 </div>

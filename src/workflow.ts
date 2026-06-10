@@ -224,8 +224,9 @@ Rules:
 
     let totalToolCalls = 0;
     let rounds = 0;
+    const shouldEmit = () => signal?.aborted !== true;
 
-    events.onReasoning?.(`[Workflow task] ${label}: ${compactOneLine(task.rationale || task.task, 180)}`);
+    if (shouldEmit()) events.onReasoning?.(`[Workflow task] ${label}: ${compactOneLine(task.rationale || task.task, 180)}`);
 
     for (rounds = 1; rounds <= maxRounds; rounds++) {
         if (signal?.aborted) {
@@ -278,7 +279,7 @@ Rules:
         }
 
         if (toolCalls.length === 0) {
-            events.onReasoning?.(`[Workflow task] ${label}: completed with text output (${(content || '').length} chars).`);
+            if (shouldEmit()) events.onReasoning?.(`[Workflow task] ${label}: completed with text output (${(content || '').length} chars).`);
             return {
                 task: task.task, label,
                 output: content || '(no output)',
@@ -299,7 +300,7 @@ Rules:
             let args: Record<string, any> = {};
             try { args = JSON.parse(tc.function.arguments); } catch { /* empty */ }
 
-            events.onReasoning?.(`[Workflow task] ${label}: ${describeWorkflowToolAction(tc.function.name, args)}.`);
+            if (shouldEmit()) events.onReasoning?.(`[Workflow task] ${label}: ${describeWorkflowToolAction(tc.function.name, args)}.`);
 
             const toolResult = mcpManager.isMcpTool(tc.function.name)
                 ? await mcpManager.callTool(tc.function.name, args)
@@ -309,13 +310,19 @@ Rules:
                     undefined,
                     config.dependencyInstall,
                 );
+            if (signal?.aborted) {
+                return {
+                    task: task.task, label, output: '(aborted)',
+                    toolCalls: totalToolCalls, rounds, elapsed: Date.now() - t0,
+                };
+            }
 
             messages.push({ role: 'tool', tool_call_id: tc.id, content: toolResult });
             totalToolCalls++;
             const resultText = String(toolResult || '');
             const resultHead = compactOneLine(resultText.split(/\r?\n/).find(Boolean) || '', 120);
             const isError = /^(Safety:|Tool error:|Unknown tool|Blocked by|Error:)/i.test(resultText);
-            events.onReasoning?.(
+            if (shouldEmit()) events.onReasoning?.(
                 `[Workflow task] ${label}: ${tc.function.name} ${isError ? 'failed' : 'finished'} (${resultText.length} chars)${resultHead ? ` - ${resultHead}` : ''}.`
             );
         }
@@ -353,9 +360,10 @@ export async function executeWorkflow(
 ): Promise<WorkflowResult> {
     const t0 = Date.now();
     const totalTasks = phases.reduce((sum, p) => sum + p.tasks.length, 0);
+    const shouldEmit = () => signal?.aborted !== true;
 
-    events.onWorkflowStart?.(phases.length, totalTasks);
-    events.onReasoning?.(`[Workflow] Starting ${phases.length} phases, ${totalTasks} total tasks`);
+    if (shouldEmit()) events.onWorkflowStart?.(phases.length, totalTasks);
+    if (shouldEmit()) events.onReasoning?.(`[Workflow] Starting ${phases.length} phases, ${totalTasks} total tasks`);
 
     const phaseResults: PhaseResult[] = [];
     let totalToolCalls = 0;
@@ -367,22 +375,22 @@ export async function executeWorkflow(
         if (signal?.aborted) break;
 
         const phase = phases[pi];
-        events.onWorkflowPhaseStart?.(pi, phase.title, phase.mode, phase.tasks.length);
-        events.onStatus?.(`[Workflow] Phase ${pi + 1}/${phases.length}: ${phase.title} (${phase.mode})`);
-        events.onReasoning?.(`[Phase ${pi + 1}] "${phase.title}" — ${phase.tasks.length} tasks, ${phase.mode}`);
+        if (shouldEmit()) events.onWorkflowPhaseStart?.(pi, phase.title, phase.mode, phase.tasks.length);
+        if (shouldEmit()) events.onStatus?.(`[Workflow] Phase ${pi + 1}/${phases.length}: ${phase.title} (${phase.mode})`);
+        if (shouldEmit()) events.onReasoning?.(`[Phase ${pi + 1}] "${phase.title}" — ${phase.tasks.length} tasks, ${phase.mode}`);
 
         const phaseT0 = Date.now();
         const taskResults: TaskResult[] = [];
 
         if (phase.mode === 'parallel') {
             // ── Parallel: all tasks run simultaneously ──
-            events.onReasoning?.(`[Phase ${pi + 1}] Running ${phase.tasks.length} tasks in parallel...`);
+            if (shouldEmit()) events.onReasoning?.(`[Phase ${pi + 1}] Running ${phase.tasks.length} tasks in parallel...`);
 
             const promises = phase.tasks.map((task, ti) => {
-                events.onWorkflowTaskStart?.(pi, ti, task.label || task.task.substring(0, 40));
+                if (shouldEmit()) events.onWorkflowTaskStart?.(pi, ti, task.label || task.task.substring(0, 40));
                 return executeTask(task, ti, api, workspace, mcpManager, config, signal, phaseSummary, events)
                     .then(result => {
-                        events.onWorkflowTaskEnd?.(pi, ti, result);
+                        if (shouldEmit()) events.onWorkflowTaskEnd?.(pi, ti, result);
                         return result;
                     })
                     .catch(e => {
@@ -393,7 +401,7 @@ export async function executeWorkflow(
                             toolCalls: 0, rounds: 0,
                             elapsed: 0, error: e.message,
                         };
-                        events.onWorkflowTaskEnd?.(pi, ti, errResult);
+                        if (shouldEmit()) events.onWorkflowTaskEnd?.(pi, ti, errResult);
                         return errResult;
                     });
             });
@@ -408,17 +416,17 @@ export async function executeWorkflow(
                 if (signal?.aborted) break;
 
                 const task = phase.tasks[ti];
-                events.onWorkflowTaskStart?.(pi, ti, task.label || task.task.substring(0, 40));
-                events.onStatus?.(`[Workflow] Phase ${pi + 1}, Task ${ti + 1}/${phase.tasks.length}: ${task.label || task.task.substring(0, 30)}`);
+                if (shouldEmit()) events.onWorkflowTaskStart?.(pi, ti, task.label || task.task.substring(0, 40));
+                if (shouldEmit()) events.onStatus?.(`[Workflow] Phase ${pi + 1}, Task ${ti + 1}/${phase.tasks.length}: ${task.label || task.task.substring(0, 30)}`);
 
                 const result = await executeTask(task, ti, api, workspace, mcpManager, config, signal, previousOutput, events);
                 taskResults.push(result);
-                events.onWorkflowTaskEnd?.(pi, ti, result);
+                if (shouldEmit()) events.onWorkflowTaskEnd?.(pi, ti, result);
 
                 // Chain result as context for next sequential task
                 previousOutput = result.output;
                 if (ti < phase.tasks.length - 1) {
-                    events.onReasoning?.(`[Phase ${pi + 1}] Task ${ti + 1} done (${result.toolCalls} tools, ${(result.elapsed / 1000).toFixed(1)}s). Feeding result to next task...`);
+                    if (shouldEmit()) events.onReasoning?.(`[Phase ${pi + 1}] Task ${ti + 1} done (${result.toolCalls} tools, ${(result.elapsed / 1000).toFixed(1)}s). Feeding result to next task...`);
                 }
             }
         }
@@ -437,8 +445,8 @@ export async function executeWorkflow(
             totalRounds += r.rounds;
         }
 
-        events.onWorkflowPhaseEnd?.(pi, phaseResult);
-        events.onReasoning?.(
+        if (shouldEmit()) events.onWorkflowPhaseEnd?.(pi, phaseResult);
+        if (shouldEmit()) events.onReasoning?.(
             `[Phase ${pi + 1}] "${phase.title}" done — ${taskResults.length} tasks, ` +
             `${taskResults.reduce((s, r) => s + r.toolCalls, 0)} tool calls, ` +
             `${(phaseResult.elapsed / 1000).toFixed(1)}s`
@@ -449,7 +457,7 @@ export async function executeWorkflow(
             phaseSummary = taskResults
                 .map(r => `[${r.label}] ${r.output.substring(0, 200)}`)
                 .join('\n');
-            events.onReasoning?.(`[Workflow] Phase ${pi + 1} results summary fed to next phase`);
+            if (shouldEmit()) events.onReasoning?.(`[Workflow] Phase ${pi + 1} results summary fed to next phase`);
         }
     }
 
@@ -460,8 +468,8 @@ export async function executeWorkflow(
         elapsed: Date.now() - t0,
     };
 
-    events.onWorkflowEnd?.(result);
-    events.onReasoning?.(
+    if (shouldEmit()) events.onWorkflowEnd?.(result);
+    if (shouldEmit()) events.onReasoning?.(
         `[Workflow] Complete — ${phases.length} phases, ${totalTasks} tasks, ` +
         `${totalToolCalls} tool calls, ${(result.elapsed / 1000).toFixed(1)}s`
     );

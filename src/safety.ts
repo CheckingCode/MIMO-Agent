@@ -442,12 +442,6 @@ function isSameOrInsidePath(targetPath: string, parentPath: string): boolean {
 
 export function isPathSafe(filePath: string, workspace: string): { safe: boolean; reason: string } {
     const resolved = path.resolve(filePath);
-    const wsResolved = path.resolve(workspace);
-    const rel = path.relative(wsResolved, resolved);
-
-    if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
-        return { safe: false, reason: `Path is outside workspace: ${resolved}` };
-    }
     for (const p of PROTECTED_DIRS) {
         const pResolved = path.resolve(p);
         if (isSameOrInsidePath(resolved, pResolved)) {

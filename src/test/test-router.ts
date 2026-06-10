@@ -23,6 +23,43 @@ describe('router fast-path classification', () => {
         expect(intent.category).toBe('debug');
         expect(intent.source).toBe('heuristic');
     });
+
+    it('treats identity and capability questions as direct greeting handling', () => {
+        const intent = quickClassifyIntent('\u4f60\u597d\uff0c\u5728\u5417\uff1f\u4f60\u662f\u8c01\uff0c\u4f60\u4f1a\u5e72\u4ec0\u4e48\uff1f');
+        expect(intent?.needsTools).toBe(false);
+        expect(intent?.category).toBe('greeting');
+    });
+
+    it('classifies short confirmations as acknowledgements', () => {
+        const intent = quickClassifyIntent('\u53ef\u4ee5');
+        expect(intent?.needsTools).toBe(false);
+        expect(intent?.category).toBe('acknowledgement');
+    });
+
+    it('classifies agent reliability complaints as product experience issues', () => {
+        const intent = quickClassifyIntent('MIMO AGENT \u4e3a\u4ec0\u4e48\u603b\u662f\u51fa\u73b0\u8fd9\u79cd\u4e2d\u65ad\uff1f');
+        expect(intent?.needsTools).toBe(true);
+        expect(intent?.category).toBe('experience');
+        expect(intent?.complexity).toBe('complex');
+    });
+
+    it('classifies official/latest model spec checks as search tasks', () => {
+        const intent = quickClassifyIntent('\u67e5\u4e00\u4e0b\u5b98\u65b9\u6700\u65b0 MIMO v2.5-pro \u4e0a\u4e0b\u6587\u957f\u5ea6');
+        expect(intent?.needsTools).toBe(true);
+        expect(intent?.category).toBe('search');
+    });
+
+    it('classifies stop button workflow mismatch as feedback needing diagnosis', () => {
+        const intent = quickClassifyIntent('stop \u6309\u94ae\u90fd\u6ca1\u4e86\uff0cworkflow \u8fd8\u5728\u8f93\u51fa\uff0c\u8fd9\u660e\u663e\u662f\u9519\u7684');
+        expect(intent?.needsTools).toBe(true);
+        expect(intent?.category).toBe('feedback');
+    });
+
+    it('classifies explicit operating-rule saves as preference implementation', () => {
+        const intent = quickClassifyIntent('\u8bf7\u5c06\u4e0a\u8ff0\u65b9\u6848\u4fdd\u5b58\u8fdb\u7cfb\u7edf\uff0c\u4ee5\u540e\u5fc5\u987b\u9075\u5b88');
+        expect(intent?.needsTools).toBe(true);
+        expect(intent?.category).toBe('preference');
+    });
 });
 
 summary();

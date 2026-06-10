@@ -23,6 +23,34 @@ function isSafeLinkTarget(href: string): boolean {
     return false;
 }
 
+function normalizeEscapedAttr(value: string): string {
+    return escapeHtml(value.replace(/&amp;/g, '&').trim());
+}
+
+function isLocalFilePathTarget(value: string): boolean {
+    return /^[A-Za-z]:[\\/]/.test(value.replace(/&amp;/g, '&').trim());
+}
+
+function renderFileLink(label: string, filePath: string, line?: string): string {
+    const cleanPath = filePath.replace(/&amp;/g, '&').trim();
+    const lineAttr = line ? ` data-line="${escapeHtml(line)}"` : '';
+    return `<a href="#" class="md-link file-link" data-file="${escapeHtml(cleanPath)}"${lineAttr}>${label}</a>`;
+}
+
+function replaceOutsideInlineCodeAndLinks(input: string, replacer: (chunk: string) => string): string {
+    return input
+        .split(/(<(?:code|a)\b[\s\S]*?<\/(?:code|a)>)/gi)
+        .map(chunk => /^<(?:code|a)\b/i.test(chunk) ? chunk : replacer(chunk))
+        .join('');
+}
+
+const LOCAL_FILE_EXTENSIONS = [
+    '7z', 'bmp', 'c', 'cc', 'cpp', 'cs', 'css', 'csv', 'doc', 'docx', 'gif', 'go',
+    'h', 'hpp', 'html', 'htm', 'ipynb', 'java', 'jpeg', 'jpg', 'js', 'jsx', 'json',
+    'log', 'md', 'mov', 'mp3', 'mp4', 'pdf', 'png', 'ppt', 'pptx', 'py', 'rar', 'rs',
+    'svg', 'ts', 'tsx', 'txt', 'webm', 'webp', 'xls', 'xlsx', 'xml', 'yaml', 'yml', 'zip',
+].join('|');
+
 function renderTable(tableLines: string[]): string {
     const rows: string[][] = [];
     for (const line of tableLines) {
@@ -115,12 +143,25 @@ export function renderMarkdown(text: string): string {
 
     // Links (markdown style). Keep unsafe protocols as plain escaped text.
     s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_: string, label: string, href: string) => {
+        if (isLocalFilePathTarget(href)) return renderFileLink(label, href);
         if (!isSafeLinkTarget(href)) return `${label} (${href})`;
-        return `<a href="${href}" class="md-link">${label}</a>`;
+        return `<a href="${normalizeEscapedAttr(href)}" class="md-link url-link">${label}</a>`;
     });
 
     // Auto-detect plain URLs (http/https/localhost)
-    s = s.replace(/(?<![">&])(https?:\/\/[^\s<>\)]+|localhost:\d+[^\s<>\)]*)/g, '<a href="$1" class="md-link url-link">$1</a>');
+    s = replaceOutsideInlineCodeAndLinks(s, chunk =>
+        chunk.replace(/(?<![">&])(https?:\/\/[^\s<>\)]+|localhost:\d+[^\s<>\)]*)/g, (_: string, url: string) => {
+            return `<a href="${normalizeEscapedAttr(url)}" class="md-link url-link">${url}</a>`;
+        })
+    );
+
+    // Auto-detect common Windows file paths in summaries and tables.
+    const localFileRe = new RegExp(`\\b([A-Za-z]:[\\\\/][^<>\\r\\n|]*?\\.(${LOCAL_FILE_EXTENSIONS}))(?:\\:(\\d{1,7}))?(?![\\w.-])`, 'gi');
+    s = replaceOutsideInlineCodeAndLinks(s, chunk =>
+        chunk.replace(localFileRe, (match: string, filePath: string, _ext: string, line?: string) => {
+            return renderFileLink(match, filePath, line);
+        })
+    );
 
     // Blockquote
     s = s.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');

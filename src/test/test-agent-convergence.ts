@@ -161,6 +161,31 @@ describe('agent convergence guards', () => {
         expect(agent.isUnexecutedActionStatement(draft)).toBe(true);
     });
 
+    it('treats Chinese promises to inspect an existing version as unfinished tool work', () => {
+        const agent = makeAgent();
+        const draft = '好的老板，先看看你现有的版本！';
+
+        expect(agent.isUnexecutedActionStatement(draft)).toBe(true);
+    });
+
+    it('keeps Auto mode open when the assistant only promises to inspect', () => {
+        const agent = makeAgent();
+        const conv = makeConv([
+            { role: 'user', content: '开干，不过我已经有一个版本了，你帮我优化一下飞机动画' },
+        ]);
+
+        const decision = agent.shouldContinueAutoAfterTextFinal(
+            conv,
+            'moderate',
+            '好的老板，先看看你现有的版本！',
+            1,
+            600,
+        );
+
+        expect(decision.shouldContinue).toBe(true);
+        expect(decision.reason).toContain('pending tool-backed step');
+    });
+
     it('filters unchanged dirty workspace diff blocks from execute_command previews', () => {
         const agent = makeAgent();
         const oldDirty = [
@@ -212,6 +237,38 @@ describe('agent convergence guards', () => {
 
         const fallback = agent.findChatModel('custom-tts', true);
         expect(fallback).toBeNull();
+    });
+
+    it('falls back to a configured alternate endpoint without reusing the missing model', () => {
+        const agent = makeAgent();
+        agent.updateConfig({
+            ...agent.config,
+            model: 'missing-chat',
+            activeProviderProfile: 'broken',
+            activeRoute: { endpoint_id: 'broken', model: 'missing-chat' },
+            providerProfiles: [
+                {
+                    id: 'broken',
+                    name: 'Broken',
+                    base_url: 'https://broken.example/v1',
+                    api_key: 'broken-key',
+                    model: 'missing-chat',
+                    models: ['missing-chat'],
+                },
+                {
+                    id: 'working',
+                    name: 'Working',
+                    base_url: 'https://working.example/v1',
+                    api_key: 'working-key',
+                    model: 'working-chat',
+                    models: ['working-chat'],
+                },
+            ],
+        });
+
+        const route = (agent as any).findFallbackRouteForChat('missing-chat', 'broken');
+        expect(route.endpointId).toBe('working');
+        expect(route.model).toBe('working-chat');
     });
 
     it('keeps automatic vision fallback inside MiMo models only when current model is MiMo', () => {

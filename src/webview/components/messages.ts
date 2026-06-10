@@ -27,6 +27,7 @@ import {
     reasoningStoreLimit,
     renderEditDiff as renderMessageEditDiff,
     renderGitDiff as renderMessageGitDiff,
+    sanitizeReasoningForDisplay as sanitizeMessageReasoningForDisplay,
     renderThinkingBlock as renderMessageThinkingBlock,
     setCopyButtonState as setMessageCopyButtonState,
     setLazyToolOutput as setMessageLazyToolOutput,
@@ -62,6 +63,37 @@ function copyIconMarkup(): string {
 
 function setCopyButtonState(btn: HTMLElement, copied: boolean): void {
     setMessageCopyButtonState(btn, copied);
+}
+
+function copyTextToClipboard(text: string): Promise<void> {
+    if (navigator.clipboard?.writeText) {
+        return navigator.clipboard.writeText(text);
+    }
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch { /* ignore */ }
+    document.body.removeChild(ta);
+    return Promise.resolve();
+}
+
+function assistantActionIcon(action: string): string {
+    const attrs = 'class="assistant-action-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"';
+    if (action === 'retry') {
+        return `<svg ${attrs}><path d="M13.2 5.2A5.5 5.5 0 1 0 14 8" /><path d="M13.2 2.5v2.7h-2.7" /></svg>`;
+    }
+    if (action === 'continue') {
+        return `<svg ${attrs}><path d="M4 3.5l5 4.5-5 4.5" /><path d="M10.5 4v8" /></svg>`;
+    }
+    if (action === 'feedback') {
+        return `<svg ${attrs}><path d="M8 2.2v6.4" /><circle cx="8" cy="13.1" r="1.05" fill="currentColor" stroke="none" /></svg>`;
+    }
+    if (action === 'copied') {
+        return `<svg ${attrs}><path d="M3.2 8.4l3 3L12.8 4.8" /></svg>`;
+    }
+    return `<svg ${attrs}><rect x="5" y="3" width="8" height="10" rx="1.4" /><path d="M3 11V5.2C3 4.5 3.5 4 4.2 4H10" /></svg>`;
 }
 
 const REASONING_PREVIEW_CHARS = 360;
@@ -328,6 +360,22 @@ export const Messages = {
                 e.stopPropagation();
                 vscode.post({ type: 'openUrl', url: link.href });
             }
+
+            const fileLink = (e.target as HTMLElement).closest('a.file-link') as HTMLAnchorElement | null;
+            const filePath = fileLink?.dataset.file;
+            if (fileLink && filePath) {
+                e.preventDefault();
+                e.stopPropagation();
+                const line = Number(fileLink.dataset.line || 1);
+                vscode.post({ type: 'openFile', path: filePath, line: Number.isFinite(line) ? line : 1 });
+            }
+
+            const actionBtn = (e.target as HTMLElement).closest('.assistant-action-btn') as HTMLButtonElement | null;
+            if (actionBtn) {
+                e.preventDefault();
+                e.stopPropagation();
+                this.handleAssistantAction(actionBtn);
+            }
         });
 
         // Listen for messages from host
@@ -357,6 +405,7 @@ export const Messages = {
         bus.on('workflowTaskEnd', (pi: number, ti: number, result: any) => this.handleWorkflowTaskEnd(pi, ti, result));
         bus.on('workflowPhaseEnd', (pi: number, result: any) => this.handleWorkflowPhaseEnd(pi, result));
         bus.on('workflowEnd', (result: any) => this.handleWorkflowEnd(result));
+        this.removeExecutionMetaChips(document);
         // Adversarial mode events
         bus.on('adversarialTurn', (persona: string, name: string, icon: string, phase: string, content: string, iteration: number) => this.handleAdversarialTurn(persona, name, icon, phase, content, iteration));
         bus.on('adversarialToolStart', (persona: string, toolName: string, args: any) => this.handleAdversarialToolStart(persona, toolName, args));
@@ -373,7 +422,10 @@ export const Messages = {
         bus.on('messageQueued', (text: string, queueLength: number) => this.showQueuedMessage(text, queueLength));
         bus.on('queueProcessed', (remaining: number) => this.updateQueueDisplay(remaining));
         bus.on('clearQueue', () => this.clearQueueDisplay());
-        bus.on('langChanged', () => this.localizeQueueDisplay());
+        bus.on('langChanged', () => {
+            this.localizeQueueDisplay();
+            this.localizeAssistantActions();
+        });
         bus.on('renderFlush', () => smartScroll(messagesDiv));
         bus.on('fileOpenResult', (msg: any) => this.handleFileOpenResult(msg));
     },
@@ -381,6 +433,7 @@ export const Messages = {
     // ── User message ──
     addUserMessage(text: string, images?: ImageData[] | null): void {
         const messagesDiv = document.getElementById('messages')!;
+        this.archiveAssistantActions();
         store.set('lastUserMsg', { text, images: images || null });
         store.set('currentTurnStartedAt', Date.now());
 
@@ -666,9 +719,7 @@ export const Messages = {
             (thinkBlock as any)._reasoningText = rawText;
         }
         (thinkBlock as any)._reasoningTrimmed = trimmed;
-        if (rawText && thinkBlock.dataset.reasoningText !== rawText) {
-            thinkBlock.dataset.reasoningText = rawText;
-        }
+        delete thinkBlock.dataset.reasoningText;
         thinkBlock.dataset.reasoningTrimmed = trimmed ? 'true' : 'false';
         const toggle = thinkBlock.previousElementSibling as HTMLElement | null;
         if (rawText.length <= 30) {
@@ -693,10 +744,7 @@ export const Messages = {
         const expanded = forceFull || thinkBlock.classList.contains('show');
         let displayText = rawText;
         if (expanded) {
-            const prefix = trimmed ? t('thinking.trimmed.prefix') : '';
-            // Expansion must be instant. Avoid regex-heavy deduplication in the
-            // click path; the stored text is already capped for responsiveness.
-            displayText = prefix + rawText;
+            displayText = sanitizeMessageReasoningForDisplay(rawText, trimmed);
         } else {
             const trimmedText = trimmed ? t('thinking.trimmed') : '';
             displayText = t('thinking.compact')
@@ -1350,6 +1398,7 @@ export const Messages = {
 
         // Collapse all execution details into a drawer, leaving final answer visible below.
         this.compactExecutionDetails(elapsedSec);
+        this.attachAssistantActions(store.get('streamingMsg'), undefined, { elapsedSec });
 
         store.set('streamingMsg', null);
         store.set('rawHtml', '');
@@ -1359,6 +1408,130 @@ export const Messages = {
         this.renderToolOnlyTaskChangesFallback();
         smartScroll(messagesDiv);
         this.scheduleHistorySnapshot(elapsedSec);
+    },
+
+    attachAssistantActions(
+        assistant: HTMLElement | null,
+        retryPayload?: { text: string; images?: any[] | null } | null,
+        meta?: { elapsedSec?: number }
+    ): void {
+        if (!assistant) return;
+        assistant.querySelectorAll('.assistant-actions').forEach(el => el.remove());
+        const copyText = this.extractAssistantCopyText(assistant);
+        if (!copyText) return;
+
+        const actions = createElement('div', 'assistant-actions');
+        actions.setAttribute('role', 'toolbar');
+        actions.setAttribute('aria-label', t('assistant.actions'));
+        actions.setAttribute('data-i18n-aria-label', 'assistant.actions');
+        const replayable = retryPayload || store.get('lastUserMsg') || null;
+        (actions as any)._retryPayload = replayable;
+
+        const buttonsEl = createElement('div', 'assistant-action-buttons');
+        const buttons: Array<{ action: string; labelKey: string }> = [
+            { action: 'copy', labelKey: 'assistant.action.copy' },
+            ...(replayable ? [{ action: 'retry', labelKey: 'assistant.action.retry' }] : []),
+            ...(this.shouldShowContinueAction(assistant) ? [{ action: 'continue', labelKey: 'assistant.action.continue' }] : []),
+            { action: 'feedback', labelKey: 'assistant.action.feedback' },
+        ];
+
+        for (const item of buttons) {
+            const btn = createElement('button', 'assistant-action-btn') as HTMLButtonElement;
+            btn.type = 'button';
+            btn.dataset.action = item.action;
+            btn.setAttribute('aria-label', t(item.labelKey));
+            btn.setAttribute('data-i18n-aria-label', item.labelKey);
+            btn.setAttribute('data-i18n-title', item.labelKey);
+            btn.title = t(item.labelKey);
+            btn.innerHTML = assistantActionIcon(item.action);
+            buttonsEl.appendChild(btn);
+        }
+        actions.appendChild(buttonsEl);
+
+        const metaEl = this.createAssistantActionMeta(assistant, meta);
+        if (metaEl) actions.appendChild(metaEl);
+        assistant.appendChild(actions);
+    },
+
+    createAssistantActionMeta(assistant: HTMLElement, meta?: { elapsedSec?: number }): HTMLElement | null {
+        const wrap = createElement('div', 'assistant-action-meta');
+        const elapsed = typeof meta?.elapsedSec === 'number' && meta.elapsedSec > 0 ? this.formatDuration(meta.elapsedSec) : '';
+        if (elapsed) {
+            const item = createElement('span', 'assistant-action-meta-item assistant-action-elapsed');
+            item.textContent = elapsed;
+            wrap.appendChild(item);
+        }
+
+        return wrap.children.length > 0 ? wrap : null;
+    },
+
+    shouldShowContinueAction(assistant: HTMLElement): boolean {
+        if (assistant.querySelector('.task-checklist .todo:not(.done), .todo-tool-result .todo:not(.done)')) return true;
+        const text = this.extractAssistantCopyText(assistant);
+        return /(可以继续|继续执行|下一步|未完成|待完成|后续|接着做|continue|next step|remaining work|follow[- ]?up)/i.test(text);
+    },
+
+    localizeAssistantActions(): void {},
+
+    extractAssistantCopyText(assistant: HTMLElement): string {
+        const finalContents = Array.from(assistant.querySelectorAll<HTMLElement>('.md-content-final:not(.md-content-update)'));
+        const normalContents = Array.from(assistant.querySelectorAll<HTMLElement>('.md-content:not(.md-content-update)'));
+        const source = finalContents.length > 0
+            ? finalContents[finalContents.length - 1]
+            : normalContents.length > 0
+                ? normalContents[normalContents.length - 1]
+                : assistant;
+        const clone = source.cloneNode(true) as HTMLElement;
+        clone.querySelectorAll('.assistant-actions, .copy-btn, .code-copy, .msg-copy').forEach(el => el.remove());
+        return (clone.innerText || clone.textContent || '').replace(/\n{3,}/g, '\n\n').trim();
+    },
+
+    handleAssistantAction(button: HTMLButtonElement): void {
+        const action = button.dataset.action || '';
+        const assistant = button.closest('.msg-assistant') as HTMLElement | null;
+        if (action === 'copy' && assistant) {
+            const text = this.extractAssistantCopyText(assistant);
+            copyTextToClipboard(text).then(() => {
+                button.innerHTML = assistantActionIcon('copied');
+                button.classList.add('copied');
+                window.setTimeout(() => {
+                    button.innerHTML = assistantActionIcon('copy');
+                    button.classList.remove('copied');
+                }, 1400);
+            }).catch(() => {});
+            return;
+        }
+
+        if (action === 'retry') {
+            const actions = button.closest('.assistant-actions') as HTMLElement | null;
+            const last = (actions as any)?._retryPayload || store.get('lastUserMsg');
+            if (!last?.text && !last?.images?.length) return;
+            vscode.send(last.text || '', last.images || null);
+            return;
+        }
+
+        if (action === 'continue') {
+            vscode.send(t('assistant.continue.prompt'));
+            return;
+        }
+
+        if (action === 'feedback') {
+            vscode.send(t('assistant.feedback.prompt'));
+            return;
+        }
+    },
+
+    archiveAssistantActions(): void {
+        document.querySelectorAll<HTMLElement>('.assistant-actions').forEach(actions => {
+            actions.classList.add('is-archived');
+        });
+    },
+
+    refreshAssistantActionVisibility(): void {
+        const actions = Array.from(document.querySelectorAll<HTMLElement>('.msg-assistant .assistant-actions'));
+        actions.forEach((el, index) => {
+            el.classList.toggle('is-archived', index < actions.length - 1);
+        });
     },
 
     scheduleHistorySnapshot(elapsedSec?: number): void {
@@ -1430,31 +1603,12 @@ export const Messages = {
 
         if (detailNodes.length === 0) return;
 
-        const toolCards = detailNodes.filter(el => el.classList.contains('tool-line') || el.classList.contains('tool-card'));
-        const usage = store.get('tokenUsage');
-        const startedTokenTotal = (streamingMsg as any)._startedTokenTotal as number | undefined;
-        const messageTokens = Math.max(0, usage.total - (startedTokenTotal || 0));
-        const toolElapsed = toolCards.reduce((sum, card) => {
-            const el = card.querySelector('.tool-time, .tool-card-time, .tool-elapsed');
-            const sec = parseFloat(el?.textContent || '0');
-            return sum + (isNaN(sec) ? 0 : sec);
-        }, 0);
-        const startedAt = (streamingMsg as any)._startedAt as number | undefined;
-        const turnStartedAt = store.get('currentTurnStartedAt');
-        const totalElapsed = typeof elapsedSec === 'number' && elapsedSec > 0
-            ? elapsedSec
-            : (turnStartedAt ? Math.max(0, (Date.now() - turnStartedAt) / 1000) : (startedAt ? Math.max(0, (Date.now() - startedAt) / 1000) : toolElapsed));
-        const metaHtml = [
-            totalElapsed > 0 ? `<span class="execution-meta">${this.formatDuration(totalElapsed)}</span>` : '',
-            messageTokens > 0 ? `<span class="execution-meta">${formatTokenCount(messageTokens)} tokens</span>` : '',
-        ].filter(Boolean).join('\n');
-
         const drawer = createElement('div', 'execution-drawer');
         const header = createElement('button', 'execution-drawer-header');
         header.type = 'button';
+        this.removeExecutionMetaChips(streamingMsg);
         header.innerHTML =
             `<span class="execution-title">Processed</span>` +
-            metaHtml +
             `<span class="execution-chevron">&rsaquo;</span>`;
 
         const body = createElement('div', 'execution-drawer-body');
@@ -1824,6 +1978,7 @@ export const Messages = {
             if (index < allTurns.length) {
                 requestAnimationFrame(renderBatch);
             } else {
+                this.refreshAssistantActionVisibility();
                 smartScroll(messagesDiv);
             }
         };
@@ -1848,8 +2003,6 @@ export const Messages = {
                 header.type = 'button';
                 header.innerHTML = [
                     `<span class="execution-title">Processed</span>`,
-                    meta.elapsedSec ? `<span class="execution-meta">${this.formatDuration(Number(meta.elapsedSec))}</span>` : '',
-                    meta.tokens ? `<span class="execution-meta">${formatTokenCount(Number(meta.tokens))} tokens</span>` : '',
                     `<span class="execution-chevron">&rsaquo;</span>`,
                 ].filter(Boolean).join('\n');
                 drawer.appendChild(header);
@@ -1867,6 +2020,13 @@ export const Messages = {
             content.innerHTML = this.enhanceTaskChecklists(this.stripRawToolCalls(turn.assistantHtml || ''));
             msg.appendChild(content);
             this.rebindHistoryCopyButtons(msg);
+            this.attachAssistantActions(
+                msg,
+                { text: user.text || '', images: user.images || null },
+                {
+                    elapsedSec: Number(meta.elapsedSec || 0) || undefined,
+                }
+            );
             messagesDiv.appendChild(msg);
     },
 
@@ -1904,6 +2064,16 @@ export const Messages = {
         this.rebindHistorySnapshotInteractions(wrap, turn.meta?.details || []);
         this.rebindHistoryCopyButtons(wrap);
         for (const node of nodes) {
+            if (node.classList.contains('msg-assistant')) {
+                const user = turn.user || {};
+                this.attachAssistantActions(
+                    node,
+                    { text: user.text || '', images: user.images || null },
+                    {
+                        elapsedSec: Number(turn.snapshot?.elapsedSec || turn.meta?.elapsedSec || 0) || undefined,
+                    }
+                );
+            }
             messagesDiv.appendChild(node);
         }
         this.renderHistoryDiffFallback(turn, messagesDiv);
@@ -1980,6 +2150,7 @@ export const Messages = {
 
     sanitizeHistorySnapshot(root: HTMLElement): void {
         root.querySelectorAll('script, iframe, object, embed, link, meta, style').forEach(el => el.remove());
+        this.removeExecutionMetaChips(root);
         const urlAttrs = new Set(['href', 'src', 'xlink:href', 'formaction', 'action']);
         root.querySelectorAll<HTMLElement>('*').forEach(el => {
             if (el.tagName === 'FORM') {
@@ -1992,6 +2163,7 @@ export const Messages = {
                 if (
                     name.startsWith('on') ||
                     name === 'srcdoc' ||
+                    name === 'data-reasoning-text' ||
                     urlAttrs.has(name) && !this.isSafeHistorySnapshotUrl(value) ||
                     /^\s*(?:javascript|data|vbscript|file|blob):/i.test(value)
                 ) {
@@ -1999,6 +2171,10 @@ export const Messages = {
                 }
             }
         });
+    },
+
+    removeExecutionMetaChips(root: ParentNode): void {
+        root.querySelectorAll('.execution-drawer .execution-meta').forEach(el => el.remove());
     },
 
     isSafeHistorySnapshotUrl(value: string): boolean {
@@ -2036,7 +2212,7 @@ export const Messages = {
             if (!reasoningText) return;
             (block as any)._reasoningText = reasoningText;
             (block as any)._reasoningTrimmed = block.dataset.reasoningTrimmed === 'true';
-            block.dataset.reasoningText = reasoningText;
+            delete block.dataset.reasoningText;
             block.dataset.reasoningTrimmed = (block as any)._reasoningTrimmed ? 'true' : 'false';
             block.title = t('thinking.expand.title');
             this.renderThinkingBlock(block, block.classList.contains('show'), false);
@@ -2222,7 +2398,10 @@ export const Messages = {
     },
 
     previewHistoryDetail(detail: any, maxLen = 120): string {
-        const text = String(detail?.body || '')
+        const sourceText = detail?.type === 'reasoning'
+            ? sanitizeMessageReasoningForDisplay(String(detail?.body || ''), false)
+            : String(detail?.body || '');
+        const text = sourceText
             .replace(/\[reasoning compacted for context\]/gi, '')
             .replace(/\[reasoning omitted for context\]/gi, '')
             .replace(/\[Earlier reasoning trimmed[^\]]*\]/gi, '')
@@ -2253,7 +2432,9 @@ export const Messages = {
                 (preview ? `<span class="history-detail-preview">${escapeHtml(preview)}</span>` : '') +
                 (elapsed > 0 ? `<span class="history-detail-time">${this.formatDuration(elapsed)}</span>` : '');
             const body = createElement('pre', 'history-detail-body');
-            const bodyText = String(detail.body || '').trim() || '(empty)';
+            const bodyText = detail.type === 'reasoning'
+                ? sanitizeMessageReasoningForDisplay(String(detail.body || ''), false)
+                : String(detail.body || '').trim() || '(empty)';
             body.textContent = bodyText;
             if (detail.isError) item.classList.add('history-detail-error');
             item.appendChild(summary);

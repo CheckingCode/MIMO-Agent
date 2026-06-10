@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.7.0 (2026-06-11)
+
+### Features
+- Added assistant reply footer actions for copy, retry, contextual continue, and feedback, with archived actions hidden until hover to avoid layout jumps.
+- Added a header context-usage badge with staged colors and exact token counts on hover.
+- Added clickable URL and local file-path links in rendered summaries, including Windows paths inside Markdown tables.
+- Saved the MIMO message-handling policy as project documentation and wired routing behavior for common user-message categories.
+
+### Improvements
+- Improved MiMo-series model identification, friendly error explanations, and interruption recovery so failures distinguish agent, model, API, local environment, and user-action causes where possible.
+- Refined task, confirmation, feedback, preference, and product-experience routing so complex tasks build a framework before staged execution and verification.
+- Updated built-in skills with clearer output conventions, including richer Git commit summaries with a one-line summary and bullet details.
+- Relaxed Safe Mode networking for explicit public HTTP/HTTPS downloads after URL safety checks while keeping internal/unsafe targets blocked or reviewed.
+- Allowed workspace-outside files to be opened for read-oriented navigation, while external mutations are guarded with backup creation.
+- Improved web search reliability with a DuckDuckGo-first path and Bing fallback.
+
+### Fixes
+- Fixed stale `Processed` metadata chips by removing elapsed/token clutter from completed execution drawers and history snapshots.
+- Fixed `mimo-v2.5-pro` context metadata to use the corrected 1M context window.
+- Fixed UI confusion where reply footer source labels always showed `AGENT` and added clearer action placement on the left side.
+- Improved send/stop icon rendering and feedback hover affordance.
+
 ## 1.6.9 (2026-06-10)
 
 ### Improvements

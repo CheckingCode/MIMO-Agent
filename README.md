@@ -33,7 +33,7 @@
 
 MiMo Agent 是一个运行在 VS Code 内的本地 AI 编程助手。它可以阅读项目、搜索代码、编辑文件、运行命令、查看 Git diff、管理多轮任务，并通过 OpenAI 兼容 API 调用小米 MiMo、DeepSeek、OpenAI 或自定义模型端点。
 
-当前版本：`v1.6.9`。
+当前版本：`v1.7.0`。
 
 ## ✨ 当前核心能力
 
@@ -361,6 +361,14 @@ npm run compile
 
 详细版本记录见 [CHANGELOG.md](CHANGELOG.md)。
 
+`v1.7.0` 重点：
+
+- 回复底部新增复制、重试、继续和反馈等轻量操作按钮，旧回复悬停显示，减少界面跳动。
+- 标题栏新增上下文占用百分比和完整 token 提示，便于判断长对话风险。
+- 输出总结中的 URL 和本地文件路径会渲染为可点击链接，本地路径可直接在 VS Code 中打开。
+- 增强 MIMO 系列模型识别、错误归因和中断恢复提示，尽量区分 Agent、模型、API、本地环境和用户操作原因。
+- Safe Mode 放宽普通公开下载，保留 SSRF/内网目标拦截；workspace 外文件默认可读，写改删前会更谨慎并备份。
+
 `v1.6.9` 重点：
 
 - Shell 命令和 workflow 子任务会输出更明确的执行目的与阶段进度，减少只有 Bash 卡片但缺少说明的情况。
@@ -381,7 +389,16 @@ npm run compile
 
 MiMo Agent is a local AI coding assistant for VS Code. It can inspect your workspace, search code, edit files, run commands, review Git diffs, manage long-running tasks, and call Xiaomi MiMo, DeepSeek, OpenAI, or custom OpenAI-compatible endpoints.
 
-Current version: `v1.6.9`.
+Current version: `v1.7.0`.
+
+## 1.7.0 Highlights
+
+- Added assistant reply actions for copy, retry, contextual continue, and feedback with hover-only archived controls.
+- Added a live context-usage badge in the header with staged colors and exact token totals on hover.
+- Made final summaries more actionable by hyperlinking safe URLs and local Windows file paths.
+- Improved MiMo-model error attribution and interruption recovery so failures explain whether the likely source is the agent, model, API, local environment, or user action.
+- Refined Safe Mode networking: normal public downloads are allowed after URL checks, while unsafe/internal network targets remain blocked.
+- Allowed opening files outside the workspace for read-oriented navigation while keeping external mutation paths guarded by backup behavior.
 
 ## ✨ Highlights
 

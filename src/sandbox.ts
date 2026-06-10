@@ -16,6 +16,7 @@ import { exec } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import { checkUrlSSRF } from './safety';
 
 // ── Types ──
 
@@ -51,6 +52,46 @@ export const DEFAULT_SANDBOX_CONFIG: SandboxConfig = {
     logging: true,
     networkDisabled: true,
 };
+
+// Runtime config holder (can be updated by user confirmation)
+let runtimeNetworkDisabled: boolean | null = null;
+
+/**
+ * Get the effective networkDisabled setting.
+ * Priority: runtime override > VSCode config > static config
+ */
+export function getEffectiveNetworkDisabled(staticConfig: boolean): boolean {
+    // Runtime override takes highest priority
+    if (runtimeNetworkDisabled !== null) {
+        return runtimeNetworkDisabled;
+    }
+    // Check VSCode configuration (persisted after user allows)
+    try {
+        const vscode = require('vscode');
+        const config = vscode.workspace.getConfiguration('mimo');
+        const configValue: boolean | undefined = config.get('sandbox.networkDisabled');
+        if (configValue !== undefined) {
+            return configValue;
+        }
+    } catch {
+        // Not in VSCode context, fall through to static config
+    }
+    return staticConfig;
+}
+
+/**
+ * Enable network access at runtime (called after user confirmation).
+ */
+export function enableNetworkAccess(): void {
+    runtimeNetworkDisabled = false;
+}
+
+/**
+ * Reset network setting back to static config.
+ */
+export function resetNetworkSetting(): void {
+    runtimeNetworkDisabled = null;
+}
 
 // ── Layer 3: Git Auto-Snapshot ──
 
@@ -246,7 +287,7 @@ export async function safeModeExec(
     timeoutSec: number,
     maxOutput: number,
     config: SandboxConfig,
-): Promise<{ stdout: string; stderr: string; code: number; timedOut?: boolean }> {
+): Promise<{ stdout: string; stderr: string; code: number; timedOut?: boolean; networkBlocked?: boolean }> {
     const timeoutMs = timeoutSec * 1000;
 
     // Layer 1: Pre-execution safety re-check (prevent bypass via indirect calls)
@@ -255,8 +296,18 @@ export async function safeModeExec(
     if (safety.blocked) {
         return { stdout: '', stderr: `Blocked: ${safety.reason}`, code: 1 };
     }
-    if (config.networkDisabled && isNetworkCommand(command)) {
-        return { stdout: '', stderr: 'Blocked: network commands are disabled in Safe Mode', code: 1 };
+    const networkDisabled = getEffectiveNetworkDisabled(config.networkDisabled);
+    const networkAssessment = assessNetworkCommand(command);
+    if (networkAssessment.isNetwork && !networkAssessment.allowed && networkAssessment.urls.length > 0) {
+        return { stdout: '', stderr: `Blocked: ${networkAssessment.reason}`, code: 1 };
+    }
+    if (networkDisabled && networkAssessment.isNetwork && !networkAssessment.allowed) {
+        return {
+            stdout: '',
+            stderr: `[NETWORK_BLOCKED] 网络命令在安全模式下被禁用。\n命令: ${command}\n如需启用网络访问，请回复 "允许网络" 或 "enable network"。`,
+            code: 1,
+            networkBlocked: true,
+        };
     }
 
     // Layer 3: Git auto-snapshot before destructive operations
@@ -312,6 +363,46 @@ function isDestructiveCommand(command: string): boolean {
 
 function isNetworkCommand(command: string): boolean {
     return /\b(curl|wget|aria2c|ssh|scp|sftp|ftp|telnet|nc|ncat|netcat|Invoke-WebRequest|Invoke-RestMethod)\b/i.test(command);
+}
+
+function extractHttpUrls(command: string): string[] {
+    const matches = String(command || '').match(/https?:\/\/[^\s"'`<>|)]+/gi) || [];
+    return matches.map(url => url.replace(/[.,;:]+$/g, '')).filter(Boolean);
+}
+
+export function assessNetworkCommand(command: string): { isNetwork: boolean; allowed: boolean; reason: string; urls: string[] } {
+    if (!isNetworkCommand(command)) {
+        return { isNetwork: false, allowed: true, reason: '', urls: [] };
+    }
+
+    const urls = extractHttpUrls(command);
+    if (urls.length === 0) {
+        return {
+            isNetwork: true,
+            allowed: false,
+            reason: 'No explicit public HTTP/HTTPS URL was found, so MiMo cannot pre-check the target.',
+            urls,
+        };
+    }
+
+    for (const url of urls) {
+        const check = checkUrlSSRF(url);
+        if (!check.safe) {
+            return {
+                isNetwork: true,
+                allowed: false,
+                reason: `${check.reason || 'Unsafe URL'} (${url})`,
+                urls,
+            };
+        }
+    }
+
+    return {
+        isNetwork: true,
+        allowed: true,
+        reason: 'Only explicit public HTTP/HTTPS URLs were found.',
+        urls,
+    };
 }
 
 function execPromise(

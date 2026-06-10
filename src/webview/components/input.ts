@@ -6,6 +6,13 @@ import { bus } from '../core/bus';
 import { vscode } from '../core/vscode';
 import { t } from '../core/i18n';
 
+function sendButtonIcon(kind: 'send' | 'stop'): string {
+    if (kind === 'stop') {
+        return '<svg class="send-icon send-icon-stop" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>';
+    }
+    return '<svg class="send-icon send-icon-plane" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4.5 12 19.5 5.5 13 20 10.6 13.4 4.5 12Z"/><path d="M10.6 13.4 19.5 5.5"/></svg>';
+}
+
 export const InputArea = {
     mount(): void {
         const input = document.getElementById('input') as HTMLTextAreaElement;
@@ -364,6 +371,7 @@ export const InputArea = {
             this.updateSendButton();
         });
         this.updateReasoningButton();
+        this.updateSendButton();
         vscode.getSettings();
     },
 
@@ -589,15 +597,15 @@ export const InputArea = {
         const hasQueued = store.get('queuedMsgs').length > 0;
 
         if (busy && !hasText) {
-            sendBtn.textContent = '';
+            sendBtn.innerHTML = sendButtonIcon('stop');
             sendBtn.className = 'stop-btn';
             sendBtn.title = t('stop');
         } else if (busy && !hasText && hasQueued) {
-            sendBtn.textContent = '▶';
+            sendBtn.innerHTML = sendButtonIcon('send');
             sendBtn.className = 'run-queued-btn';
             sendBtn.title = t('queue.run.next.title');
         } else {
-            sendBtn.textContent = '▶';
+            sendBtn.innerHTML = sendButtonIcon('send');
             sendBtn.className = '';
             sendBtn.title = busy ? t('send.queued') : t('send');
         }

@@ -52,6 +52,13 @@ const translations: Record<Lang, Record<string, string>> = {
         'retry': '↻ Retry',
         'copied': 'Copied!',
         'copy': 'Copy',
+        'assistant.actions': 'Message actions',
+        'assistant.action.copy': 'Copy',
+        'assistant.action.retry': 'Retry',
+        'assistant.action.continue': 'Continue',
+        'assistant.action.feedback': 'Feedback',
+        'assistant.feedback.prompt': 'This reply seems problematic. Please review the previous reply, distinguish whether the issue came from the AGENT workflow, tool execution, or model response, then give a corrected answer.',
+        'assistant.continue.prompt': 'Please continue the unfinished work from the previous reply and avoid repeating completed steps.',
         'thinking': 'Thinking...',
         'thinking.compact': 'Thinking... {count} chars captured{trimmed}. Click to expand.',
         'thinking.trimmed': ', older text compacted',
@@ -212,6 +219,13 @@ const translations: Record<Lang, Record<string, string>> = {
         'retry': '↻ 重试',
         'copied': '已复制!',
         'copy': '复制',
+        'assistant.actions': '消息操作',
+        'assistant.action.copy': '复制',
+        'assistant.action.retry': '重试',
+        'assistant.action.continue': '继续',
+        'assistant.action.feedback': '反馈',
+        'assistant.feedback.prompt': '这条回复可能有问题。请复盘上一条回复，区分问题来自 AGENT 工作流、工具执行还是大模型回答，然后给出修正后的回答。',
+        'assistant.continue.prompt': '请继续完成上一条回复中未完成的任务，避免重复已经完成的步骤。',
         'thinking': '思考中...',
         'thinking.compact': '思考中... 已捕获 {count} 字符{trimmed}。点击展开。',
         'thinking.trimmed': '，较早内容已压缩',
@@ -348,6 +362,13 @@ export function setLang(lang: Lang): void {
         const key = el.getAttribute('data-i18n-title');
         if (key) {
             el.setAttribute('title', t(key));
+        }
+    });
+
+    document.querySelectorAll('[data-i18n-aria-label]').forEach(el => {
+        const key = el.getAttribute('data-i18n-aria-label');
+        if (key) {
+            el.setAttribute('aria-label', t(key));
         }
     });
 }

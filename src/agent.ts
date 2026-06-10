@@ -91,6 +91,26 @@ export class MiMoAgent extends EventEmitter {
         return this.getProfile(endpointId)?.base_url || this.config.baseUrl;
     }
 
+    private isMimoRoute(conv?: ConversationState, endpointId?: string): boolean {
+        return this.isMimoModel(conv?.model || this.config.model)
+            || /xiaomimimo|mimo/i.test(this.getEndpointBaseUrl(endpointId));
+    }
+
+    private friendlyRouteError(error: Error | string, conv?: ConversationState, endpointId?: string): string {
+        return getFriendlyError(error, {
+            model: conv?.model || this.config.model,
+            baseUrl: this.getEndpointBaseUrl(endpointId),
+        });
+    }
+
+    private emitTerminalApiError(events: AgentEvents, errorText: string, conv?: ConversationState, endpointId?: string): void {
+        if (this.isMimoRoute(conv, endpointId)) {
+            events.onStatus('MiMo API 返回了可解释的中断信息，请查看上方原因和建议后继续。');
+            return;
+        }
+        events.onError(errorText);
+    }
+
     private getApiForEndpoint(endpointId?: string): MiMoAPI {
         const profile = this.getProfile(endpointId);
         if (!profile) return this.api;
@@ -338,6 +358,24 @@ export class MiMoAgent extends EventEmitter {
             if (this.isKnownUnsupportedChatModel(model)) continue;
             const caps = this.getModelCapabilities(model);
             if (!caps.tts) return model;
+        }
+        return null;
+    }
+
+    private findFallbackRouteForChat(currentModel: string, currentEndpointId = ''): { endpointId: string; model: string } | null {
+        const endpointCandidates = [
+            currentEndpointId,
+            this.config.activeRoute?.endpoint_id || '',
+            this.config.activeProviderProfile || '',
+            ...(this.config.providerProfiles || []).map(profile => profile.id || ''),
+        ];
+        const seen = new Set<string>();
+        for (const endpointId of endpointCandidates) {
+            const key = String(endpointId || '').trim();
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const model = this.findChatModel(currentModel, true, endpointId);
+            if (model) return { endpointId, model };
         }
         return null;
     }
@@ -952,7 +990,20 @@ export class MiMoAgent extends EventEmitter {
             const fs = require('fs');
             try {
                 const content = fs.readFileSync(pending.path, 'utf-8');
-                const newContent = content.split(pending.oldText).join(pending.newText);
+                let newContent: string;
+                if (typeof pending.lineStart === 'number' && typeof pending.lineEnd === 'number') {
+                    const lines = content.split('\n');
+                    const start = Math.max(1, Math.min(pending.lineStart, lines.length));
+                    const end = Math.max(start, Math.min(pending.lineEnd, lines.length));
+                    const before = lines.slice(0, start - 1);
+                    const after = lines.slice(end);
+                    newContent = [...before, ...pending.newText.split('\n'), ...after].join('\n');
+                } else if (typeof pending.oldText === 'string') {
+                    newContent = content.split(pending.oldText).join(pending.newText);
+                } else {
+                    pending.resolve('Edit failed: missing old_text or line range.');
+                    return;
+                }
                 fs.writeFileSync(pending.path, newContent, 'utf-8');
                 pending.resolve(`Replaced (approved by user)`);
             } catch (e: any) {
@@ -1059,31 +1110,51 @@ export class MiMoAgent extends EventEmitter {
     /**
      * Handle edit_file with preview: send diff to webview, wait for user approval.
      */
-    private handleEditPreview(args: Record<string, any>, events: AgentEvents): Promise<string> {
+    private handleEditPreview(args: Record<string, any>, events: AgentEvents, signal?: AbortSignal, convId?: string): Promise<string> {
         const fs = require('fs');
         const { isPathSafe, resolvePath } = require('./safety');
 
+        if (signal?.aborted || (convId && this.isStopping(convId, signal))) return Promise.resolve('(stopped by user)');
         const fullPath = resolvePath(args.path, this.config.workspace);
         const { safe, reason } = isPathSafe(fullPath, this.config.workspace);
         if (!safe) return Promise.resolve(`Safety: ${reason}`);
         if (!fs.existsSync(fullPath)) return Promise.resolve(`File not found: ${args.path}`);
 
         const content = fs.readFileSync(fullPath, 'utf-8');
-        const count = content.split(args.old_text).length - 1;
-        if (count === 0) return Promise.resolve('old_text not found. Ensure exact match including whitespace.');
+        const lines = content.split('\n');
+        let oldText: string | undefined;
+        let lineStart: number | undefined;
+        let lineEnd: number | undefined;
+        let count = 1;
+
+        if (args.line_start !== undefined && args.line_end !== undefined) {
+            lineStart = Math.max(1, Math.min(Number(args.line_start), lines.length));
+            lineEnd = Math.max(lineStart, Math.min(Number(args.line_end), lines.length));
+            oldText = lines.slice(lineStart - 1, lineEnd).join('\n');
+        } else {
+            if (typeof args.old_text !== 'string') {
+                return Promise.resolve('Error: old_text is required unless line_start/line_end are provided.');
+            }
+            oldText = args.old_text;
+            count = content.split(oldText).length - 1;
+            if (count === 0) return Promise.resolve('old_text not found. Ensure exact match including whitespace.');
+        }
 
         const previewId = `edit_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
         // Send preview to webview
-        events.onEditPreview?.(previewId, args.path, args.old_text, args.new_text, count);
+        events.onEditPreview?.(previewId, args.path, oldText || '', args.new_text, count);
 
         // Return a promise that resolves when user confirms or rejects
         return new Promise<string>((resolve) => {
             this.pendingEdits.set(previewId, {
                 previewId,
                 path: fullPath,
-                oldText: args.old_text,
+                oldText,
                 newText: args.new_text,
+                lineStart,
+                lineEnd,
+                convId,
                 resolve,
             });
         });
@@ -1092,10 +1163,11 @@ export class MiMoAgent extends EventEmitter {
     /**
      * Handle write_file with preview: send content to webview, wait for user approval.
      */
-    private handleWritePreview(args: Record<string, any>, events: AgentEvents): Promise<string> {
+    private handleWritePreview(args: Record<string, any>, events: AgentEvents, signal?: AbortSignal, convId?: string): Promise<string> {
         const fs = require('fs');
         const { isPathSafe, resolvePath } = require('./safety');
 
+        if (signal?.aborted || (convId && this.isStopping(convId, signal))) return Promise.resolve('(stopped by user)');
         const fullPath = resolvePath(args.path, this.config.workspace);
         const { safe, reason } = isPathSafe(fullPath, this.config.workspace);
         if (!safe) return Promise.resolve(`Safety: ${reason}`);
@@ -1113,13 +1185,14 @@ export class MiMoAgent extends EventEmitter {
                 previewId,
                 path: fullPath,
                 content: args.content,
+                convId,
                 resolve,
             });
         });
     }
 
     /** Handle ask_user tool: show question to user and wait for response */
-    private handleAskUser(args: Record<string, any>, events: AgentEvents): Promise<string> {
+    private handleAskUser(args: Record<string, any>, events: AgentEvents, convId?: string): Promise<string> {
         const previewId = `ask-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const question = args.question || '';
         const options = (args.options as string[]) || [];
@@ -1127,7 +1200,7 @@ export class MiMoAgent extends EventEmitter {
         events.onAskUser?.(previewId, question, options);
 
         return new Promise<string>((resolve) => {
-            this.pendingAsks.set(previewId, { previewId, resolve });
+            this.pendingAsks.set(previewId, { previewId, convId, resolve });
         });
     }
 
@@ -1487,12 +1560,32 @@ Updated summary:`;
     abort(convId?: string): void {
         if (convId) {
             this.stoppingConversations.add(convId);
+            this.resolvePendingInteractions(convId, 'Stopped by user');
             const ac = this.abortControllers.get(convId);
             if (ac) { ac.abort(); this.abortControllers.delete(convId); }
         } else {
             for (const [id] of this.abortControllers) this.stoppingConversations.add(id);
+            this.resolvePendingInteractions(undefined, 'Stopped by user');
             for (const [, ac] of this.abortControllers) ac.abort();
             this.abortControllers.clear();
+        }
+    }
+
+    private resolvePendingInteractions(convId: string | undefined, reason: string): void {
+        for (const [id, pending] of Array.from(this.pendingEdits.entries())) {
+            if (convId && pending.convId !== convId) continue;
+            this.pendingEdits.delete(id);
+            pending.resolve(reason);
+        }
+        for (const [id, pending] of Array.from(this.pendingWrites.entries())) {
+            if (convId && pending.convId !== convId) continue;
+            this.pendingWrites.delete(id);
+            pending.resolve(reason);
+        }
+        for (const [id, pending] of Array.from(this.pendingAsks.entries())) {
+            if (convId && pending.convId !== convId) continue;
+            this.pendingAsks.delete(id);
+            pending.resolve(reason);
         }
     }
 
@@ -2243,7 +2336,7 @@ Change strategy now:
         if (this.isRawShellCommandDraft(trimmed)) return true;
 
         const saysWillInspect = /(?:let me|i(?:'|’)ll|i will|i need to|first i|now i).{0,120}(?:inspect|check|read|list|search|look|open|scan|run|verify|diff)|(?:我来|我先|让我|先|现在|接下来).{0,120}(?:看看|查看|检查|读取|列出|浏览|搜索|找|运行|验证|确认|diff|审核)/i.test(trimmed);
-        const referencesToolTarget = /[A-Za-z]:[\\/]|(?:^|[\s"'`])\.{1,2}[\\/]|(?:read_file|list_directory|search_files|glob_files|git diff|git status|execute_command)|(?:\.pptx?|\.pdf|\.docx?|\.xlsx?|\.html?|\.tsx?|\.jsx?|\.ts|\.js|\.py|\.json|\.md)\b|(?:目录|文件|文件夹|项目|代码|改动|变更|diff|暂存|git|工作区|开题)/i.test(trimmed);
+        const referencesToolTarget = /[A-Za-z]:[\\/]|(?:^|[\s"'`])\.{1,2}[\\/]|(?:read_file|list_directory|search_files|glob_files|git diff|git status|execute_command)|(?:\.pptx?|\.pdf|\.docx?|\.xlsx?|\.html?|\.tsx?|\.jsx?|\.ts|\.js|\.py|\.json|\.md)\b|(?:目录|文件|文件夹|项目|代码|页面|网页|动画|效果|版本|现有版本|改动|变更|diff|暂存|git|工作区|开题)/i.test(trimmed);
         const asksUserToWait = /稍等|等我|马上|我先看|我检查后|after I|once I|let me first/i.test(trimmed);
         const tooShortToBeDeliverable = trimmed.length < 900;
 
@@ -2682,8 +2775,8 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
     ): Promise<string> {
         const effectiveConvId = convId || this.activeId;
         const chatStartedAt = Date.now();
-        const endpointId = this.getConversationEndpointId(conv);
-        const api = this.getApiForEndpoint(endpointId);
+        let endpointId = this.getConversationEndpointId(conv);
+        let api = this.getApiForEndpoint(endpointId);
         this.traceEvent(conv, 'chat.start', {
             inputChars: userInput.length,
             hasImages: !!images?.length,
@@ -2740,6 +2833,7 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
             emitSystemNote(`Model auto-switched: ${oldModel} -> ${fallbackModel} for chat`);
             events.onStatus(`Model auto-switched to ${fallbackModel} for chat`);
             events.onModelSwitched?.(this.encodeModelRoute(endpointId, fallbackModel), 'chat');
+            api = this.getApiForEndpoint(endpointId);
             this.saveConversations();
         }
 
@@ -2760,6 +2854,7 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
                 emitSystemNote(`Model auto-switched: ${oldModel} -> ${fallbackModel} for image support`);
                 events.onStatus(`Model auto-switched to ${fallbackModel} for vision`);
                 events.onModelSwitched?.(this.encodeModelRoute(endpointId, fallbackModel), 'image');
+                api = this.getApiForEndpoint(endpointId);
                 this.saveConversations();
             }
         }
@@ -2826,11 +2921,13 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
         // ── Intent Router: classify before tool loop (Auto mode only) ──
         // Plan/Polling/Adversarial modes skip routing — user already chose the mode.
         let taskComplexity: 'simple' | 'moderate' | 'complex' = 'moderate';
+        let routedIntent: IntentResult | null = null;
         try {
             if (conv.mode === 'auto') {
                 events.onStatus('分析意图...');
                 const quickIntent = quickClassifyIntent(userInput);
                 const intent = quickIntent || await classifyIntent(api, userInput, conv.model, signal);
+                routedIntent = intent;
                 this.traceEvent(conv, 'router.intent', {
                     category: intent.category,
                     needsTools: intent.needsTools,
@@ -2883,8 +2980,9 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
             if (this.isStopping(effectiveConvId, signal)) {
                 events.onDone('(stopped by user)');
             } else {
-                events.onDone(`Error: ${e.message}`);
-                events.onError(e.message);
+                const friendlyError = this.friendlyRouteError(e, conv, endpointId);
+                events.onDone(friendlyError);
+                this.emitTerminalApiError(events, friendlyError, conv, endpointId);
             }
             this.finishChat(effectiveConvId);
             return `(error: ${e.message})`;
@@ -2960,6 +3058,23 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
                 ? buildPersonaPrompt(this.systemPrompt, persona)
                 : this.systemPrompt;
             systemContent += `\n\n## Runtime Language Discipline\n${this.languageInstruction(userInput, conv)}`;
+            if (routedIntent) {
+                systemContent += `\n\n## Routed Message Handling\nCategory: ${routedIntent.category}\nNeeds tools: ${routedIntent.needsTools ? 'yes' : 'no'}\nComplexity: ${routedIntent.complexity || taskComplexity}\nPlan: ${routedIntent.plan || 'Proceed according to the message handling policy.'}`;
+                if (routedIntent.complexity === 'complex') {
+                    systemContent += `\n\nFor this complex task, first build a systematic execution framework: goal, acceptance criteria, affected modules, execution order, and validation points. Then execute phase by phase and validate key steps. Do not jump into scattered edits.`;
+                }
+                if (routedIntent.category === 'feedback') {
+                    systemContent += `\n\nFeedback handling: acknowledge the reported behavior, decide whether it is expected or a bug, attribute it to Agent/model/API/environment/user operation with evidence, and fix Agent/UI logic when appropriate.`;
+                } else if (routedIntent.category === 'preference') {
+                    systemContent += `\n\nPreference/rule handling: treat the message as an operating rule. If the user asked to save or implement it, update the relevant prompt/router/error/UI/tool code or documentation, then validate.`;
+                } else if (routedIntent.category === 'experience') {
+                    systemContent += `\n\nProduct reliability handling: analyze user-visible symptoms, system facts, trust impact, and engineering fixes. Avoid blaming the foundation model unless evidence points there.`;
+                } else if (routedIntent.category === 'context') {
+                    systemContent += `\n\nSupplemental context handling: merge the new evidence into the current task and update the diagnosis. Do not restart from scratch unless the evidence invalidates prior assumptions.`;
+                } else if (routedIntent.category === 'acknowledgement') {
+                    systemContent += `\n\nAcknowledgement handling: bind this short confirmation to the most recent pending plan, preview, permission, or recovery context before treating it as a new request.`;
+                }
+            }
             systemContent = this.appendMemoryPrompt(systemContent, userInput);
             if (this.isGitPushDeliveryRequest(userInput)) {
                 systemContent += `\n\n[Git delivery convergence]
@@ -3301,7 +3416,9 @@ Do not ask the user for clarification or confirmation during this run. If a choi
                     && !/context|too long/i.test(errorMessage);
                 if (maxTokensParamInvalid) {
                     const limit = 65536;
-                    const hint = `Model/API rejected max_tokens. Current configured max_tokens is ${this.config.maxTokens}; set Generation > Max Tokens to ${limit} or lower, then retry.`;
+                    const hint = this.isMimoRoute(conv, endpointId)
+                        ? this.friendlyRouteError(e, conv, endpointId)
+                        : `Model/API rejected max_tokens. Current configured max_tokens is ${this.config.maxTokens}; set Generation > Max Tokens to ${limit} or lower, then retry.`;
                     const summary = `${this.buildProgressSummary(conv, 'model generation parameter rejected by provider', {
                         round,
                         maxRounds: HARD_MAX_ROUNDS,
@@ -3310,7 +3427,7 @@ Do not ask the user for clarification or confirmation during this run. If a choi
 ${hint}`;
                     this.learnFromCompletedTurn(userInput, summary, events, memoryToolObservations);
                     events.onDone(summary);
-                    events.onError(hint);
+                    this.emitTerminalApiError(events, hint, conv, endpointId);
                     const lastMsg = conv.messages[conv.messages.length - 1];
                     if (lastMsg?.role === 'assistant' && !lastMsg.content && !lastMsg.tool_calls) {
                         conv.messages.pop();
@@ -3328,7 +3445,7 @@ ${hint}`;
                         });
                         this.learnFromCompletedTurn(userInput, summary, events, memoryToolObservations);
                         events.onDone(summary);
-                        events.onError('Rate limited');
+                        this.emitTerminalApiError(events, this.friendlyRouteError(e, conv, endpointId), conv, endpointId);
                         this.finishChat(effectiveConvId);
                         return summary;
                     }
@@ -3356,15 +3473,19 @@ ${hint}`;
                 }
                 // Context overflow — try aggressive compression
                 if (this.isModelUnsupportedError(e)) {
-                    const fallbackModel = this.findChatModel(conv.model, true, endpointId);
-                    if (fallbackModel) {
+                    const fallbackRoute = this.findFallbackRouteForChat(conv.model, endpointId);
+                    if (fallbackRoute) {
                         const oldModel = conv.model;
-                        conv.model = fallbackModel;
+                        const oldEndpointId = endpointId;
+                        endpointId = fallbackRoute.endpointId;
+                        conv.model = fallbackRoute.model;
                         conv.modelEndpointId = endpointId;
+                        api = this.getApiForEndpoint(endpointId);
                         this.saveConversations();
-                        events.onReasoning(`[Model fallback] ${oldModel} is not usable for chat on this endpoint. Switched to ${fallbackModel} and retrying.`);
-                        events.onStatus(`Model auto-switched to ${fallbackModel} for chat`);
-                        events.onModelSwitched?.(this.encodeModelRoute(endpointId, fallbackModel), 'chat');
+                        const routeNote = endpointId && endpointId !== oldEndpointId ? ` via ${endpointId}` : '';
+                        events.onReasoning(`[Model fallback] ${oldModel} is not usable for chat on this endpoint. Switched to ${fallbackRoute.model}${routeNote} and retrying.`);
+                        events.onStatus(`Model auto-switched to ${fallbackRoute.model} for chat`);
+                        events.onModelSwitched?.(this.encodeModelRoute(endpointId, fallbackRoute.model), 'chat');
                         const lastMsg = conv.messages[conv.messages.length - 1];
                         if (lastMsg?.role === 'assistant' && !lastMsg.content && !lastMsg.tool_calls) {
                             conv.messages.pop();
@@ -3374,15 +3495,18 @@ ${hint}`;
                     }
                     const configured = this.getModelList().join(', ');
                     const hint = `Current model: ${conv.model}. Check that this model exists on the configured baseUrl, that the API key has access, and that api.models is configured correctly. Available configured models: ${configured || '(none)'}.`;
+                    const friendlyHint = this.isMimoRoute(conv, endpointId)
+                        ? `${this.friendlyRouteError(e, conv, endpointId)}\n\n当前配置：model=${conv.model}; baseUrl=${this.getEndpointBaseUrl(endpointId)}; 已配置模型=${configured || '(none)'}`
+                        : `Model error: ${hint}`;
                     const summary = `${this.buildProgressSummary(conv, 'model access or compatibility error', {
                         round,
                         maxRounds: HARD_MAX_ROUNDS,
                         softMaxRounds: SOFT_MAX_ROUNDS,
                     })}
-Model error: ${hint}`;
+${friendlyHint}`;
                     this.learnFromCompletedTurn(userInput, summary, events, memoryToolObservations);
                     events.onDone(summary);
-                    events.onError(`Model error: ${hint}`);
+                    this.emitTerminalApiError(events, friendlyHint, conv, endpointId);
                     const lastMsg = conv.messages[conv.messages.length - 1];
                     if (lastMsg?.role === 'assistant' && !lastMsg.content && !lastMsg.tool_calls) {
                         conv.messages.pop();
@@ -3407,7 +3531,7 @@ Model error: ${hint}`;
                     }
                 }
                 // Model access error — suggest switching model
-                const friendlyError = getFriendlyError(e);
+                const friendlyError = this.friendlyRouteError(e, conv, endpointId);
                 const summary = `${this.buildProgressSummary(conv, 'task interrupted by API or runtime error', {
                     round,
                     maxRounds: HARD_MAX_ROUNDS,
@@ -3416,7 +3540,7 @@ Model error: ${hint}`;
 ${friendlyError}`;
                 this.learnFromCompletedTurn(userInput, summary, events, memoryToolObservations);
                 events.onDone(summary);
-                events.onError(e.message);
+                this.emitTerminalApiError(events, friendlyError, conv, endpointId);
                 const lastMsg = conv.messages[conv.messages.length - 1];
                 if (lastMsg?.role === 'assistant' && !lastMsg.content && !lastMsg.tool_calls) {
                     conv.messages.pop();
@@ -3588,12 +3712,12 @@ ${friendlyError}`;
                     result = await this.handleSpawnSubAgent(args, events, signal, effectiveConvId);
                 } else if (tc.function.name === 'ask_user') {
                     result = this.canPauseForUserDecision(conv)
-                        ? await this.handleAskUser(args, events)
+                        ? await this.handleAskUser(args, events, effectiveConvId)
                         : this.buildAutonomousAskUserResult(args, conv.mode);
                 } else if (tc.function.name === 'edit_file' && events.onEditPreview && conv.mode === 'polling') {
-                    result = await this.handleEditPreview(args, events);
+                    result = await this.handleEditPreview(args, events, signal, effectiveConvId);
                 } else if (tc.function.name === 'write_file' && events.onWritePreview && conv.mode === 'polling') {
-                    result = await this.handleWritePreview(args, events);
+                    result = await this.handleWritePreview(args, events, signal, effectiveConvId);
                 } else if (tc.function.name === 'run_workflow') {
                     result = await this.handleWorkflow(args, events, signal, effectiveConvId);
                 } else {

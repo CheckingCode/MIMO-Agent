@@ -3,7 +3,7 @@ import * as path from 'path';
 import { exec } from 'child_process';
 import { ToolDefinition } from './api';
 import { isCommandSafe, isPathSafe, isSensitiveFile, resolvePath, checkSSRF, checkUrlSSRF } from './safety';
-import { SandboxConfig, DEFAULT_SANDBOX_CONFIG, sandboxExec, formatSandboxResult, safeModeExec, gitAutoSnapshot, gitRollback } from './sandbox';
+import { SandboxConfig, DEFAULT_SANDBOX_CONFIG, sandboxExec, formatSandboxResult, safeModeExec, gitAutoSnapshot, gitRollback, enableNetworkAccess } from './sandbox';
 import {
     DependencyInstallConfig,
     DependencyInstallDecision,
@@ -147,7 +147,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         type: 'function',
         function: {
             name: 'read_file',
-            description: 'Read file content with line numbers. Use offset/limit to read only what you need.',
+            description: 'Read file content with line numbers. Default limit is 500 lines, maximum is 1000 lines per call. A few hundred lines is normal, not a large-file failure; use offset/limit to read additional ranges.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -163,7 +163,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         type: 'function',
         function: {
             name: 'write_file',
-            description: 'Create or overwrite a file. Creates parent directories automatically. Prefer this for generated files or long HTML/CSS/JS/text content instead of embedding large content in shell commands.',
+            description: 'Create or overwrite a file. Creates parent directories automatically. Payloads up to 6MB are supported. Prefer this for generated files or long HTML/CSS/JS/text content instead of embedding large content in shell commands.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -178,7 +178,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         type: 'function',
         function: {
             name: 'edit_file',
-            description: 'Replace exact text in a file. old_text must uniquely match. If multiple matches, you will see match locations and must provide more context.',
+            description: 'Replace exact text or a line range in a file. old_text must uniquely match. For medium files or large blocks, prefer line_start/line_end with new_text instead of claiming the file is too large.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -186,8 +186,10 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
                     old_text: { type: 'string', description: 'Exact text to find (include surrounding context for uniqueness)' },
                     new_text: { type: 'string', description: 'Replacement text' },
                     replace_all: { type: 'boolean', description: 'Replace ALL occurrences (default: false)' },
+                    line_start: { type: 'integer', description: '1-based start line for line-range replacement; use together with line_end and new_text' },
+                    line_end: { type: 'integer', description: '1-based end line for line-range replacement; use together with line_start and new_text' },
                 },
-                required: ['path', 'old_text', 'new_text'],
+                required: ['path', 'new_text'],
             },
         },
     },
@@ -304,7 +306,8 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
             parameters: {
                 type: 'object',
                 properties: {
-                    message: { type: 'string', description: 'Commit message' },
+                    message: { type: 'string', description: 'Multi-line commit message. First line is a concise summary, then a blank line, then bullet points describing key changes and validation.' },
+                    add_all: { type: 'boolean', description: 'Stage all changes before committing. Defaults to false for safety.' },
                 },
                 required: ['message'],
             },
@@ -437,7 +440,7 @@ export async function executeTool(
             case 'git_push': return await toolGitPush(args, workspace);
             case 'git_pull': return await toolGitPull(args, workspace);
             // Web search
-            case 'web_search': return await toolWebSearch(args, maxOutput);
+            case 'web_search': return await toolWebSearchWithFallback(args, maxOutput);
             // Browser automation
             case 'browser_open': {
                 const urlCheck = checkBrowserUrl(args.url);
@@ -773,6 +776,30 @@ function atomicWriteTextFile(fullPath: string, content: string): void {
     }
 }
 
+function isInsideWorkspace(filePath: string, workspace: string): boolean {
+    const rel = path.relative(path.resolve(workspace), path.resolve(filePath));
+    return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+function backupExternalPathIfNeeded(fullPath: string, workspace: string, action: string): string {
+    const resolved = path.resolve(fullPath);
+    if (isInsideWorkspace(resolved, workspace) || !fs.existsSync(resolved)) return '';
+
+    const stamp = `${new Date().toISOString().replace(/[:.]/g, '-')}-${Math.random().toString(36).slice(2, 8)}`;
+    const driveSafe = resolved.replace(/^[A-Za-z]:/, m => m[0]).replace(/[\\/:\s]+/g, '_').replace(/^_+/, '');
+    const backupRoot = path.join(workspace, '.mimo', 'backups', stamp);
+    const backupPath = path.join(backupRoot, `${driveSafe}.bak`);
+    fs.mkdirSync(path.dirname(backupPath), { recursive: true });
+
+    const stat = fs.statSync(resolved);
+    if (stat.isDirectory()) {
+        fs.cpSync(resolved, backupPath, { recursive: true, force: false, errorOnExist: true });
+    } else {
+        fs.copyFileSync(resolved, backupPath, fs.constants.COPYFILE_EXCL);
+    }
+    return `\n[backup] ${action} outside workspace; backup saved to ${backupPath}`;
+}
+
 /**
  * Wrap external content with security markers to prevent prompt injection.
  */
@@ -904,8 +931,9 @@ async function toolWriteFile(args: Record<string, any>, workspace: string): Prom
         if (isSensitiveFile(args.path)) return `Safety: Cannot write sensitive file: ${args.path}`;
 
         const bytes = ensureWritePayloadSize(content, args.path || full);
+        const backupNote = backupExternalPathIfNeeded(full, workspace, 'write_file');
         atomicWriteTextFile(full, content);
-        return `Written ${args.path} (${content.length} chars, ${content.split('\n').length} lines, ${bytes} bytes)`;
+        return `Written ${args.path} (${content.length} chars, ${content.split('\n').length} lines, ${bytes} bytes)${backupNote}`;
     } catch (error: any) {
         return `Tool error: ${error?.message || String(error)}`;
     }
@@ -929,6 +957,7 @@ async function toolEditFile(args: Record<string, any>, workspace: string): Promi
         const after = lines.slice(end);
         const result = [...before, ...newLines, ...after].join('\n');
         ensureWritePayloadSize(result, args.path || full);
+        backupExternalPathIfNeeded(full, workspace, 'edit_file');
         atomicWriteTextFile(full, result);
         return `Replaced lines ${start}-${end} (${end - start + 1} → ${newLines.length} lines) in ${args.path}`;
     }
@@ -993,11 +1022,12 @@ async function toolEditFile(args: Record<string, any>, workspace: string): Promi
         const parts = content.split(oldText);
         const newContent = parts.join(args.new_text);
         ensureWritePayloadSize(newContent, args.path || full);
+        const backupNote = backupExternalPathIfNeeded(full, workspace, 'edit_file');
         atomicWriteTextFile(full, newContent);
         // Find the line number for the report
         const matchIdx = content.indexOf(oldText);
         const lineNum = content.substring(0, matchIdx).split('\n').length;
-        return `Replaced at line ${lineNum} in ${args.path}`;
+        return `Replaced at line ${lineNum} in ${args.path}${backupNote}`;
     }
 
     // Multiple matches
@@ -1005,8 +1035,9 @@ async function toolEditFile(args: Record<string, any>, workspace: string): Promi
         const parts = content.split(oldText);
         const newContent = parts.join(args.new_text);
         ensureWritePayloadSize(newContent, args.path || full);
+        const backupNote = backupExternalPathIfNeeded(full, workspace, 'edit_file');
         atomicWriteTextFile(full, newContent);
-        return `Replaced all ${count} occurrences in ${args.path}`;
+        return `Replaced all ${count} occurrences in ${args.path}${backupNote}`;
     }
 
     // Multiple matches, no replace_all — show locations with context
@@ -1392,6 +1423,39 @@ async function toolExecuteCommand(
 
     try {
         const result = await safeModeExec(command, workspace, timeoutSec, maxOutput, effectiveConfig);
+
+        // Handle network blocked - ask user for permission to enable
+        if (result.networkBlocked) {
+            try {
+                const vscode = require('vscode');
+                const confirm = await vscode.window.showWarningMessage(
+                    `[MiMo] 网络访问请求\n\n命令: ${command}\n\nMiMo 需要网络权限来执行此操作。\n是否允许？（本次及后续请求）`,
+                    '允许',
+                    '拒绝'
+                );
+                if (confirm === '允许') {
+                    enableNetworkAccess();
+                    // Also persist to settings
+                    const config = vscode.workspace.getConfiguration('mimo');
+                    await config.update('sandbox.networkDisabled', false, vscode.ConfigurationTarget.Global);
+                    // Re-execute the command with network enabled
+                    const retryResult = await safeModeExec(command, workspace, timeoutSec, maxOutput, effectiveConfig);
+                    let retryOutput = retryResult.stdout.trim();
+                    if (retryResult.stderr?.trim()) retryOutput += `\n[stderr] ${retryResult.stderr.trim()}`;
+                    if (!retryOutput) retryOutput = '(no output)';
+                    if (retryResult.code !== 0) retryOutput += `\n[exit code: ${retryResult.code}]`;
+                    if (retryResult.timedOut) {
+                        retryOutput += `\n[timeout: command exceeded ${timeoutSec}s]`;
+                    }
+                    return retryOutput;
+                }
+                return '已拒绝网络访问。如需下载文件，请在设置中启用 mimo.sandbox.networkDisabled。';
+            } catch {
+                // Not in VSCode context, return the blocked message
+                return result.stderr;
+            }
+        }
+
         let output = result.stdout.trim();
         if (result.stderr?.trim()) output += `\n[stderr] ${result.stderr.trim()}`;
         if (!output) output = '(no output)';
@@ -1601,11 +1665,13 @@ async function toolDeleteFile(args: Record<string, any>, workspace: string): Pro
         // Only allow deleting empty directories
         const entries = fs.readdirSync(full);
         if (entries.length > 0) return `Directory not empty: ${args.path}. Use execute_command with rm -r for non-empty directories.`;
+        const backupNote = backupExternalPathIfNeeded(full, workspace, 'delete_file');
         fs.rmdirSync(full);
-        return `Deleted directory: ${args.path}`;
+        return `Deleted directory: ${args.path}${backupNote}`;
     } else {
+        const backupNote = backupExternalPathIfNeeded(full, workspace, 'delete_file');
         fs.unlinkSync(full);
-        return `Deleted file: ${args.path}`;
+        return `Deleted file: ${args.path}${backupNote}`;
     }
 }
 
@@ -1620,8 +1686,10 @@ async function toolMoveFile(args: Record<string, any>, workspace: string): Promi
 
     const dstDir = path.dirname(dstFull);
     if (!fs.existsSync(dstDir)) fs.mkdirSync(dstDir, { recursive: true });
+    const srcBackupNote = backupExternalPathIfNeeded(srcFull, workspace, 'move_file source');
+    const dstBackupNote = backupExternalPathIfNeeded(dstFull, workspace, 'move_file destination');
     fs.renameSync(srcFull, dstFull);
-    return `Moved: ${args.source} -> ${args.destination}`;
+    return `Moved: ${args.source} -> ${args.destination}${srcBackupNote}${dstBackupNote}`;
 }
 
 async function toolCopyFile(args: Record<string, any>, workspace: string): Promise<string> {
@@ -1636,9 +1704,10 @@ async function toolCopyFile(args: Record<string, any>, workspace: string): Promi
 
     const dstDir = path.dirname(dstFull);
     if (!fs.existsSync(dstDir)) fs.mkdirSync(dstDir, { recursive: true });
+    const backupNote = backupExternalPathIfNeeded(dstFull, workspace, 'copy_file destination');
     fs.copyFileSync(srcFull, dstFull);
     const size = fs.statSync(dstFull).size;
-    return `Copied: ${args.source} -> ${args.destination} (${size} bytes)`;
+    return `Copied: ${args.source} -> ${args.destination} (${size} bytes)${backupNote}`;
 }
 
 async function toolGetFileInfo(args: Record<string, any>, workspace: string): Promise<string> {
@@ -1712,9 +1781,12 @@ async function toolGitCommit(args: Record<string, any>, workspace: string): Prom
     // Default: add_all is false (must explicitly set to true)
     // This prevents accidentally committing sensitive files
     const addAll = args.add_all === true;
+    const repoPath = args.path ? resolvePath(args.path, workspace) : workspace;
+    const { safe, reason } = isPathSafe(repoPath, workspace);
+    if (!safe) return `Safety: ${reason}`;
 
     // Check if .gitignore exists
-    const gitignorePath = path.join(workspace, '.gitignore');
+    const gitignorePath = path.join(repoPath, '.gitignore');
     if (!fs.existsSync(gitignorePath)) {
         return '⚠️ 工作区没有 .gitignore 文件。建议先创建 .gitignore 以避免提交不需要的文件（如 node_modules、.env 等）。';
     }
@@ -1722,7 +1794,7 @@ async function toolGitCommit(args: Record<string, any>, workspace: string): Prom
     if (addAll) {
         // Check for sensitive files before adding all
         try {
-            const statusResult = await execPromise('git status --porcelain', 10, workspace);
+            const statusResult = await execPromise('git status --porcelain', 10, repoPath);
             const files = statusResult.stdout.split('\n').filter(l => l.trim());
 
             const sensitiveFiles = files.filter(f => {
@@ -1745,8 +1817,20 @@ async function toolGitCommit(args: Record<string, any>, workspace: string): Prom
             return `git add failed:\n${addResult}`;
         }
     }
-    const msg = shellEscape(args.message);
-    return runGit(args, workspace, `commit -m "${msg}"`);
+    const message = String(args.message || '').replace(/\x00/g, '').trim();
+    if (!message) return 'Git error: commit message is empty.';
+
+    let messagePath = '';
+    try {
+        const gitPathResult = await execPromise('git rev-parse --git-path MIMO_COMMIT_MESSAGE', 10, repoPath);
+        messagePath = path.resolve(repoPath, gitPathResult.stdout.trim() || '.git/MIMO_COMMIT_MESSAGE');
+        fs.writeFileSync(messagePath, message.endsWith('\n') ? message : `${message}\n`, 'utf8');
+        return runGit(args, workspace, `commit -F "${shellEscape(messagePath)}"`);
+    } finally {
+        if (messagePath) {
+            try { fs.unlinkSync(messagePath); } catch { /* best effort cleanup */ }
+        }
+    }
 }
 
 async function toolGitPush(args: Record<string, any>, workspace: string): Promise<string> {
@@ -1830,6 +1914,111 @@ async function toolWebSearch(args: Record<string, any>, maxOutput: number): Prom
     } catch (e: any) {
         return `Web search failed: ${e.message}`;
     }
+}
+
+async function toolWebSearchWithFallback(args: Record<string, any>, _maxOutput: number): Promise<string> {
+    const query = encodeURIComponent(args.query || '');
+    const maxResults = Math.max(1, Math.min(10, Number(args.max_results || 5)));
+    if (!query) return 'Web search failed: query is required.';
+
+    const attempts: Array<{
+        name: string;
+        url: string;
+        parse: (html: string, limit: number) => Array<{ title: string; url: string; snippet: string }>;
+    }> = [
+        { name: 'DuckDuckGo', url: `https://html.duckduckgo.com/html/?q=${query}`, parse: parseDuckDuckGoResults },
+        { name: 'Bing', url: `https://www.bing.com/search?q=${query}`, parse: parseBingResults },
+    ];
+
+    const errors: string[] = [];
+    for (const attempt of attempts) {
+        try {
+            const html = await fetchUrlContent(attempt.url, 15000);
+            const results = attempt.parse(html, maxResults);
+            if (results.length > 0) {
+                return results.map((r, i) =>
+                    `${i + 1}. ${r.title}\n   URL: ${r.url}${r.snippet ? '\n   ' + r.snippet : ''}`
+                ).join('\n\n');
+            }
+            errors.push(`${attempt.name}: no parseable results`);
+        } catch (e: any) {
+            errors.push(`${attempt.name}: ${e?.message || String(e) || 'unknown error'}`);
+        }
+    }
+
+    return `Web search failed. Tried ${attempts.map(a => a.name).join(', ')}.\n${errors.join('\n')}`;
+}
+
+function stripSearchHtml(value: string): string {
+    return decodeSearchHtml(String(value || '')
+        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim());
+}
+
+function decodeSearchHtml(value: string): string {
+    return String(value || '')
+        .replace(/&amp;/g, '&')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;|&apos;/g, "'")
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&#(\d+);/g, (_m, n) => {
+            const code = Number(n);
+            return Number.isFinite(code) ? String.fromCharCode(code) : '';
+        })
+        .replace(/&#x([0-9a-f]+);/gi, (_m, n) => {
+            const code = parseInt(n, 16);
+            return Number.isFinite(code) ? String.fromCharCode(code) : '';
+        });
+}
+
+function parseDuckDuckGoResults(html: string, maxResults: number): Array<{ title: string; url: string; snippet: string }> {
+    const results: Array<{ title: string; url: string; snippet: string }> = [];
+    const resultRegex = /<a[^>]+class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
+    let match;
+    while ((match = resultRegex.exec(html)) !== null && results.length < maxResults) {
+        let resultUrl = decodeSearchHtml(match[1]);
+        const urlMatch = resultUrl.match(/uddg=([^&]+)/);
+        if (urlMatch) resultUrl = decodeURIComponent(urlMatch[1]);
+        const title = stripSearchHtml(match[2]);
+        const snippet = stripSearchHtml(match[3]);
+        if (title && resultUrl) results.push({ title, url: resultUrl, snippet });
+    }
+
+    if (results.length === 0) {
+        const fallbackRegex = /href="[^"]*uddg=([^"&]+)[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
+        while ((match = fallbackRegex.exec(html)) !== null && results.length < maxResults) {
+            const resultUrl = decodeURIComponent(decodeSearchHtml(match[1]));
+            const title = stripSearchHtml(match[2]);
+            if (title && resultUrl && !resultUrl.includes('duckduckgo.com')) {
+                results.push({ title, url: resultUrl, snippet: '' });
+            }
+        }
+    }
+
+    return results;
+}
+
+function parseBingResults(html: string, maxResults: number): Array<{ title: string; url: string; snippet: string }> {
+    const results: Array<{ title: string; url: string; snippet: string }> = [];
+    const itemRegex = /<li[^>]+class="b_algo"[\s\S]*?<\/li>/gi;
+    let item;
+    while ((item = itemRegex.exec(html)) !== null && results.length < maxResults) {
+        const block = item[0];
+        const link = block.match(/<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>\s*<\/h2>/i);
+        if (!link) continue;
+        const resultUrl = decodeSearchHtml(link[1]);
+        const title = stripSearchHtml(link[2]);
+        const snippetMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+        const snippet = snippetMatch ? stripSearchHtml(snippetMatch[1]) : '';
+        if (title && /^https?:\/\//i.test(resultUrl) && !/bing\.com/i.test(resultUrl)) {
+            results.push({ title, url: resultUrl, snippet });
+        }
+    }
+    return results;
 }
 
 function fetchUrlContent(url: string, timeout: number, _redirectCount = 0): Promise<string> {
@@ -1975,8 +2164,9 @@ function readNotebookFile(filePath: string, workspace: string): { notebook: Note
     }
 }
 
-function writeNotebookFile(fullPath: string, notebook: Notebook): string {
+function writeNotebookFile(fullPath: string, notebook: Notebook, workspace?: string): string {
     try {
+        if (workspace) backupExternalPathIfNeeded(fullPath, workspace, 'notebook_write');
         fs.writeFileSync(fullPath, JSON.stringify(notebook, null, 1), 'utf-8');
         return 'OK';
     } catch (e: any) {
@@ -2061,7 +2251,7 @@ async function toolEditNotebookCell(args: Record<string, any>, workspace: string
         notebook.cells[idx].execution_count = null;
     }
 
-    const writeResult = writeNotebookFile(fullPath, notebook);
+    const writeResult = writeNotebookFile(fullPath, notebook, workspace);
     if (writeResult !== 'OK') return writeResult;
     return `Edited cell ${idx} in ${args.path} (${args.content.split('\n').length} lines)`;
 }
@@ -2088,7 +2278,7 @@ async function toolInsertNotebookCell(args: Record<string, any>, workspace: stri
 
     notebook.cells.splice(insertIdx, 0, newCell);
 
-    const writeResult = writeNotebookFile(fullPath, notebook);
+    const writeResult = writeNotebookFile(fullPath, notebook, workspace);
     if (writeResult !== 'OK') return writeResult;
     return `Inserted ${cellType} cell at index ${insertIdx} in ${args.path}`;
 }
@@ -2104,7 +2294,7 @@ async function toolDeleteNotebookCell(args: Record<string, any>, workspace: stri
     }
 
     const removed = notebook.cells.splice(idx, 1)[0];
-    const writeResult = writeNotebookFile(fullPath, notebook);
+    const writeResult = writeNotebookFile(fullPath, notebook, workspace);
     if (writeResult !== 'OK') return writeResult;
     return `Deleted cell ${idx} (${removed.cell_type}) from ${args.path}. ${notebook.cells.length} cells remaining.`;
 }

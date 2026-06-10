@@ -39,6 +39,39 @@ export function filterReasoningNoise(text: string): string {
         .replace(/[ \t]{3,}/g, ' ');
 }
 
+export function sanitizeReasoningForDisplay(text: string, trimmed = false): string {
+    const filtered = filterReasoningNoise(text || '');
+    const safeStatusLines = filtered
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(line => /^\[[^\]\n]{1,120}\]/.test(line) || /^第\s*\d+\s*轮/.test(line))
+        .slice(0, 8);
+    const looksLikePrivateDraft =
+        filtered.length > 800 ||
+        /<!DOCTYPE|<html|<script|<\/style>|```|function\s+\w+|const\s+\w+|let\s+\w+|canvas|ctx\.|fuselage|coordinates?|Actually,|Let me|I need to|I should|The user wants|Here's my plan/i.test(filtered);
+
+    if (looksLikePrivateDraft) {
+        const lines = [
+            '内部推理已隐藏，仅保留执行进度。',
+            '原因：模型返回了较长的 reasoning_content，其中可能包含草稿、代码片段或链式推理，不适合作为用户可见内容。',
+            '请以工具卡片、文件变更和最终答复为准。',
+        ];
+        if (safeStatusLines.length > 0) {
+            lines.push('', ...safeStatusLines);
+        }
+        if (trimmed) {
+            lines.push('', '[较早思考内容已为流畅性压缩]');
+        }
+        return lines.join('\n');
+    }
+
+    const maxChars = 1200;
+    const clipped = filtered.length > maxChars
+        ? `${filtered.slice(0, maxChars)}\n\n[思考内容过长，已截断显示]`
+        : filtered;
+    return trimmed ? `${t('thinking.trimmed.prefix')}${clipped}` : clipped;
+}
+
 export function renderThinkingBlock(thinkBlock: HTMLElement, forceFull = false, replayHint = false): void {
     const datasetText = thinkBlock.dataset.reasoningText || '';
     const rawText = (thinkBlock as any)._reasoningText || datasetText;
@@ -47,9 +80,7 @@ export function renderThinkingBlock(thinkBlock: HTMLElement, forceFull = false, 
         (thinkBlock as any)._reasoningText = rawText;
     }
     (thinkBlock as any)._reasoningTrimmed = trimmed;
-    if (rawText && thinkBlock.dataset.reasoningText !== rawText) {
-        thinkBlock.dataset.reasoningText = rawText;
-    }
+    delete thinkBlock.dataset.reasoningText;
     thinkBlock.dataset.reasoningTrimmed = trimmed ? 'true' : 'false';
     const toggle = thinkBlock.previousElementSibling as HTMLElement | null;
     if (rawText.length <= 30) {
@@ -74,13 +105,12 @@ export function renderThinkingBlock(thinkBlock: HTMLElement, forceFull = false, 
     const expanded = forceFull || thinkBlock.classList.contains('show');
     let displayText = rawText;
     if (expanded) {
-        const prefix = trimmed ? t('thinking.trimmed.prefix') : '';
         if (
             forceFull ||
             !(thinkBlock as any)._dedupedText ||
             now - ((thinkBlock as any)._lastDedupAt || 0) > REASONING_DEDUP_INTERVAL_MS
         ) {
-            (thinkBlock as any)._dedupedText = prefix + dedupReasoning(rawText);
+            (thinkBlock as any)._dedupedText = dedupReasoning(sanitizeReasoningForDisplay(rawText, trimmed));
             (thinkBlock as any)._lastDedupAt = now;
         }
         displayText = (thinkBlock as any)._dedupedText;

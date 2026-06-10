@@ -3,6 +3,7 @@
  */
 import { describe, it, expect, summary } from './test-runner';
 import { isCommandSafe, isCommandBlocked, isPathSafe, isSensitiveFile, checkUrlSSRF } from '../safety';
+import { assessNetworkCommand } from '../sandbox';
 import * as path from 'path';
 
 describe('isCommandSafe — always blocked', () => {
@@ -72,6 +73,26 @@ describe('checkUrlSSRF', () => {
     });
 });
 
+describe('assessNetworkCommand', () => {
+    it('should allow normal public downloads in safe mode', () => {
+        const result = assessNetworkCommand('curl -L https://example.com/file.zip -o file.zip');
+        expect(result.isNetwork).toBe(true);
+        expect(result.allowed).toBe(true);
+    });
+
+    it('should block unsafe network targets before running', () => {
+        const result = assessNetworkCommand('curl http://127.0.0.1:8080/secrets');
+        expect(result.isNetwork).toBe(true);
+        expect(result.allowed).toBe(false);
+    });
+
+    it('should require review when a network command has no explicit public URL', () => {
+        const result = assessNetworkCommand('ssh deploy@example.com');
+        expect(result.isNetwork).toBe(true);
+        expect(result.allowed).toBe(false);
+    });
+});
+
 describe('isSensitiveFile', () => {
     it('should detect sensitive extensions', () => {
         expect(isSensitiveFile('config.env')).toBe(true);
@@ -93,10 +114,10 @@ describe('isPathSafe', () => {
         expect(result.safe).toBe(true);
     });
 
-    it('should reject sibling paths that only share a string prefix', () => {
+    it('should allow sibling or other outside paths for read-oriented tools', () => {
         const sibling = path.join(path.dirname(workspace), `${path.basename(workspace)}-outside`, 'file.ts');
         const result = isPathSafe(sibling, workspace);
-        expect(result.safe).toBe(false);
+        expect(result.safe).toBe(true);
     });
 
     it('should not treat path-prefix siblings as protected directories', () => {

@@ -2,7 +2,7 @@
   "name": "mimo-agent",
   "displayName": "MiMo",
   "description": "AI coding agent powered by Xiaomi MiMo LLM",
-  "version": "1.6.9",
+  "version": "1.7.0",
   "publisher": "mimo-agent",
   "icon": "assets/mimo-agent-icon.png",
   "engines": {
@@ -251,6 +251,11 @@
           "type": "number",
           "default": 10,
           "description": "Tool call budget per persona per iteration"
+        },
+        "mimo.sandbox.networkDisabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Block network commands (curl, wget, etc.) in Safe Mode. When blocked, MiMo will ask for permission to enable network access."
         }
       }
     }
@@ -275,4 +280,3 @@
     "puppeteer-core": "^25.1.0"
   }
 }
-

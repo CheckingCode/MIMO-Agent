@@ -6,7 +6,12 @@ import { MiMoAPI } from './api';
 
 export type IntentCategory =
     | 'greeting'
+    | 'acknowledgement'
     | 'question'
+    | 'feedback'
+    | 'context'
+    | 'preference'
+    | 'experience'
     | 'code_task'
     | 'explanation'
     | 'refactor'
@@ -30,15 +35,20 @@ const ROUTER_PROMPT = `You are an intent classifier for a coding assistant.
 Respond with ONLY a JSON object:
 {
   "needsTools": true/false,
-  "category": "greeting|question|code_task|explanation|refactor|debug|search|review|config|creative|multi_step",
+  "category": "greeting|acknowledgement|question|feedback|context|preference|experience|code_task|explanation|refactor|debug|search|review|config|creative|multi_step",
   "plan": "brief description of what to do",
   "complexity": "simple|moderate|complex",
   "suggestedPersona": "programmer|pm|reviewer|architect|debugger|summarizer|analyst|null"
 }
 
 Rules:
-- Greetings or acknowledgements -> greeting, needsTools=false
+- Greetings or identity/capability questions -> greeting, needsTools=false
+- Short confirmations/authorizations such as "continue", "ok", "可以", "继续" -> acknowledgement, needsTools=false
 - Pure questions -> question, needsTools=false
+- Corrections or negative feedback about assistant behavior -> feedback, needsTools=true when they mention the agent/product/workflow/UI, otherwise false
+- Supplemental evidence such as screenshots, "图2", "补充一下", repro details -> context, needsTools=true if it refers to the current project/product issue
+- User preferences or operating rules such as "以后", "不要", "应当", "保存规则" -> preference, needsTools=true if they ask to save/implement the rule
+- Product reliability/experience issues such as trust, interruptions, stop button, red errors, repeated read/write failures -> experience, needsTools=true
 - Code changes or implementation -> code_task, needsTools=true
 - Explain code -> explanation, needsTools=false
 - Refactor / optimization -> refactor, needsTools=true
@@ -212,6 +222,24 @@ const QUICK_GREETINGS = new Set([
     ZH.hello, ZH.hi, ZH.hey, ZH.okay, ZH.received, ZH.thanks,
 ]);
 
+const IDENTITY_OR_CAPABILITY_SIGNAL =
+    /^(?:who are you|what can you do|are you there|hello[,，]?\s*are you there|\u4f60\u597d.*(?:\u5728\u5417|\u4f60\u662f\u8c01|\u4f60\u4f1a\u5e72\u4ec0\u4e48)|\u5728\u5417|\u4f60\u662f\u8c01|\u4f60\u4f1a\u5e72\u4ec0\u4e48|\u4f60\u80fd\u505a\u4ec0\u4e48)/i;
+
+const ACKNOWLEDGEMENT_SIGNAL =
+    /^(?:ok|okay|yes|yep|sure|continue|go on|proceed|approved|agree|allow|\u53ef\u4ee5|\u7ee7\u7eed|\u540c\u610f|\u786e\u8ba4|\u5141\u8bb8|\u5c31\u8fd9\u4e48\u505a|\u6ca1\u95ee\u9898|\u597d\u7684|\u884c)\s*[.!?\u3002\uff01\uff1f]*$/i;
+
+const FEEDBACK_SIGNAL =
+    /(?:\u660e\u663e.*(?:\u9519|\u9519\u8bef|\u4e0d\u5bf9)|\u8fd9.*(?:\u4e0d\u5bf9|\u4e0d\u6b63\u5e38|\u662f\u9519\u7684)|\u4e0d\u5e94\u8be5|\u4e0d\u80fd.*(?:\u5f52\u56e0|\u7529\u9505)|\u76f4\u63a5\u8df3\u7ea2|stop.*(?:button|btn|\u6309\u94ae).*?(?:gone|missing|\u6ca1\u4e86)|(?:button|btn|\u6309\u94ae).*?(?:gone|missing|\u6ca1\u4e86).*?(?:output|workflow|\u8f93\u51fa|\u5de5\u4f5c\u6d41)|obviously wrong|this is wrong|should not|not acceptable)/i;
+
+const CONTEXT_SUPPLEMENT_SIGNAL =
+    /(?:^\s*(?:\u8865\u5145|\u518d\u8865\u5145|\u53e6\u5916)|\u56fe\s*\d+|screenshot|repro|reproduce|\u622a\u56fe|\u590d\u73b0|\u6211\u770b\u4e86\u4e00\u4e0b|\u6211\u770b\u4e86|\u4e5f\u5c31|\u53ea\u6709.*(?:\u884c|\u51e0\u767e\u884c))/i;
+
+const PREFERENCE_SIGNAL =
+    /(?:\u4ee5\u540e|\u540e\u7eed|\u4e0b\u6b21|\u8bf7\u5c06.*(?:\u4fdd\u5b58|\u5199\u5165|\u8bb0\u4f4f)|\u4fdd\u5b58.*(?:\u89c4\u5219|\u65b9\u6848|\u7cfb\u7edf)|\u8bb0\u4f4f|\u5e94\u5f53|\u5e94\u8be5|\u5fc5\u987b|\u5c3d\u91cf|\u4e0d\u8981.*(?:\u76f4\u63a5|\u8df3\u7ea2|\u4e71)|complex.*task.*framework|save.*(?:rule|policy|preference)|remember this|from now on|should always|must always)/i;
+
+const EXPERIENCE_SIGNAL =
+    /(?:MIMO|MiMo|mimo|agent|AGENT|\u667a\u80fd\u4f53).{0,80}(?:\u4e2d\u65ad|\u4fe1\u4efb|\u4f53\u9a8c|\u8df3\u7ea2|\u8bfb\u5199\u5931\u8d25|\u6587\u4ef6\u592a\u5927|stop|workflow|busy|idle)|(?:\u4e3a\u5565|\u4e3a\u4ec0\u4e48|\u600e\u4e48).{0,60}(?:\u603b\u662f|\u4e00\u76f4|\u53cd\u590d).{0,60}(?:\u4e2d\u65ad|\u8bfb\u5199\u5931\u8d25|\u5199\u5165\u5931\u8d25|\u6587\u4ef6\u592a\u5927)|(?:trust|user experience|reliability|interruption|interrupted|red error|read\/write failure|workflow still running)/i;
+
 function looksLikeSimpleQuestion(text: string): boolean {
     const trimmed = text.trim();
     if (new RegExp(
@@ -240,6 +268,14 @@ function hasConcreteCodeSignal(text: string): boolean {
 
 function hasTaskVerb(text: string): boolean {
     return TASK_VERB_SIGNAL.test(text);
+}
+
+function shouldUseToolsForFeedback(text: string): boolean {
+    return /(?:MIMO|MiMo|mimo|agent|AGENT|\u667a\u80fd\u4f53|workflow|stop|busy|idle|\u5de5\u4f5c\u6d41|\u8df3\u7ea2|\u4e2d\u65ad|\u8bfb\u5199)/i.test(text);
+}
+
+function shouldUseToolsForPreference(text: string): boolean {
+    return /(?:\u4fdd\u5b58|\u5199\u5165|\u7cfb\u7edf|\u5b9e\u73b0|\u4fee\u6539|MIMO|MiMo|mimo|agent|AGENT|save|implement|code|system)/i.test(text);
 }
 
 function inferConcreteTaskComplexity(text: string): 'simple' | 'moderate' | 'complex' {
@@ -425,6 +461,28 @@ export function quickClassifyIntent(userInput: string): IntentResult | null {
         };
     }
 
+    if (IDENTITY_OR_CAPABILITY_SIGNAL.test(trimmed)) {
+        return {
+            needsTools: false,
+            category: 'greeting',
+            plan: 'Answer identity and capability directly',
+            complexity: 'simple',
+            suggestedPersona: null,
+            source: 'heuristic',
+        };
+    }
+
+    if (ACKNOWLEDGEMENT_SIGNAL.test(trimmed)) {
+        return {
+            needsTools: false,
+            category: 'acknowledgement',
+            plan: 'Treat as confirmation or acknowledgement; resume pending context if one exists',
+            complexity: 'simple',
+            suggestedPersona: null,
+            source: 'heuristic',
+        };
+    }
+
     if (QUICK_GREETINGS.has(lower) || trimmed.length <= 3 || /^[!?\uFF01\uFF1F\u3002\uFF0C\u201C\u201D\u3001~\-\s]+$/.test(trimmed)) {
         return {
             needsTools: false,
@@ -438,6 +496,53 @@ export function quickClassifyIntent(userInput: string): IntentResult | null {
 
     if (/^(?:can you help|help me|need help|帮帮我|帮我看下|看一下|看看这个|有空吗)$/i.test(trimmed)) {
         return null;
+    }
+
+    if (PREFERENCE_SIGNAL.test(trimmed)) {
+        return {
+            needsTools: shouldUseToolsForPreference(trimmed),
+            category: 'preference',
+            plan: 'Record or implement the user operating rule before continuing',
+            complexity: shouldUseToolsForPreference(trimmed) ? 'moderate' : 'simple',
+            suggestedPersona: 'pm',
+            source: 'heuristic',
+        };
+    }
+
+    if (EXPERIENCE_SIGNAL.test(trimmed)) {
+        return {
+            needsTools: true,
+            category: 'experience',
+            plan: 'Analyze the product reliability issue, attribute the cause, and improve the workflow if needed',
+            complexity: 'complex',
+            suggestedPersona: 'pm',
+            source: 'heuristic',
+        };
+    }
+
+    if (FEEDBACK_SIGNAL.test(trimmed)) {
+        const needsTools = shouldUseToolsForFeedback(trimmed);
+        return {
+            needsTools,
+            category: 'feedback',
+            plan: needsTools
+                ? 'Verify the reported behavior, attribute the issue, and fix the agent or UI logic if needed'
+                : 'Acknowledge the correction, explain the issue, and adjust the answer',
+            complexity: needsTools ? 'complex' : 'simple',
+            suggestedPersona: needsTools ? 'debugger' : null,
+            source: 'heuristic',
+        };
+    }
+
+    if (CONTEXT_SUPPLEMENT_SIGNAL.test(trimmed)) {
+        return {
+            needsTools: shouldUseToolsForFeedback(trimmed) || hasConcreteCodeSignal(trimmed),
+            category: 'context',
+            plan: 'Merge the supplemental evidence into the current task context and update the diagnosis',
+            complexity: 'moderate',
+            suggestedPersona: 'analyst',
+            source: 'heuristic',
+        };
     }
 
     if (looksLikeSimpleQuestion(trimmed)) {

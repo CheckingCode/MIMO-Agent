@@ -62,6 +62,33 @@ export const Header = {
                 if (convId) inp.setAttribute('data-conv-id', convId);
             }
         });
+        bus.on('contextUsage', (usage: any) => this.updateContextUsage(usage));
+    },
+
+    updateContextUsage(usage: any): void {
+        const el = document.getElementById('context-usage');
+        if (!el) return;
+        if (!usage || !Number.isFinite(Number(usage.percent))) {
+            el.style.display = 'none';
+            return;
+        }
+        const percent = Math.max(0, Math.round(Number(usage.percent)));
+        const used = usage.usedLabel || String(usage.used || 0);
+        const total = usage.totalLabel || String(usage.total || 0);
+        el.textContent = `${percent}%`;
+        el.title = `${used} / ${total} (${percent}%)`;
+        el.setAttribute('aria-label', `Context usage ${used} / ${total} (${percent}%)`);
+        el.style.display = '';
+        el.classList.remove('context-low', 'context-mid', 'context-high', 'context-critical');
+        if (percent <= 30) {
+            el.classList.add('context-low');
+        } else if (percent <= 60) {
+            el.classList.add('context-mid');
+        } else if (percent <= 80) {
+            el.classList.add('context-high');
+        } else {
+            el.classList.add('context-critical');
+        }
     },
 
     updateModeLabels(): void {

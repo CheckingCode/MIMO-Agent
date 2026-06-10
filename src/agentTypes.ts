@@ -90,8 +90,11 @@ export interface TrackedIssue {
 export interface PendingEdit {
     previewId: string;
     path: string;
-    oldText: string;
+    oldText?: string;
     newText: string;
+    lineStart?: number;
+    lineEnd?: number;
+    convId?: string;
     resolve: (result: string) => void;
 }
 
@@ -99,11 +102,13 @@ export interface PendingWrite {
     previewId: string;
     path: string;
     content: string;
+    convId?: string;
     resolve: (result: string) => void;
 }
 
 export interface PendingAsk {
     previewId: string;
+    convId?: string;
     resolve: (answer: string) => void;
 }
 

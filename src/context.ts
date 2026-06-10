@@ -64,7 +64,8 @@ export function resetTokenTracking(): void {
 
 // Model-specific context windows
 const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
-    'mimo-v2.5-pro': 32000,     // Conservative estimate
+    'mimo-v2.5-pro': 1000000,   // Official MiMo V2.5 Pro context window
+    'MiMo-V2.5-Pro': 1000000,
     'mimo-v2.5': 1000000,       // 1M context
     'MiMo-V2.5': 1000000,
     'mimo-v2.5-tts': 32000,
