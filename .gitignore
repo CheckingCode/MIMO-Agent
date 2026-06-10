@@ -5,3 +5,4 @@ releases/
 .vscode-test/
 pptx_extracted/
 html_output/
+generated-audio/

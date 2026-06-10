@@ -2,7 +2,7 @@
   "name": "mimo-agent",
   "displayName": "MiMo",
   "description": "AI coding agent powered by Xiaomi MiMo LLM",
-  "version": "1.6.7",
+  "version": "1.6.8",
   "publisher": "mimo-agent",
   "icon": "assets/mimo-agent-icon.png",
   "engines": {
@@ -21,8 +21,8 @@
     "chat",
     "code review",
     "refactor",
-    "中文",
-    "人工智能"
+    "chinese",
+    "artificial-intelligence"
   ],
   "galleryBanner": {
     "color": "#1a1a2e",
@@ -112,19 +112,19 @@
       "commandPalette": [
         {
           "command": "mimo-agent.chat",
-          "when": "*"
+          "when": "true"
         },
         {
           "command": "mimo-agent.clear",
-          "when": "*"
+          "when": "true"
         },
         {
           "command": "mimo-agent.settings",
-          "when": "*"
+          "when": "true"
         },
         {
           "command": "mimo-agent.switchModel",
-          "when": "*"
+          "when": "true"
         },
         {
           "command": "mimo-agent.explain",
@@ -176,7 +176,7 @@
         "mimo.maxRounds": {
           "type": "number",
           "default": 0,
-          "description": "Max tool-calling rounds. Use 0 for unlimited; stall and loop guards still apply."
+          "description": "Max tool-calling rounds. Use 0 to let the selected reasoning mode manage the runtime budget."
         },
         "mimo.context.autoCompress": {
           "type": "boolean",
@@ -245,7 +245,7 @@
         "mimo.adversarial.maxIterations": {
           "type": "number",
           "default": 3,
-          "description": "Max adversarial mode iterations (coder→pm rounds)"
+          "description": "Max adversarial mode iterations (coder/PM rounds)"
         },
         "mimo.adversarial.toolBudget": {
           "type": "number",

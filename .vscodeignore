@@ -12,7 +12,6 @@ MIMO_VS_*.md
 RE_EVALUATION*.md
 DEEP_ANALYSIS_AND_FIXES.md
 CLAUDE.md
-MIMO.md
 ADVERSARIAL_MODE_ANALYSIS.md
 CODE_REVIEW_REPORT.md
 MODES_ANALYSIS.md
@@ -22,5 +21,6 @@ docs/reports/**
 assets/readme-*.svg
 html_output/**
 pptx_extracted/**
+generated-audio/**
 Now-I-have-a-comprehensive-view-of-the-e-*.md
 *-2026-06-07T17-33-15.md

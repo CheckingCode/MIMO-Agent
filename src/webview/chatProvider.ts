@@ -6,9 +6,9 @@ import { exec } from 'child_process';
 import { MiMoAgent } from '../agent';
 import { AgentMode } from '../agent';
 import { HistoryManager } from '../history';
-import { saveSetting, getSettingsPanel, loadConfig } from '../config';
+import { readSettings, saveSetting, getSettingsPanel, loadConfig } from '../config';
 import { renderMarkdown } from '../markdown';
-import { ContentPart, ChatMessage, MiMoAPI } from '../api';
+import { ApiEndpointMode, ContentPart, ChatMessage, MiMoAPI, normalizeApiEndpointMode } from '../api';
 
 /**
  * Auto-clean old plan files in ~/.mimo/plans/
@@ -144,109 +144,40 @@ function looksLikePlanResponse(response: string): boolean {
         || (headings >= 1 && englishHits >= 2);
 }
 
-function summarizeTitleFromInput(input: string): string {
-    let text = (input || '')
+function pendingAiTitle(input: string): string {
+    return buildLocalConversationTitle(input);
+}
+
+function buildLocalConversationTitle(input: string): string {
+    const raw = String(input || '')
         .replace(/```[\s\S]*?```/g, ' ')
-        .replace(/!\[[^\]]*\]\([^)]+\)/g, ' ')
-        .replace(/\[[^\]]+\]\([^)]+\)/g, ' ')
         .replace(/https?:\/\/\S+/gi, ' ')
         .replace(/\s+/g, ' ')
         .trim();
-    text = text.replace(/^(请|帮我|麻烦|能不能|可以不可以|你帮我|我想|我希望|please|help me|can you|could you|i want to|i need to)\s*/i, '');
-    text = text.replace(/[，。！？；:：,.!?;]+$/g, '');
+    if (!raw) return vscode.env.language.startsWith('zh') ? '\u65b0\u4efb\u52a1' : 'New task';
 
-    const semanticTitle = summarizeSemanticTitle(text);
-    if (semanticTitle) return semanticTitle;
-
-    const rules: Array<[RegExp, string]> = [
-        [/搜(?:索|一下|一搜)?(.+?)(?:，|。|然后|并|并且|$)/, '搜索$1'],
-        [/查(?:找|一下|一查)?(.+?)(?:，|。|然后|并|并且|$)/, '查找$1'],
-        [/(?:修复|修一下|解决|排查)(.+?)(?:，|。|然后|并|并且|$)/, '修复$1'],
-        [/(?:优化|提升|加速)(.+?)(?:，|。|然后|并|并且|$)/, '优化$1'],
-        [/(?:生成|创建|新建)(.+?)(?:，|。|然后|并|并且|$)/, '生成$1'],
-        [/(?:写|撰写)(.+?)(?:，|。|然后|并|并且|$)/, '写作$1'],
-        [/(?:翻译)(.+?)(?:，|。|然后|并|并且|$)/, '翻译$1'],
-        [/(?:总结|概括)(.+?)(?:，|。|然后|并|并且|$)/, '总结$1'],
-        [/(?:解释|说明)(.+?)(?:，|。|然后|并|并且|$)/, '解释$1'],
-        [/(?:对比|比较)(.+?)(?:，|。|然后|并|并且|$)/, '对比$1'],
-    ];
-    for (const [pattern, format] of rules) {
-        const match = text.match(pattern);
-        if (match?.[1]) {
-            text = format.replace('$1', match[1].trim());
-            break;
-        }
+    const fileMatch = raw.match(/(?:^|[\s"'`])(?:[\w.-]+[\\/])+([\w.-]+\.[A-Za-z0-9]{1,8})\b/)
+        || raw.match(/\b([\w.-]+\.[A-Za-z0-9]{1,8})\b/);
+    const fileName = fileMatch?.[1] || '';
+    const lower = raw.toLowerCase();
+    const isChinese = /[\u4e00-\u9fff]/.test(raw) || vscode.env.language.startsWith('zh');
+    if (fileName) {
+        if (/fix|bug|error|\u62a5\u9519|\u4fee\u590d|\u9519\u8bef|\u95ee\u9898/.test(lower)) return isChinese ? `\u4fee\u590d ${fileName}` : `Fix ${fileName}`;
+        if (/optimi[sz]e|polish|beautify|style|layout|\u4f18\u5316|\u7f8e\u5316|\u8c03\u6574|\u6539\u8fdb/.test(lower)) return isChinese ? `\u4f18\u5316 ${fileName}` : `Optimize ${fileName}`;
+        if (/explain|why|how|\u89e3\u91ca|\u8bf4\u660e|\u5206\u6790/.test(lower)) return isChinese ? `\u89e3\u91ca ${fileName}` : `Explain ${fileName}`;
+        return isChinese ? `\u5904\u7406 ${fileName}` : `Update ${fileName}`;
     }
 
-    text = text
-        .replace(/(?:然后|并且|并|以此为题|作为|为我|给我).*/g, '')
-        .replace(/[《》"“”'`*_#\[\]{}()（）]/g, '')
-        .replace(/\s+/g, '');
-    if (!text) return 'New Chat';
-
-    const hasChinese = /[\u4e00-\u9fff]/.test(text);
-    const maxLen = hasChinese ? 18 : 48;
-    if (text.length <= maxLen) return text;
-    return text.slice(0, maxLen);
+    let title = raw
+        .replace(/^(?:please\s+)?(?:help\s+me\s+|can\s+you\s+|could\s+you\s+)/i, '')
+        .replace(/^(?:\u5e2e\u6211|\u8bf7|\u80fd\u4e0d\u80fd|\u53ef\u4ee5\u5e2e\u6211|\u9ebb\u70e6\u4f60)\s*/i, '')
+        .replace(/[\u3002\uff01\uff1f.!?]+$/g, '')
+        .trim();
+    title = sanitizeAiTitle(title) || (isChinese ? '\u65b0\u4efb\u52a1' : 'New task');
+    return title;
 }
 
-function summarizeSemanticTitle(text: string): string | null {
-    const clean = (text || '').trim();
-    if (!clean) return null;
-    const lower = clean.toLowerCase();
-
-    const topicRules: Array<[RegExp, string]> = [
-        [/\b(?:mimo|mmo\s*mimo|mmomimo)\b|米墨/i, 'MiMo'],
-        [/\bvs\s*code\b|\bvscode\b/i, 'VS Code 插件'],
-        [/\bwebview\b/i, 'Webview'],
-        [/\bagent\b|智能体/i, 'Agent'],
-        [/大模型|模型/i, '模型'],
-    ];
-    const issueRules: Array<[RegExp, string]> = [
-        [/无限循环|死循环|循环|loop|stall|卡住|卡死|重复工具|重复调用/i, '循环防护'],
-        [/标题|title|总结|摘要|summary/i, '标题总结'],
-        [/上传|图片|image|vision/i, '图片处理'],
-        [/stop|停止|中断|取消/i, '停止逻辑'],
-        [/webview|前端|界面|ui/i, '界面体验'],
-        [/报错|错误|异常|error|exception/i, '错误处理'],
-    ];
-
-    const topics = topicRules
-        .filter(([pattern]) => pattern.test(clean))
-        .map(([, label]) => label);
-    const issues = issueRules
-        .filter(([pattern]) => pattern.test(clean))
-        .map(([, label]) => label);
-
-    const uniqueTopics = Array.from(new Set(topics));
-    const uniqueIssues = Array.from(new Set(issues));
-    if (uniqueTopics.length === 0 && uniqueIssues.length === 0) return null;
-
-    let action = '分析';
-    if (/修复|修一下|解决|fix|repair/.test(lower)) {
-        action = '修复';
-    } else if (/优化|改进|提升|方案|建议|想法|optimi[sz]e|improve|proposal/.test(lower)) {
-        action = '优化';
-    } else if (/实现|新增|添加|create|add|implement/.test(lower)) {
-        action = '实现';
-    }
-
-    const topic = uniqueTopics[0] || '';
-    const issue = uniqueIssues.slice(0, 2).join('与');
-    if (topic && issue) return compactTitle(`${topic} ${issue}${action}`);
-    if (issue) return compactTitle(`${issue}${action}`);
-    return compactTitle(`${topic}${action}`);
-}
-
-function compactTitle(title: string): string {
-    const clean = title.replace(/\s+/g, ' ').trim();
-    if (!clean) return 'New Chat';
-    const hasChinese = /[\u4e00-\u9fff]/.test(clean);
-    const maxLen = hasChinese ? 18 : 48;
-    return clean.length > maxLen ? clean.slice(0, maxLen).trim() : clean;
-}
-
-function sanitizeAiTitle(raw: string, fallback: string): string {
+function sanitizeAiTitle(raw: string): string {
     let title = (raw || '')
         .replace(/```[\s\S]*?```/g, ' ')
         .replace(/^["'“”‘’《》\s]+|["'“”‘’《》\s]+$/g, '')
@@ -255,11 +186,11 @@ function sanitizeAiTitle(raw: string, fallback: string): string {
         .replace(/\s+/g, ' ')
         .trim();
     title = title.replace(/[。！？.!?]+$/g, '').trim();
-    if (!title) return fallback;
+    if (!title) return '';
     const hasChinese = /[\u4e00-\u9fff]/.test(title);
     const maxLen = hasChinese ? 18 : 48;
     if (title.length > maxLen) title = title.slice(0, maxLen).trim();
-    return title || fallback;
+    return title;
 }
 
 function sanitizeImages(input: unknown): Array<{ dataUrl: string; name: string; size: number }> | undefined {
@@ -290,6 +221,8 @@ function sanitizeSettings(input: unknown): Record<string, unknown> {
     if (baseUrl && /^https?:\/\//i.test(baseUrl)) out.base_url = baseUrl.replace(/\/+$/, '');
     const model = sanitizeString(s.model, 128);
     if (model !== undefined) out.model = model;
+    const apiEndpointRaw = sanitizeString(s.api_endpoint, 32);
+    if (apiEndpointRaw !== undefined) out.api_endpoint = normalizeApiEndpointMode(apiEndpointRaw);
     const activeProviderProfile = sanitizeString(s.active_provider_profile, 80);
     if (activeProviderProfile !== undefined) out.active_provider_profile = activeProviderProfile;
     if (s.active_route && typeof s.active_route === 'object') {
@@ -307,13 +240,23 @@ function sanitizeSettings(input: unknown): Record<string, unknown> {
                 const name = sanitizeString(raw.name, 120) || id;
                 const provider = sanitizeString(raw.provider, 80) || detectProviderFromBaseUrl(String(raw.base_url || ''));
                 const baseUrl = sanitizeString(raw.base_url, 2048);
+                const apiEndpoint = normalizeApiEndpointMode(raw.api_endpoint);
                 const profileModel = sanitizeString(raw.model, 128) || '';
                 const apiKey = sanitizeString(raw.api_key, 4096) || '';
                 const profileModels = Array.isArray(raw.models)
                     ? raw.models.map(v => sanitizeString(v, 128)).filter((v): v is string => !!v).slice(0, 100)
                     : [];
                 if (!id || !baseUrl || !/^https?:\/\//i.test(baseUrl)) return undefined;
-                return { id, name, provider, base_url: baseUrl.replace(/\/+$/, ''), model: profileModel, api_key: apiKey, models: profileModels };
+                return {
+                    id,
+                    name,
+                    provider,
+                    base_url: baseUrl.replace(/\/+$/, ''),
+                    api_endpoint: apiEndpoint,
+                    model: profileModel,
+                    api_key: apiKey,
+                    models: profileModels,
+                };
             })
             .filter(Boolean)
             .slice(0, 50);
@@ -346,6 +289,8 @@ function sanitizeSettings(input: unknown): Record<string, unknown> {
     if (maxOutputLen !== undefined) out.max_output_len = Math.round(maxOutputLen);
     const commandTimeout = sanitizeNumber(s.command_timeout, 5, 3600);
     if (commandTimeout !== undefined) out.command_timeout = Math.round(commandTimeout);
+    const completionSoundVolume = sanitizeNumber(s.ui_completion_sound_volume, 0, 100);
+    if (completionSoundVolume !== undefined) out.ui_completion_sound_volume = Math.round(completionSoundVolume);
     const dependencyLongTimeout = sanitizeNumber(s.dependency_install_long_timeout_sec, 60, 3600);
     if (dependencyLongTimeout !== undefined) out.dependency_install_long_timeout_sec = Math.round(dependencyLongTimeout);
     const memoryMaxItems = sanitizeNumber(s.memory_max_items, 10, 500);
@@ -364,7 +309,7 @@ function sanitizeSettings(input: unknown): Record<string, unknown> {
     if (sandboxCpu !== undefined) out.sandbox_cpu = Math.round(sandboxCpu);
     const sandboxMode = sanitizeString(s.sandbox_mode, 32);
     if (sandboxMode && ['safe', 'docker'].includes(sandboxMode)) out.sandbox_mode = sandboxMode;
-    for (const key of ['enable_thinking', 'sandbox_enabled', 'sandbox_git_snapshot', 'sandbox_logging', 'sandbox_network_disabled', 'dependency_install_enabled', 'memory_enabled', 'memory_learn_from_explicit_preferences']) {
+    for (const key of ['enable_thinking', 'ui_completion_sound', 'sandbox_enabled', 'sandbox_git_snapshot', 'sandbox_logging', 'sandbox_network_disabled', 'dependency_install_enabled', 'memory_enabled', 'memory_learn_from_explicit_preferences']) {
         const value = sanitizeBoolean(s[key]);
         if (value !== undefined) out[key] = value;
     }
@@ -524,7 +469,10 @@ interface SerializedChatPanelState {
     kind?: string;
     convIds?: string[];
     activeConvId?: string;
+    uiLang?: 'en' | 'zh';
 }
+
+type ReasoningEffort = 'turbo' | 'fast' | 'balanced' | 'deep' | 'max';
 
 export class ChatViewProvider {
     private panels = new Map<string, PanelState>();
@@ -533,6 +481,7 @@ export class ChatViewProvider {
     private history: HistoryManager;
     private cssContent: string = '';
     private replaySeq = 0;
+    private windowReasoningEffort: ReasoningEffort;
     private pendingHistorySaves = new Map<string, {
         title: string;
         messages: ChatMessage[];
@@ -547,7 +496,9 @@ export class ChatViewProvider {
         private readonly windowSessionId?: string,
     ) {
         this.agent = agent;
-        this.history = new HistoryManager(loadConfig().workspace, windowSessionId);
+        const initialConfig = loadConfig();
+        this.windowReasoningEffort = initialConfig.reasoningEffort;
+        this.history = new HistoryManager(initialConfig.workspace, windowSessionId);
         this.loadCss();
     }
 
@@ -620,8 +571,13 @@ export class ChatViewProvider {
             const current = this.agent.getModelSelectionValue(st.activeConvId);
             panel.webview.postMessage({ type: 'modelList', models, current });
             panel.webview.postMessage({ type: 'modelCaps', caps: this.agent.getModelCapabilities(current) });
-            panel.webview.postMessage({ type: 'settingsData', settings: getSettingsPanel() });
+            panel.webview.postMessage({ type: 'settingsData', settings: this.getWindowSettingsPanel() });
         }
+    }
+
+    handleSettingsApplied(): void {
+        this.windowReasoningEffort = loadConfig().reasoningEffort;
+        this.refreshModelLists();
     }
 
     setModelForOpenPanels(model: string): void {
@@ -637,6 +593,26 @@ export class ChatViewProvider {
             models: this.agent.getModelOptions(),
             current: this.agent.getModelSelectionValue(convId),
         };
+    }
+
+    private getPreferredUiLang(): 'en' | 'zh' {
+        const saved = readSettings()?.ui?.language;
+        if (saved === 'en' || saved === 'zh') return saved;
+        return vscode.env.language.startsWith('zh') ? 'zh' : 'en';
+    }
+
+    private getWindowSettingsPanel(): Record<string, any> {
+        const settings = getSettingsPanel();
+        return {
+            ...settings,
+            reasoning_effort: this.windowReasoningEffort,
+            enable_thinking: this.windowReasoningEffort === 'deep' || this.windowReasoningEffort === 'max',
+        };
+    }
+
+    private setWindowReasoningEffort(effort: ReasoningEffort): void {
+        this.windowReasoningEffort = effort;
+        this.agent.setReasoningEffort(effort);
     }
 
     private loadCss(): void {
@@ -655,14 +631,17 @@ export class ChatViewProvider {
 
     private async generateAiTitle(input: string): Promise<string | null> {
         const cfg = loadConfig();
-        if (!cfg.apiKey || !cfg.baseUrl) return null;
-        const fallback = summarizeTitleFromInput(input);
+        if (!cfg.apiKey || !cfg.baseUrl) {
+            console.warn('[MiMo] AI title generation skipped: API key or base URL missing.');
+            return null;
+        }
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 8_000);
         try {
-            const api = new MiMoAPI(cfg.apiKey, cfg.baseUrl);
+            console.log(`[MiMo] Generating AI title with model ${cfg.model || 'mimo-v2.5-pro'}`);
+            const api = new MiMoAPI(cfg.apiKey, cfg.baseUrl, cfg.apiEndpoint as ApiEndpointMode);
             const result = await api.chatCompletion({
-                model: 'mimo-v2',
+                model: cfg.model || 'mimo-v2.5-pro',
                 messages: [
                     {
                         role: 'system',
@@ -687,7 +666,8 @@ export class ChatViewProvider {
                 stream_options: null,
                 extra_body: { thinking: { type: 'disabled' } },
             }, controller.signal);
-            const title = sanitizeAiTitle(result, fallback);
+            const title = sanitizeAiTitle(result);
+            console.log(`[MiMo] AI title result: ${title || '(empty)'}`);
             return title && title !== 'New Chat' ? title : null;
         } catch (e) {
             console.warn('[MiMo] AI title generation failed:', e);
@@ -697,16 +677,28 @@ export class ChatViewProvider {
         }
     }
 
+    private shouldAutoTitleConversation(conv: import('../agentTypes').ConversationState): boolean {
+        const userMessages = conv.messages.filter(msg => msg.role === 'user').length;
+        const assistantMessages = conv.messages.filter(msg => msg.role === 'assistant').length;
+        return userMessages === 0 && assistantMessages === 0;
+    }
+
     private scheduleAiTitle(
         activeId: string,
         panel: vscode.WebviewPanel,
         text: string,
-        fallbackTitle: string,
+        pendingTitle: string,
     ): void {
         this.generateAiTitle(text).then((title) => {
-            if (!title || title === fallbackTitle) return;
+            if (!title) {
+                console.warn(`[MiMo] AI title generation produced no usable title for convId=${activeId}.`);
+                return;
+            }
             const conv = this.agent.getConversation(activeId);
-            if (!conv || conv.title !== fallbackTitle) return;
+            if (!conv || conv.title !== pendingTitle) {
+                console.log(`[MiMo] AI title ignored for convId=${activeId}: conversation title changed before result.`);
+                return;
+            }
             conv.title = title;
             const st = this.findStateByPanel(panel);
             panel.webview.postMessage({ type: 'tabList', tabs: this.getTabList(st?.convIds, activeId), activeId });
@@ -740,11 +732,13 @@ export class ChatViewProvider {
                 .slice(0, 20)
             : [];
         const activeConvId = sanitizeString(raw.activeConvId, 120);
+        const uiLang = raw.uiLang === 'en' ? 'en' : raw.uiLang === 'zh' ? 'zh' : undefined;
         if (convIds.length === 0 && !activeConvId) return undefined;
         return {
             kind: sanitizeString(raw.kind, 40),
             convIds,
             activeConvId,
+            uiLang,
         };
     }
 
@@ -837,7 +831,7 @@ export class ChatViewProvider {
 
             switch (msg.type) {
                 case 'ready': {
-                    const initialLang = vscode.env.language.startsWith('zh') ? 'zh' : 'en';
+                    const initialLang = restoredState?.uiLang || this.getPreferredUiLang();
                     post({ type: 'setLang', lang: initialLang });
 
                     // ALWAYS initialize 鈥?no dependency on pendingInit
@@ -871,6 +865,7 @@ export class ChatViewProvider {
                     const model = this.agent.getModelSelectionValue(myConvId);
                     post(this.modelListMessage(myConvId));
                     post({ type: 'modelCaps', caps: this.agent.getModelCapabilities(model) });
+                    post({ type: 'settingsData', settings: this.getWindowSettingsPanel() });
 
                     // 4. Skills
                     post({
@@ -1003,6 +998,7 @@ export class ChatViewProvider {
                     const stLang = this.panels.get(panelId);
                     const lang = msg.lang === 'en' ? 'en' : 'zh';
                     this.agent.setUiLang(lang, stLang?.activeConvId || convId);
+                    saveSetting('ui.language', lang);
                     break;
                 }
                 case 'clear': {
@@ -1200,8 +1196,15 @@ export class ChatViewProvider {
                     break;
                 }
                 case 'getSettings':
-                    post({ type: 'settingsData', settings: getSettingsPanel() });
+                    post({ type: 'settingsData', settings: this.getWindowSettingsPanel() });
                     break;
+                case 'setReasoningEffort': {
+                    const effort = sanitizeSettings({ reasoning_effort: msg.reasoning_effort }).reasoning_effort as ReasoningEffort | undefined;
+                    if (!effort) break;
+                    this.setWindowReasoningEffort(effort);
+                    post({ type: 'settingsData', settings: this.getWindowSettingsPanel() });
+                    break;
+                }
                 case 'openSettings':
                     vscode.commands.executeCommand('mimo-agent.settings');
                     break;
@@ -1209,6 +1212,7 @@ export class ChatViewProvider {
                     const s = sanitizeSettings(msg.settings);
                     if (s.api_key !== undefined) saveSetting('api.api_key', s.api_key);
                     if (s.base_url !== undefined) saveSetting('api.base_url', s.base_url);
+                    if (s.api_endpoint !== undefined) saveSetting('api.api_endpoint', s.api_endpoint);
                     if (s.model !== undefined) saveSetting('api.model', s.model);
                     if (s.models !== undefined) saveSetting('api.models', s.models);
                     if (s.active_provider_profile !== undefined) saveSetting('api.active_provider_profile', s.active_provider_profile);
@@ -1221,6 +1225,8 @@ export class ChatViewProvider {
                     if (s.enable_thinking !== undefined) saveSetting('agent.enable_thinking', s.enable_thinking);
                     if (s.max_output_len !== undefined) saveSetting('safety.max_output_len', s.max_output_len);
                     if (s.command_timeout !== undefined) saveSetting('safety.command_timeout', s.command_timeout);
+                    if (s.ui_completion_sound !== undefined) saveSetting('ui.completion_sound', s.ui_completion_sound);
+                    if (s.ui_completion_sound_volume !== undefined) saveSetting('ui.completion_sound_volume', s.ui_completion_sound_volume);
                     if (s.sandbox_enabled !== undefined) saveSetting('sandbox.enabled', s.sandbox_enabled);
                     if (s.sandbox_mode !== undefined) saveSetting('sandbox.mode', s.sandbox_mode);
                     if (s.sandbox_image !== undefined) saveSetting('sandbox.image', s.sandbox_image);
@@ -1237,14 +1243,19 @@ export class ChatViewProvider {
                     if (s.memory_learn_from_explicit_preferences !== undefined) saveSetting('memory.learn_from_explicit_preferences', s.memory_learn_from_explicit_preferences);
                     if (s.memory_max_items !== undefined) saveSetting('memory.max_items', s.memory_max_items);
                     if (s.memory_max_injected !== undefined) saveSetting('memory.max_injected', s.memory_max_injected);
+                    if (s.reasoning_effort !== undefined) {
+                        this.windowReasoningEffort = s.reasoning_effort as ReasoningEffort;
+                    }
                     // Hot-reload: re-read config and update agent in memory
                     const newConfig = loadConfig();
+                    newConfig.reasoningEffort = this.windowReasoningEffort;
+                    newConfig.enableThinking = this.windowReasoningEffort === 'deep' || this.windowReasoningEffort === 'max';
                     this.agent.updateConfig(newConfig);
                     this.refreshModelLists();
                     if (!msg.silent) {
                         post({ type: 'system', text: vscode.env.language.startsWith('zh') ? '设置已保存并生效。' : 'Settings saved and applied.' });
                     }
-                    post({ type: 'settingsData', settings: getSettingsPanel() });
+                    post({ type: 'settingsData', settings: this.getWindowSettingsPanel() });
                     break;
                 }
                 case 'openUrl': {
@@ -1429,17 +1440,21 @@ while ($true) { Start-Sleep -Milliseconds 100 }
             return;
         }
 
-        // Auto-title from first user message.
-        if (!conv.title || conv.title === 'New Chat' || conv.title === '新对话' || conv.title === 'Untitled') {
-            conv.title = summarizeTitleFromInput(text);
-            const fallbackTitle = conv.title;
+        // Auto-title from the first user message. Use message state instead of
+        // title text so restored placeholder/mojibake titles cannot skip AI naming.
+        if (this.shouldAutoTitleConversation(conv)) {
+            const pendingTitle = pendingAiTitle(text);
+            console.log(`[MiMo] Scheduling AI title for convId=${activeId}; previousTitle="${conv.title || ''}"`);
+            conv.title = pendingTitle;
 
             const st6 = this.findStateByPanel(panel);
             post({ type: 'tabList', tabs: this.getTabList(st6?.convIds, activeId), activeId });
             // Update the VSCode editor tab title + header input
             panel.title = conv.title;
             post({ type: 'convTitle', title: conv.title, convId: activeId });
-            this.scheduleAiTitle(activeId, panel, text, fallbackTitle);
+            this.scheduleAiTitle(activeId, panel, text, pendingTitle);
+        } else {
+            console.log(`[MiMo] AI title not scheduled for convId=${activeId}; existingMessages=${conv.messages.length}; title="${conv.title || ''}"`);
         }
 
         // Show user message with optional images
@@ -1516,11 +1531,11 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     totalToolCalls++;
                     post({ type: 'toolCallStart', name, args });
                 },
-                onToolCallEnd: (name: string, result: string, isError: boolean, elapsed: number) => {
+                onToolCallEnd: (name: string, result: string, isError: boolean, elapsed: number, gitDiff?: string) => {
                     const index = pendingToolArgs.findIndex(item => item.name === name);
                     const matched = index >= 0 ? pendingToolArgs.splice(index, 1)[0] : undefined;
                     this.recordTurnToolChange(turnToolChanges, name, matched?.args || {}, isError);
-                    post({ type: 'toolCallEnd', name, result: trimWebviewToolResult(result), isError, elapsed });
+                    post({ type: 'toolCallEnd', name, result: trimWebviewToolResult(result), isError, elapsed, gitDiff });
                 },
                 onRoundStart: (round: number) => {
                     reasoningPost.flush();
@@ -1935,11 +1950,11 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     totalToolCalls++;
                     post({ type: 'toolCallStart', name, args });
                 },
-                onToolCallEnd: (name, result, isError, elapsed) => {
+                onToolCallEnd: (name, result, isError, elapsed, gitDiff) => {
                     const index = pendingToolArgs.findIndex(item => item.name === name);
                     const matched = index >= 0 ? pendingToolArgs.splice(index, 1)[0] : undefined;
                     this.recordTurnToolChange(turnToolChanges, name, matched?.args || {}, isError);
-                    post({ type: 'toolCallEnd', name, result: trimWebviewToolResult(result), isError, elapsed });
+                    post({ type: 'toolCallEnd', name, result: trimWebviewToolResult(result), isError, elapsed, gitDiff });
                 },
                 onRoundStart: (round) => {
                     reasoningPost.flush();
@@ -2289,6 +2304,8 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         <div class="setting-group"><label>Command Timeout (s)</label><input type="number" id="set-command-timeout" min="5" max="3600"></div>
         <div class="setting-group"><label>Max Tool Output</label><input type="number" id="set-max-output-len" min="1000" max="200000"></div>
         <div class="setting-group"><label><input type="checkbox" id="set-thinking"> Enable thinking mode</label></div>
+        <div class="setting-group"><label><input type="checkbox" id="set-completion-sound" checked> <span data-i18n="settings.completion.sound">Play sound when a task completes</span></label></div>
+        <div class="setting-group"><label><span data-i18n="settings.completion.volume">Completion sound volume</span> <span id="set-completion-sound-volume-value">70%</span></label><input type="range" id="set-completion-sound-volume" min="0" max="100" step="5"></div>
         <div class="setting-group" style="margin-top:12px;padding-top:8px;border-top:1px solid var(--vscode-editorWidget-border)">
             <label style="font-weight:600;color:var(--vscode-foreground)">Memory</label>
         </div>

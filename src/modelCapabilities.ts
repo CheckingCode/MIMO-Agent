@@ -32,6 +32,8 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapabilities> = {
     'MiMo-V2-Omni': { vision: true, tts: false, reasoning: true, thinkingControl: true, description: 'MiMo Omni multimodal model' },
     'mimo-v2.5-tts': { vision: false, tts: true, reasoning: false, thinkingControl: true, description: 'MiMo speech model' },
     'MiMo-V2.5-TTS': { vision: false, tts: true, reasoning: false, thinkingControl: true, description: 'MiMo speech model' },
+    'mimo-v2.5-tts-voiceclone': { vision: false, tts: true, reasoning: false, thinkingControl: true, description: 'MiMo voice clone speech model' },
+    'mimo-v2.5-tts-voicedesign': { vision: false, tts: true, reasoning: false, thinkingControl: true, description: 'MiMo voice design speech model' },
     'mimo-v2.5-asr': { vision: false, tts: false, reasoning: false, thinkingControl: true, description: 'MiMo speech recognition model' },
     'MiMo-V2.5-ASR': { vision: false, tts: false, reasoning: false, thinkingControl: true, description: 'MiMo speech recognition model' },
     'mimo-v2-lite': { vision: false, tts: false, reasoning: false, thinkingControl: true, description: 'MiMo lightweight model' },

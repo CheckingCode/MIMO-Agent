@@ -355,8 +355,10 @@ body{font-family:'Inter',var(--vscode-font-family);font-size:var(--vscode-font-s
 .model-picker-trigger:hover{color:var(--vscode-foreground);background:rgba(255,255,255,.045)}
 .model-picker-trigger:active{transform:scale(.97)}
 #model-picker-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.model-picker-popup{display:none;position:absolute;right:0;bottom:calc(100% + 8px);width:min(360px,calc(100vw - 28px));max-height:430px;overflow-y:auto;background:var(--vscode-dropdown-background);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:8px;z-index:120;box-shadow:0 18px 44px rgba(0,0,0,.44)}
+.model-picker-popup{display:none;position:absolute;right:0;bottom:calc(100% + 8px);width:min(360px,calc(100vw - 28px));max-height:430px;overflow-y:auto;background:var(--vscode-dropdown-background);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:8px;z-index:120;box-shadow:0 18px 44px rgba(0,0,0,.44);left:auto;max-width:calc(100vw - 16px)}
 .model-picker-popup.show{display:block}
+.model-picker-popup.align-left{left:0;right:auto}
+.model-picker-popup.align-right{left:auto;right:0}
 .model-picker-group{padding:2px 0 7px;border-bottom:1px solid rgba(255,255,255,.08)}
 .model-picker-group:last-child{border-bottom:none;padding-bottom:0}
 .model-picker-group-title{padding:7px 8px 5px;color:var(--vscode-descriptionForeground);font-size:11px;font-weight:600;opacity:.75}

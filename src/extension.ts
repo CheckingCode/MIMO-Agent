@@ -12,6 +12,22 @@ let agent: MiMoAgent;
 let chatProvider: ChatViewProvider;
 let settingsProvider: SettingsProvider;
 
+function ensureDefaultUserRules(extensionPath: string, mimoHome: string): void {
+    const target = path.join(mimoHome, 'MIMO.md');
+    if (fs.existsSync(target)) return;
+
+    const source = path.join(extensionPath, 'MIMO.md');
+    if (!fs.existsSync(source)) return;
+
+    try {
+        fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
+    } catch (err: any) {
+        if (err?.code !== 'EEXIST') {
+            console.warn('[MiMo] Failed to initialize ~/.mimo/MIMO.md:', err);
+        }
+    }
+}
+
 export function activate(context: vscode.ExtensionContext) {
     const config = loadConfig();
     const windowSessionId = createWindowSessionId();
@@ -21,6 +37,7 @@ export function activate(context: vscode.ExtensionContext) {
     if (!fs.existsSync(mimoHome)) {
         fs.mkdirSync(mimoHome, { recursive: true });
     }
+    ensureDefaultUserRules(context.extensionPath, mimoHome);
 
     if (!config.apiKey) {
         vscode.window.showWarningMessage(
@@ -31,7 +48,7 @@ export function activate(context: vscode.ExtensionContext) {
     // Create agent synchronously (it's needed for commands)
     agent = new MiMoAgent(config, context.extensionPath, context, windowSessionId);
     chatProvider = new ChatViewProvider(context.extensionUri, agent, windowSessionId);
-    settingsProvider = new SettingsProvider(context.extensionUri, agent, () => chatProvider.refreshModelLists());
+    settingsProvider = new SettingsProvider(context.extensionUri, agent, () => chatProvider.handleSettingsApplied());
 
     context.subscriptions.push(
         vscode.window.registerWebviewPanelSerializer('mimo-agent.chat', {

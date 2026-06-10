@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.6.8 (2026-06-09)
+
+### Improvements
+- Added visible command-purpose narration for shell commands and richer workflow task progress so long runs no longer appear as unexplained Bash-only activity.
+- Expanded interrupted-run handoff summaries with validation status plus changed and inspected file context.
+
+### Fixes
+- Reduced personalized-instruction warning spam by allowing safety-scoped restrictions and documentation examples while still blocking instructions that disable core agent abilities.
+- Added instruction-validation warning de-duplication so unchanged project instructions are not reported every turn.
+
 ## 1.6.7 (2026-06-09)
 
 ### Fixes

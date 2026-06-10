@@ -127,6 +127,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
                                             task: { type: 'string' },
                                             type: { type: 'string', enum: ['explore', 'general'] },
                                             label: { type: 'string' },
+                                            rationale: { type: 'string', description: 'Why this workflow task is needed and what evidence or output it should produce.' },
                                             model: { type: 'string' },
                                         },
                                         required: ['task', 'type'],
@@ -233,6 +234,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
                 type: 'object',
                 properties: {
                     command: { type: 'string', description: 'Command to execute' },
+                    purpose: { type: 'string', description: 'Brief user-facing reason for running this command, especially for tests, builds, scripts, or diagnostics.' },
                     timeout: { type: 'integer', description: 'Timeout in seconds (default 120)' },
                 },
                 required: ['command'],
@@ -652,25 +654,25 @@ function validateFilePath(filePath: string): { valid: boolean; reason?: string }
     const reservedNames = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)/i;
     const basename = path.basename(filePath).split('.')[0];
     if (process.platform === 'win32' && reservedNames.test(basename)) {
-        return { valid: false, reason: `"${basename}" 是 Windows 保留文件名` };
+        return { valid: false, reason: `"${basename}" is a reserved Windows filename` };
     }
 
     // Control characters
     if (/[\x00-\x1f]/.test(filePath)) {
-        return { valid: false, reason: '文件路径包含控制字符' };
+        return { valid: false, reason: 'File path contains control characters' };
     }
 
     // Windows illegal characters (exclude drive letter colon, e.g. G:\)
     if (process.platform === 'win32') {
         const pathToCheck = /^[A-Za-z]:/.test(filePath) ? filePath.slice(2) : filePath;
         if (/[<>:"|?*]/.test(pathToCheck)) {
-            return { valid: false, reason: '文件路径包含 Windows 非法字符: < > : " | ? *' };
+            return { valid: false, reason: 'File path contains Windows-illegal characters: < > : " | ? *' };
         }
     }
 
     // Path length limit
     if (filePath.length > 260) {
-        return { valid: false, reason: '路径超过 260 字符限制（Windows MAX_PATH）' };
+        return { valid: false, reason: 'Path exceeds the 260 character Windows MAX_PATH limit' };
     }
 
     return { valid: true };
@@ -713,7 +715,7 @@ function detectAndReadFile(filePath: string): { content: string; encoding: strin
         return {
             content: '',
             encoding: 'binary',
-            warning: '检测到二进制文件，无法作为文本读取',
+            warning: 'Detected a binary file; cannot read it as text.',
         };
     }
 
@@ -721,8 +723,54 @@ function detectAndReadFile(filePath: string): { content: string; encoding: strin
     return {
         content: buffer.toString('latin1'),
         encoding: 'latin1',
-        warning: '文件编码不是 UTF-8，可能显示为乱码。建议用正确的编码重新打开。',
+        warning: 'File encoding is not UTF-8 and may render incorrectly. Reopen it with the correct encoding.',
     };
+}
+
+const MAX_TOOL_WRITE_BYTES = 6 * 1024 * 1024;
+
+function ensureTextContent(value: unknown, fieldName: string): string {
+    if (typeof value !== 'string') {
+        throw new Error(`${fieldName} must be a string`);
+    }
+    return value;
+}
+
+function ensureWritePayloadSize(content: string, filePath: string): number {
+    const bytes = Buffer.byteLength(content, 'utf8');
+    if (bytes > MAX_TOOL_WRITE_BYTES) {
+        throw new Error(
+            `Write payload for ${filePath} is too large (${(bytes / 1024 / 1024).toFixed(2)} MB). ` +
+            'Prefer staged writes or smaller edit_file operations.',
+        );
+    }
+    return bytes;
+}
+
+function atomicWriteTextFile(fullPath: string, content: string): void {
+    const dir = path.dirname(fullPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    const tempPath = path.join(
+        dir,
+        `.${path.basename(fullPath)}.mimo-write-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.tmp`,
+    );
+
+    fs.writeFileSync(tempPath, content, 'utf8');
+
+    try {
+        if (fs.existsSync(fullPath)) {
+            fs.unlinkSync(fullPath);
+        }
+        fs.renameSync(tempPath, fullPath);
+    } catch (error) {
+        try {
+            if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+        } catch {
+            // Best effort cleanup only.
+        }
+        throw error;
+    }
 }
 
 /**
@@ -763,7 +811,7 @@ const SENSITIVE_URL_PATTERNS: RegExp[] = [
 function checkBrowserUrl(url: string): { allowed: boolean; reason?: string } {
     for (const pattern of BLOCKED_URL_PATTERNS) {
         if (pattern.test(url)) {
-            return { allowed: false, reason: `禁止访问: ${pattern.source}` };
+            return { allowed: false, reason: `Blocked URL pattern: ${pattern.source}` };
         }
     }
 
@@ -771,7 +819,7 @@ function checkBrowserUrl(url: string): { allowed: boolean; reason?: string } {
         if (pattern.test(url)) {
             return {
                 allowed: true, // Don't block, but warn
-                reason: `⚠️ 正在访问敏感页面（${pattern.source}）。请注意不要泄露登录凭证。`,
+                reason: `Warning: opening a sensitive page (${pattern.source}). Avoid exposing credentials.`,
             };
         }
     }
@@ -799,7 +847,7 @@ function checkDesktopTarget(appOrWindow: string): { safe: boolean; reason?: stri
 
     for (const blocked of BLOCKED_APPLICATIONS) {
         if (lower.includes(blocked)) {
-            return { safe: false, reason: `禁止操作应用: ${blocked}` };
+            return { safe: false, reason: `Blocked desktop target: ${blocked}` };
         }
     }
 
@@ -822,7 +870,7 @@ async function toolReadFile(args: Record<string, any>, workspace: string, maxOut
     const MAX_FILE_SIZE = 10 * 1024 * 1024;
     const stats = fs.statSync(full);
     if (stats.size > MAX_FILE_SIZE) {
-        return `文件过大（${(stats.size / 1024 / 1024).toFixed(1)}MB），超过 10MB 限制。请使用 offset/limit 参数读取部分内容。`;
+        return `File is too large (${(stats.size / 1024 / 1024).toFixed(1)} MB). Use offset/limit to read only part of it.`;
     }
 
     // Detect encoding and read content
@@ -848,15 +896,19 @@ async function toolReadFile(args: Record<string, any>, workspace: string, maxOut
 }
 
 async function toolWriteFile(args: Record<string, any>, workspace: string): Promise<string> {
-    const full = resolvePath(args.path, workspace);
-    const { safe, reason } = isPathSafe(full, workspace);
-    if (!safe) return `Safety: ${reason}`;
-    if (isSensitiveFile(args.path)) return `Safety: Cannot write sensitive file: ${args.path}`;
+    try {
+        const content = ensureTextContent(args.content, 'content');
+        const full = resolvePath(args.path, workspace);
+        const { safe, reason } = isPathSafe(full, workspace);
+        if (!safe) return `Safety: ${reason}`;
+        if (isSensitiveFile(args.path)) return `Safety: Cannot write sensitive file: ${args.path}`;
 
-    const dir = path.dirname(full);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(full, args.content, 'utf-8');
-    return `Written ${args.path} (${args.content.length} chars, ${args.content.split('\n').length} lines)`;
+        const bytes = ensureWritePayloadSize(content, args.path || full);
+        atomicWriteTextFile(full, content);
+        return `Written ${args.path} (${content.length} chars, ${content.split('\n').length} lines, ${bytes} bytes)`;
+    } catch (error: any) {
+        return `Tool error: ${error?.message || String(error)}`;
+    }
 }
 
 async function toolEditFile(args: Record<string, any>, workspace: string): Promise<string> {
@@ -876,7 +928,8 @@ async function toolEditFile(args: Record<string, any>, workspace: string): Promi
         const before = lines.slice(0, start - 1);
         const after = lines.slice(end);
         const result = [...before, ...newLines, ...after].join('\n');
-        fs.writeFileSync(full, result, 'utf-8');
+        ensureWritePayloadSize(result, args.path || full);
+        atomicWriteTextFile(full, result);
         return `Replaced lines ${start}-${end} (${end - start + 1} → ${newLines.length} lines) in ${args.path}`;
     }
 
@@ -939,7 +992,8 @@ async function toolEditFile(args: Record<string, any>, workspace: string): Promi
         // Use split/join to avoid $1/$& regex replacement issues
         const parts = content.split(oldText);
         const newContent = parts.join(args.new_text);
-        fs.writeFileSync(full, newContent, 'utf-8');
+        ensureWritePayloadSize(newContent, args.path || full);
+        atomicWriteTextFile(full, newContent);
         // Find the line number for the report
         const matchIdx = content.indexOf(oldText);
         const lineNum = content.substring(0, matchIdx).split('\n').length;
@@ -950,7 +1004,8 @@ async function toolEditFile(args: Record<string, any>, workspace: string): Promi
     if (args.replace_all) {
         const parts = content.split(oldText);
         const newContent = parts.join(args.new_text);
-        fs.writeFileSync(full, newContent, 'utf-8');
+        ensureWritePayloadSize(newContent, args.path || full);
+        atomicWriteTextFile(full, newContent);
         return `Replaced all ${count} occurrences in ${args.path}`;
     }
 

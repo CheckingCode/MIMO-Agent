@@ -21,6 +21,8 @@ type ToolSpec = {
     handler: (args: Record<string, any>) => Promise<string>;
 };
 
+type ApiEndpointMode = 'chat_completions' | 'responses';
+
 const DEFAULT_BASE_URL = 'https://token-plan-cn.xiaomimimo.com/v1';
 const DEFAULT_OMNI_MODEL = 'mimo-v2.5';
 const DEFAULT_TTS_MODEL = 'mimo-v2.5-tts';
@@ -31,24 +33,36 @@ function env(name: string): string {
     return process.env[name] || '';
 }
 
-function apiKey(): string {
-    return env('MIMO_API_KEY') || env('MIMO_TP_API_KEY') || env('OPENAI_API_KEY');
+function hiddenArg(args: Record<string, any>, name: string): string {
+    return String(args?.[name] || '').trim();
 }
 
-function baseUrl(): string {
-    return (env('MIMO_MULTIMODAL_BASE_URL') || env('MIMO_BASE_URL') || env('OPENAI_BASE_URL') || DEFAULT_BASE_URL).replace(/\/+$/, '');
+export function normalizeApiEndpointMode(value: unknown): ApiEndpointMode {
+    return value === 'responses' ? 'responses' : 'chat_completions';
 }
 
-function omniModel(): string {
-    return env('MIMO_OMNI_MODEL') || env('MIMO_MULTIMODAL_MODEL') || DEFAULT_OMNI_MODEL;
+function apiKey(args: Record<string, any>): string {
+    return hiddenArg(args, '_mimo_api_key') || env('MIMO_API_KEY') || env('MIMO_TP_API_KEY') || env('OPENAI_API_KEY');
 }
 
-function ttsModel(): string {
-    return env('MIMO_TTS_MODEL') || DEFAULT_TTS_MODEL;
+function baseUrl(args: Record<string, any>): string {
+    return (hiddenArg(args, '_mimo_base_url') || env('MIMO_MULTIMODAL_BASE_URL') || env('MIMO_BASE_URL') || env('OPENAI_BASE_URL') || DEFAULT_BASE_URL).replace(/\/+$/, '');
 }
 
-function asrModel(): string {
-    return env('MIMO_ASR_MODEL') || DEFAULT_ASR_MODEL;
+export function apiEndpointMode(args: Record<string, any>): ApiEndpointMode {
+    return normalizeApiEndpointMode(hiddenArg(args, '_mimo_api_endpoint') || env('MIMO_API_ENDPOINT'));
+}
+
+function omniModel(args: Record<string, any>): string {
+    return hiddenArg(args, '_mimo_multimodal_model') || env('MIMO_OMNI_MODEL') || env('MIMO_MULTIMODAL_MODEL') || DEFAULT_OMNI_MODEL;
+}
+
+function ttsModel(args: Record<string, any>): string {
+    return hiddenArg(args, '_mimo_tts_model') || env('MIMO_TTS_MODEL') || DEFAULT_TTS_MODEL;
+}
+
+function asrModel(args: Record<string, any>): string {
+    return hiddenArg(args, '_mimo_asr_model') || env('MIMO_ASR_MODEL') || DEFAULT_ASR_MODEL;
 }
 
 function workspaceRoot(): string {
@@ -139,11 +153,19 @@ function buildChatBody(model: string, content: any[], maxTokens: number): Record
     };
 }
 
-async function postJson(pathname: string, body: Record<string, any>, timeoutMs = 120_000): Promise<any> {
-    const key = apiKey();
+function buildResponsesBody(model: string, content: any[], maxTokens: number): Record<string, any> {
+    return {
+        model,
+        input: content,
+        max_output_tokens: maxTokens,
+    };
+}
+
+async function postJson(pathname: string, body: Record<string, any>, args: Record<string, any>, timeoutMs = 120_000): Promise<any> {
+    const key = apiKey(args);
     if (!key) throw new Error('Missing API key. Set MIMO_API_KEY, MIMO_TP_API_KEY, or OPENAI_API_KEY.');
 
-    const url = `${baseUrl()}${pathname}`;
+    const url = `${baseUrl(args)}${pathname}`;
     const payload = Buffer.from(JSON.stringify(body), 'utf-8');
     const parsed = new URL(url);
     const transport = parsed.protocol === 'https:' ? https : http;
@@ -190,18 +212,83 @@ async function postJson(pathname: string, body: Record<string, any>, timeoutMs =
     });
 }
 
-function extractText(json: any): string {
+function appendUsage(text: string, usage: any): string {
+    const trimmed = String(text || '').trim();
+    const suffix = usage ? `\n\nUsage: ${JSON.stringify(usage)}` : '';
+    return `${trimmed}${suffix}`.trim();
+}
+
+function extractChatText(json: any): string {
     const message = json?.choices?.[0]?.message || {};
-    const text = message.content || message.reasoning_content || json?.choices?.[0]?.text || '';
-    const usage = json?.usage ? `\n\nUsage: ${JSON.stringify(json.usage)}` : '';
-    return `${String(text || '').trim()}${usage}`.trim() || JSON.stringify(json);
+    return String(message.content || message.reasoning_content || json?.choices?.[0]?.text || '').trim();
+}
+
+export function extractResponsesText(json: any): string {
+    const outputText = typeof json?.output_text === 'string' ? json.output_text.trim() : '';
+    if (outputText) return outputText;
+
+    const parts: string[] = [];
+    for (const item of Array.isArray(json?.output) ? json.output : []) {
+        if (!item || typeof item !== 'object') continue;
+        if (Array.isArray(item.content)) {
+            for (const part of item.content) {
+                const text = typeof part?.text === 'string' ? part.text.trim() : '';
+                if (text) parts.push(text);
+            }
+        }
+    }
+    return parts.join('').trim();
+}
+
+function extractText(json: any): string {
+    const text = extractChatText(json) || extractResponsesText(json);
+    return appendUsage(text, json?.usage) || JSON.stringify(json);
+}
+
+function buildResponsesAnalyzeInput(kind: 'image', prompt: string, data: string): any[] {
+    const system = 'You are a concise multimodal analysis helper. Return factual, text-only results for a downstream reasoning model.';
+    const mediaPart = {
+        type: 'input_image',
+        image_url: data,
+    };
+    return [
+        {
+            role: 'system',
+            content: [{ type: 'input_text', text: system }],
+        },
+        {
+            role: 'user',
+            content: [
+                { type: 'input_text', text: prompt },
+                mediaPart,
+            ],
+        },
+    ];
+}
+
+export function canUseResponsesForAnalyze(kind: 'image' | 'audio' | 'video', args: Record<string, any>): boolean {
+    return apiEndpointMode(args) === 'responses' && kind === 'image';
+}
+
+async function analyzeViaResponses(kind: 'image', args: Record<string, any>, model: string, prompt: string, data: string, maxTokens: number): Promise<string> {
+    const json = await postJson('/responses', buildResponsesBody(model, buildResponsesAnalyzeInput(kind, prompt, data), maxTokens), args);
+    return extractText(json);
 }
 
 async function analyzeMedia(kind: 'image' | 'audio' | 'video', args: Record<string, any>): Promise<string> {
     const prompt = String(args.prompt || defaultPrompt(kind));
     const maxTokens = Math.max(128, Math.min(8192, Number(args.max_tokens || 2048)));
-    const model = String(args.model || omniModel());
+    const model = String(args.model || omniModel(args));
     const data = mediaData(args);
+
+    if (canUseResponsesForAnalyze(kind, args)) {
+        try {
+            return await analyzeViaResponses('image', args, model, prompt, data, maxTokens);
+        } catch {
+            // Fall through to chat/completions for provider compatibility.
+        }
+    }
+
     let mediaPart: Record<string, any>;
 
     if (kind === 'image') {
@@ -212,7 +299,7 @@ async function analyzeMedia(kind: 'image' | 'audio' | 'video', args: Record<stri
         mediaPart = { type: 'video_url', video_url: { url: data } };
     }
 
-    const json = await postJson('/chat/completions', buildChatBody(model, [mediaPart, { type: 'text', text: prompt }], maxTokens));
+    const json = await postJson('/chat/completions', buildChatBody(model, [mediaPart, { type: 'text', text: prompt }], maxTokens), args);
     return extractText(json);
 }
 
@@ -224,18 +311,18 @@ function defaultPrompt(kind: 'image' | 'audio' | 'video'): string {
 
 async function transcribeAudio(args: Record<string, any>): Promise<string> {
     const prompt = String(args.prompt || 'Transcribe this audio accurately. Include timestamps if you can infer them.');
-    const model = String(args.model || asrModel());
+    const model = String(args.model || asrModel(args));
     const maxTokens = Math.max(128, Math.min(8192, Number(args.max_tokens || 4096)));
     const data = mediaData(args);
     const attempts = [
         { model, part: { type: 'input_audio', input_audio: { data } } },
-        { model: omniModel(), part: { type: 'input_audio', input_audio: { data } } },
+        { model: omniModel(args), part: { type: 'input_audio', input_audio: { data } } },
     ];
 
     let lastError = '';
     for (const attempt of attempts) {
         try {
-            const json = await postJson('/chat/completions', buildChatBody(attempt.model, [attempt.part, { type: 'text', text: prompt }], maxTokens));
+            const json = await postJson('/chat/completions', buildChatBody(attempt.model, [attempt.part, { type: 'text', text: prompt }], maxTokens), args);
             return extractText(json);
         } catch (e: any) {
             lastError = e?.message || String(e);
@@ -250,7 +337,7 @@ async function synthesizeSpeech(args: Record<string, any>): Promise<string> {
     const voice = String(args.voice || 'Chloe');
     const format = String(args.format || 'wav').replace(/[^a-z0-9]/gi, '').toLowerCase() || 'wav';
     const style = String(args.style || 'Natural, clear, friendly delivery.');
-    const model = String(args.model || ttsModel());
+    const model = String(args.model || ttsModel(args));
     const target = args.output_path
         ? resolveWorkspacePath(String(args.output_path))
         : outputPath('tts', format === 'pcm16' ? 'pcm' : format);
@@ -263,7 +350,7 @@ async function synthesizeSpeech(args: Record<string, any>): Promise<string> {
             { role: 'assistant', content: text },
         ],
         audio: { format, voice },
-    }, 180_000);
+    }, args, 180_000);
 
     const data = json?.choices?.[0]?.message?.audio?.data;
     if (!data || typeof data !== 'string') {
@@ -372,22 +459,24 @@ async function handleMessage(msg: JsonRpcMessage): Promise<void> {
     if (msg.id !== undefined) respond(msg.id, {});
 }
 
-let buffer = '';
-process.stdin.setEncoding('utf-8');
-process.stdin.on('data', (chunk) => {
-    buffer += chunk;
-    let nl: number;
-    while ((nl = buffer.indexOf('\n')) !== -1) {
-        const line = buffer.slice(0, nl).trim();
-        buffer = buffer.slice(nl + 1);
-        if (!line) continue;
-        try {
-            void handleMessage(JSON.parse(line));
-        } catch (e: any) {
-            respondError(undefined, -32700, e?.message || String(e));
+if (require.main === module) {
+    let buffer = '';
+    process.stdin.setEncoding('utf-8');
+    process.stdin.on('data', (chunk) => {
+        buffer += chunk;
+        let nl: number;
+        while ((nl = buffer.indexOf('\n')) !== -1) {
+            const line = buffer.slice(0, nl).trim();
+            buffer = buffer.slice(nl + 1);
+            if (!line) continue;
+            try {
+                void handleMessage(JSON.parse(line));
+            } catch (e: any) {
+                respondError(undefined, -32700, e?.message || String(e));
+            }
         }
-    }
-});
+    });
 
-process.stdin.on('end', () => process.exit(0));
-process.stderr.write(`[mimo-multimodal-mcp] ready in ${workspaceRoot()} on ${os.platform()}\n`);
+    process.stdin.on('end', () => process.exit(0));
+    process.stderr.write(`[mimo-multimodal-mcp] ready in ${workspaceRoot()} on ${os.platform()}\n`);
+}

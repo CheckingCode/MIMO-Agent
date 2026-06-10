@@ -33,7 +33,7 @@
 
 MiMo Agent 是一个运行在 VS Code 内的本地 AI 编程助手。它可以阅读项目、搜索代码、编辑文件、运行命令、查看 Git diff、管理多轮任务，并通过 OpenAI 兼容 API 调用小米 MiMo、DeepSeek、OpenAI 或自定义模型端点。
 
-当前版本：`1.6.6`。
+当前版本：`v1.6.8`。
 
 ## ✨ 当前核心能力
 
@@ -261,7 +261,7 @@ MiMo Agent 同时支持 VS Code 设置和本地配置文件：
 | `api.active_provider_profile`     | 当前启用的 provider profile ID                           | 自动推断             |
 | `api.active_route`                | 当前调用路由 `{ endpoint_id, model }`                  | 当前 profile + model |
 | `agent.max_tokens`                | 单次响应最大 token                                       | `8192`             |
-| `agent.max_rounds`                | 最大工具调用轮次，`0` 表示不限                         | `0`                |
+| `agent.max_rounds`                | 最大工具调用轮次，`0` 表示由当前推理模式自动管理预算       | `0`                |
 | `agent.reasoning_effort`          | `turbo` / `fast` / `balanced` / `deep` / `max` | `balanced`         |
 | `safety.max_output_len`           | 工具输出截断长度                                         | `5000`             |
 | `safety.command_timeout`          | 普通命令超时秒数                                         | `120`              |
@@ -361,11 +361,11 @@ npm run compile
 
 详细版本记录见 [CHANGELOG.md](CHANGELOG.md)。
 
-`1.6.6` 重点：
+`v1.6.8` 重点：
 
-- 设置页新增更多国内外知名 OpenAI 兼容服务商预设。
-- 新增通义千问、智谱 GLM、Moonshot/Kimi、火山方舟、硅基流动、百度千帆、腾讯混元、OpenRouter、Groq、Google Gemini、Mistral AI、xAI Grok 等 provider 选项。
-- 扩展 provider 自动识别逻辑，保存后的常见端点会保留服务商标签，不再退回自定义兼容。
+- Shell 命令和 workflow 子任务会输出更明确的执行目的与阶段进度，减少只有 Bash 卡片但缺少说明的情况。
+- 项目/用户指令校验降低误报和重复警告，同时仍会拦截会破坏 agent 能力的指令。
+- 中断恢复和停止保护摘要会补充验证状态、已检查文件、已改文件和下一步。
 
 ## 🤝 反馈与贡献
 
@@ -381,7 +381,7 @@ npm run compile
 
 MiMo Agent is a local AI coding assistant for VS Code. It can inspect your workspace, search code, edit files, run commands, review Git diffs, manage long-running tasks, and call Xiaomi MiMo, DeepSeek, OpenAI, or custom OpenAI-compatible endpoints.
 
-Current version: `1.6.6`.
+Current version: `v1.6.8`.
 
 ## ✨ Highlights
 

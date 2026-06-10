@@ -31,7 +31,7 @@ export function createDiffCard(args: any): HTMLElement | null {
     card.setAttribute('data-removed', String(removed));
     card.innerHTML = `<div class="diff-card-header">` +
         `<span class="diff-file">${escapeHtml(filePath)}</span>` +
-        `<span class="diff-stats">${added} added, ${removed} removed</span>` +
+        `<span class="diff-stats">${added} lines added, ${removed} lines removed</span>` +
         `<span class="diff-chevron">›</span>` +
         `</div><div class="diff-card-body"></div>`;
 
@@ -219,12 +219,12 @@ export function renderGitDiff(res: HTMLElement, txt: string): void {
             }
         }
 
-        html += `<div class="diff-file-summary"><span class="diff-stats-add">+${file.added}</span><span class="diff-stats-del">-${file.removed}</span></div>`;
+        html += `<div class="diff-file-summary"><span class="diff-stats-add">+${file.added} lines</span><span class="diff-stats-del">-${file.removed} lines</span></div>`;
     }
 
     if (totalAdded > 0 || totalRemoved > 0) {
         const label = files.length > 1 ? `${files.length} files` : (files[0]?.name || 'changes');
-        html = `<div class="diff-summary"><span class="diff-file-name">${escapeHtml(label)}</span><span class="diff-stats-add">+${totalAdded}</span><span class="diff-stats-del">-${totalRemoved}</span></div>` + html;
+        html = `<div class="diff-summary"><span class="diff-file-name">${escapeHtml(label)}</span><span class="diff-stats-add">+${totalAdded} lines</span><span class="diff-stats-del">-${totalRemoved} lines</span></div>` + html;
     }
 
     if (truncated) html += `<div class="diff-info">... (truncated, ${txt.length} chars total)</div>`;

@@ -34,7 +34,7 @@ export interface AgentEvents {
     onFinalAnswer?: (text: string) => void;
     onThoughtSummary?: (text: string) => void;
     onToolCallStart: (name: string, args: Record<string, any>) => void;
-    onToolCallEnd: (name: string, result: string, isError: boolean, elapsed: number) => void;
+    onToolCallEnd: (name: string, result: string, isError: boolean, elapsed: number, gitDiff?: string) => void;
     onRoundStart: (round: number) => void;
     onRoundEnd: (round: number) => void;
     onDone: (response: string) => void;

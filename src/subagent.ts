@@ -40,7 +40,7 @@ export interface SubAgentEvents {
     onToken?: (token: string) => void;
     onStatus?: (status: string) => void;
     onToolCallStart?: (name: string, args: Record<string, any>) => void;
-    onToolCallEnd?: (name: string, result: string, isError: boolean, elapsed: number) => void;
+    onToolCallEnd?: (name: string, result: string, isError: boolean, elapsed: number, gitDiff?: string) => void;
     onRoundStart?: (round: number) => void;
     onDone?: (result: SubAgentResult) => void;
     onError?: (error: string) => void;
@@ -81,15 +81,15 @@ function getReasoningProfile(value?: ReasoningEffort, enableThinking?: boolean):
     const effort = value || (enableThinking ? 'deep' : 'balanced');
     switch (effort) {
         case 'turbo':
-            return { tokenMultiplier: 0.45, roundMultiplier: 0.45, temperature: 0.2, topP: 0.8, thinking: 'disabled' };
+            return { tokenMultiplier: 0.4, roundMultiplier: 0.3, temperature: 0.2, topP: 0.8, thinking: 'disabled' };
         case 'fast':
-            return { tokenMultiplier: 0.7, roundMultiplier: 0.7, temperature: 0.4, topP: 0.9, thinking: 'disabled' };
+            return { tokenMultiplier: 0.6, roundMultiplier: 0.5, temperature: 0.4, topP: 0.9, thinking: 'disabled' };
         case 'deep':
-            return { tokenMultiplier: 1.3, roundMultiplier: 1.35, temperature: 0.55, thinking: 'enabled' };
+            return { tokenMultiplier: 1.1, roundMultiplier: 0.95, temperature: 0.55, thinking: 'enabled' };
         case 'max':
-            return { tokenMultiplier: 1.8, roundMultiplier: 2.0, temperature: 0.35, topP: 0.9, thinking: 'enabled' };
+            return { tokenMultiplier: 1.35, roundMultiplier: 1.2, temperature: 0.35, topP: 0.9, thinking: 'enabled' };
         default:
-            return { tokenMultiplier: 1, roundMultiplier: 1 };
+            return { tokenMultiplier: 0.85, roundMultiplier: 0.7 };
     }
 }
 
@@ -116,7 +116,9 @@ export async function runSubAgent(
 ): Promise<SubAgentResult> {
     const t0 = Date.now();
     const effortProfile = getReasoningProfile(config.reasoningEffort, config.enableThinking);
-    const maxRounds = Math.max(3, Math.round((options.maxRounds ?? 20) * effortProfile.roundMultiplier));
+    const baseRounds = options.maxRounds ?? (options.type === 'explore' ? 4 : 6);
+    const minRounds = options.type === 'explore' ? 2 : 3;
+    const maxRounds = Math.max(minRounds, Math.round(baseRounds * effortProfile.roundMultiplier));
     const model = options.model || 'mimo-v2.5-pro';
     const cwd = options.worktree || workspace;
 

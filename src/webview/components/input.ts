@@ -171,6 +171,10 @@ export const InputArea = {
                 e.stopPropagation();
                 modePopup.classList.remove('show');
                 modelPopup.classList.toggle('show');
+                // 动态定位弹窗，避免在窄屏时被遮挡
+                if (modelPopup.classList.contains('show')) {
+                    this.alignModelPopup(modelPopup, modelTrigger);
+                }
             });
             modelPopup.addEventListener('click', (e) => {
                 e.stopPropagation();
@@ -303,6 +307,10 @@ export const InputArea = {
 
         bus.on('langChanged', () => {
             this.updateReasoningButton();
+            this.renderModelPicker(
+                store.get('models') as Array<{ value: string; label: string; model?: string; endpointId?: string; endpointName?: string }>,
+                store.get('currentModel'),
+            );
         });
 
         if (voiceBtn) {
@@ -380,11 +388,11 @@ export const InputArea = {
     modelBadges(model: string): string[] {
         const text = String(model || '').toLowerCase();
         const badges: string[] = [];
-        if (/tts|voice|speech|audio/.test(text)) badges.push('TTS');
-        if (/asr|transcribe|whisper/.test(text)) badges.push('ASR');
-        if (/vision|vl|omni|image/.test(text)) badges.push('Vision');
-        if (/pro|reasoner|deep|r1/.test(text)) badges.push('Reason');
-        if (/flash|lite|mini/.test(text)) badges.push('Fast');
+        if (/tts|voice|speech|audio/.test(text)) badges.push(t('badge.tts'));
+        if (/asr|transcribe|whisper/.test(text)) badges.push(t('badge.asr'));
+        if (/vision|vl|omni|image/.test(text)) badges.push(t('badge.vision'));
+        if (/pro|reasoner|deep|r1/.test(text)) badges.push(t('badge.reason'));
+        if (/flash|lite|mini/.test(text)) badges.push(t('badge.fast'));
         return badges.slice(0, 2);
     },
 
@@ -499,6 +507,65 @@ export const InputArea = {
         if (history.length > 50) history.pop();
         store.set('inputHistory', history);
         store.set('historyIdx', -1);
+    },
+
+    /**
+     * 对齐弹窗位置，避免在窄屏时被遮挡
+     */
+    alignPopup(popup: HTMLElement, trigger: HTMLElement): void {
+        // 重置定位
+        popup.classList.remove('align-left', 'align-right');
+        popup.style.left = '';
+        popup.style.right = '';
+
+        requestAnimationFrame(() => {
+            const viewportWidth = window.innerWidth;
+            const triggerRect = trigger.getBoundingClientRect();
+            const popupWidth = Math.min(360, viewportWidth - 28);
+
+            // 计算弹窗左边界位置（右对齐触发按钮）
+            const popupLeft = triggerRect.right - popupWidth;
+
+            // 如果左边界超出视口左侧，改为左对齐
+            if (popupLeft < 8) {
+                popup.classList.add('align-left');
+                popup.style.left = '8px';
+                popup.style.right = 'auto';
+            }
+            // 如果右边界超出视口右侧，调整位置
+            else if (triggerRect.right > viewportWidth - 8) {
+                popup.style.left = `${viewportWidth - popupWidth - 8}px`;
+                popup.style.right = 'auto';
+            }
+            // 默认右对齐
+            else {
+                popup.style.right = `${viewportWidth - triggerRect.right}px`;
+                popup.style.left = 'auto';
+            }
+        });
+    },
+
+    alignModelPopup(popup: HTMLElement, trigger: HTMLElement): void {
+        popup.classList.remove('align-left', 'align-right');
+        popup.style.left = '';
+        popup.style.right = '';
+
+        requestAnimationFrame(() => {
+            const viewportWidth = window.innerWidth;
+            const triggerRect = trigger.getBoundingClientRect();
+            const popupWidth = Math.min(360, Math.max(160, viewportWidth - 28));
+            const offsetParent = (popup.offsetParent as HTMLElement | null) || popup.parentElement;
+            const parentRect = offsetParent?.getBoundingClientRect();
+            const minViewportLeft = 8;
+            const maxViewportLeft = Math.max(minViewportLeft, viewportWidth - popupWidth - 8);
+            const desiredViewportLeft = triggerRect.right - popupWidth;
+            const clampedViewportLeft = Math.min(maxViewportLeft, Math.max(minViewportLeft, desiredViewportLeft));
+            const relativeLeft = parentRect ? clampedViewportLeft - parentRect.left : clampedViewportLeft;
+
+            popup.style.left = `${relativeLeft}px`;
+            popup.style.right = 'auto';
+            popup.classList.add(clampedViewportLeft <= minViewportLeft ? 'align-left' : 'align-right');
+        });
     },
 
     autoResize(textarea: HTMLTextAreaElement): void {

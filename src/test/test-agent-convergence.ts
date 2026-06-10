@@ -29,6 +29,7 @@ function makeAgent(): any {
         memory: { enabled: false, learnFromExplicitPreferences: false, maxItems: 10, maxInjected: 0 },
         dependencyInstall: { enabled: true, projectMode: 'auto', systemMode: 'confirm', longTimeoutSec: 600 },
         settings: {},
+        apiEndpoint: 'chat_completions',
     };
     return new MiMoAgent(config, process.cwd());
 }
@@ -91,12 +92,100 @@ describe('agent convergence guards', () => {
 
     it('detects repeated reasoning chunks before long loops', () => {
         const agent = makeAgent();
-        const repeated = Array.from({ length: 5 })
+        const repeated = Array.from({ length: 7 })
             .map(() => 'The user wants me to add a return home link, so I need to check the current navigation structure.')
             .join(' ');
         const result = agent.detectReasoningLoop(repeated);
         expect(result.detected).toBe(true);
-        expect(result.count).toBeGreaterThanOrEqual(4);
+        expect(result.count).toBeGreaterThanOrEqual(5);
+    });
+
+    it('applies reasoning effort to request speed and depth controls', () => {
+        const agent = makeAgent();
+        const messages = [{ role: 'user', content: 'same question' }];
+        const baseConfig = { ...agent.config, model: 'mimo-v2.5-pro', maxTokens: 10000, temperature: 0.7, topP: 0.95 };
+
+        agent.updateConfig({ ...baseConfig, reasoningEffort: 'turbo', enableThinking: false });
+        const turbo = agent.buildChatParams('mimo-v2.5-pro', messages, {}, '');
+        expect(turbo.max_tokens).toBe(4000);
+        expect(turbo.temperature).toBe(0.2);
+        expect(turbo.top_p).toBe(0.8);
+        expect(turbo.extra_body.thinking.type).toBe('disabled');
+
+        agent.updateConfig({ ...baseConfig, reasoningEffort: 'balanced', enableThinking: false });
+        const balanced = agent.buildChatParams('mimo-v2.5-pro', messages, {}, '');
+        expect(balanced.max_tokens).toBe(8500);
+        expect(balanced.temperature).toBe(0.7);
+        expect(balanced.extra_body).toBe(undefined);
+
+        agent.updateConfig({ ...baseConfig, reasoningEffort: 'deep', enableThinking: true });
+        const deep = agent.buildChatParams('mimo-v2.5-pro', messages, {}, '');
+        expect(deep.max_tokens).toBe(11500);
+        expect(deep.temperature).toBe(0.55);
+        expect(deep.extra_body.thinking.type).toBe('enabled');
+
+        agent.updateConfig({ ...baseConfig, reasoningEffort: 'max', enableThinking: true });
+        const max = agent.buildChatParams('mimo-v2.5-pro', messages, {}, '');
+        expect(max.max_tokens).toBe(14500);
+        expect(max.temperature).toBe(0.35);
+        expect(max.extra_body.thinking.type).toBe('enabled');
+    });
+
+    it('keeps direct-answer token caps distinct per reasoning effort', () => {
+        const agent = makeAgent();
+        const messages = [{ role: 'user', content: 'same question' }];
+        agent.updateConfig({ ...agent.config, model: 'mimo-v2.5-pro', maxTokens: 20000, reasoningEffort: 'turbo', enableThinking: false });
+        const turbo = agent.buildChatParams('mimo-v2.5-pro', messages, { max_tokens: agent.getReasoningProfile().directMaxTokens, _applyReasoningMultiplier: false }, '');
+
+        agent.updateConfig({ ...agent.config, model: 'mimo-v2.5-pro', maxTokens: 20000, reasoningEffort: 'max', enableThinking: true });
+        const max = agent.buildChatParams('mimo-v2.5-pro', messages, { max_tokens: agent.getReasoningProfile().directMaxTokens, _applyReasoningMultiplier: false }, '');
+
+        expect(turbo.max_tokens).toBe(500);
+        expect(max.max_tokens).toBe(3800);
+        expect(max.max_tokens).toBeGreaterThan(turbo.max_tokens);
+    });
+
+    it('treats raw shell command drafts as unfinished tool work', () => {
+        const agent = makeAgent();
+        const draft = [
+            'chcp 65001 > $null',
+            '$bytes = [System.IO.File]::ReadAllBytes("mimo-promo/index.html")',
+            '$text = [System.Text.Encoding]::UTF8.GetString($bytes)',
+            'Find all install-steps and install-step CSS rules',
+            "$pattern = '\\.install-steps\\{[^}]+'",
+            '$matches = [regex]::Matches($text, $pattern)',
+            'foreach ($m in $matches) { Write-Output "CSS: $($m.Value)" }',
+        ].join('\n');
+
+        expect(agent.isRawShellCommandDraft(draft)).toBe(true);
+        expect(agent.isUnexecutedActionStatement(draft)).toBe(true);
+    });
+
+    it('filters unchanged dirty workspace diff blocks from execute_command previews', () => {
+        const agent = makeAgent();
+        const oldDirty = [
+            'diff --git a/mimo-promo/index.html b/mimo-promo/index.html',
+            '--- a/mimo-promo/index.html',
+            '+++ b/mimo-promo/index.html',
+            '@@ -1 +1 @@',
+            '-old',
+            '+old dirty',
+            '',
+        ].join('\n');
+        const newDoc = [
+            'diff --git a/essay_on_love.md b/essay_on_love.md',
+            'new file mode 100644',
+            '--- /dev/null',
+            '+++ b/essay_on_love.md',
+            '@@ -0,0 +1,2 @@',
+            '+# 以爱为题',
+            '+正文',
+            '',
+        ].join('\n');
+
+        const filtered = (agent as any).filterNewGitPatchBlocks(oldDirty, oldDirty + newDoc);
+        expect(filtered.includes('essay_on_love.md')).toBe(true);
+        expect(filtered.includes('mimo-promo/index.html')).toBe(false);
     });
 
     it('keeps automatic chat fallback inside the active provider model family', () => {
@@ -207,6 +296,41 @@ describe('agent convergence guards', () => {
         expect(agent.getModelSelectionValue(convId)).toBe('mimo-proxy::mimo-v2.5-pro');
     });
 
+    it('binds built-in multimodal MCP to the current endpoint profile and MiMo speech defaults', () => {
+        const agent = makeAgent();
+        agent.updateConfig({
+            ...agent.config,
+            apiKey: 'global-key',
+            baseUrl: 'https://global.example/v1',
+            model: 'mimo-v2.5-pro',
+            activeProviderProfile: 'voice',
+            activeRoute: { endpoint_id: 'voice', model: 'mimo-v2.5-pro' },
+            providerProfiles: [
+                {
+                    id: 'voice',
+                    name: 'Voice',
+                    provider: 'mimo',
+                    base_url: 'https://voice.example/v1',
+                    api_endpoint: 'chat_completions',
+                    api_key: 'voice-key',
+                    model: 'mimo-v2.5-pro',
+                    models: ['mimo-v2.5-pro', 'mimo-v2.5'],
+                },
+            ],
+        });
+
+        const convId = agent.createConversation();
+        agent.setModel('voice::mimo-v2.5-pro', convId);
+        const conv = agent.getConversation(convId);
+        const args = (agent as any).prepareBuiltinMultimodalArgs('mcp_mimo_multimodal_transcribe_audio', {}, conv);
+
+        expect(args._mimo_api_key).toBe('voice-key');
+        expect(args._mimo_base_url).toBe('https://voice.example/v1');
+        expect(args.model).toBe('mimo-v2.5-asr');
+        expect(args._mimo_tts_model).toBe('mimo-v2.5-tts');
+        expect(args._mimo_multimodal_model).toBe('mimo-v2.5');
+    });
+
     it('keeps one model option per model-card profile', () => {
         const agent = makeAgent();
         agent.updateConfig({
@@ -283,6 +407,30 @@ describe('agent convergence guards', () => {
 
         const finalText = agent.appendMissingArtifactSummary(conv, `音频已生成：${audioPath}`);
         expect(finalText.split(audioPath).length - 1).toBe(1);
+    });
+    it('only adds artifact paths from the current user turn', () => {
+        const agent = makeAgent();
+        const previousAudio = 'g:\\AI World\\audio\\yujie-voice.mp3';
+        const currentArtifact = 'g:\\AI World\\promo\\current-layout.svg';
+        const conv = makeConv([
+            { role: 'user', content: 'Generate a 10 second voice sample.' } as any,
+            {
+                role: 'tool',
+                _toolName: 'execute_command',
+                content: `Generated file: ${previousAudio}`,
+            } as any,
+            { role: 'assistant', content: `Audio generated: ${previousAudio}` } as any,
+            { role: 'user', content: 'Fix the promo page layout.' } as any,
+            {
+                role: 'tool',
+                _toolName: 'execute_command',
+                content: `Updated file: ${currentArtifact}`,
+            } as any,
+        ]);
+
+        const finalText = agent.appendMissingArtifactSummary(conv, 'Task completed.');
+        expect(finalText.includes(currentArtifact)).toBe(true);
+        expect(finalText.includes(previousAudio)).toBe(false);
     });
 });
 

@@ -26,6 +26,7 @@ export interface WorkflowTask {
     type: 'explore' | 'general';
     model?: string;
     label?: string;
+    rationale?: string;
 }
 
 export interface WorkflowPhase {
@@ -85,6 +86,27 @@ function filterTools(type: 'explore' | 'general', allTools: ToolDefinition[]): T
     return allTools.filter(t => !GENERAL_EXCLUDED.has(t.function.name));
 }
 
+function compactOneLine(text: string, max = 140): string {
+    const clean = String(text || '').replace(/\s+/g, ' ').trim();
+    return clean.length > max ? `${clean.slice(0, max)}...` : clean;
+}
+
+function describeWorkflowToolAction(name: string, args: Record<string, any>): string {
+    if (name === 'execute_command') {
+        const purpose = compactOneLine(args.purpose || args.reason || '', 90);
+        const command = compactOneLine(args.command || '', 120);
+        return purpose ? `run command for ${purpose}: ${command}` : `run command: ${command}`;
+    }
+    if (name === 'read_file') return `read ${args.path || args.file || 'file'}`;
+    if (name === 'search_files') return `search "${args.pattern || args.query || ''}"`;
+    if (name === 'glob_files') return `find ${args.pattern || ''}`;
+    if (name === 'list_directory') return `list ${args.path || '.'}`;
+    if (name === 'edit_file') return `edit ${args.path || 'file'}`;
+    if (name === 'write_file') return `write ${args.path || 'file'}`;
+    if (name.startsWith('git_')) return `${name.replace(/^git_/, 'git ')} ${args.file || args.path || ''}`.trim();
+    return compactOneLine(`${name} ${JSON.stringify(args || {})}`, 160);
+}
+
 type ReasoningEffort = 'turbo' | 'fast' | 'balanced' | 'deep' | 'max';
 
 function getReasoningProfile(value?: ReasoningEffort, enableThinking?: boolean): {
@@ -97,15 +119,15 @@ function getReasoningProfile(value?: ReasoningEffort, enableThinking?: boolean):
     const effort = value || (enableThinking ? 'deep' : 'balanced');
     switch (effort) {
         case 'turbo':
-            return { tokenMultiplier: 0.45, roundMultiplier: 0.45, temperature: 0.2, topP: 0.8, thinking: 'disabled' };
+            return { tokenMultiplier: 0.4, roundMultiplier: 0.3, temperature: 0.2, topP: 0.8, thinking: 'disabled' };
         case 'fast':
-            return { tokenMultiplier: 0.7, roundMultiplier: 0.7, temperature: 0.4, topP: 0.9, thinking: 'disabled' };
+            return { tokenMultiplier: 0.6, roundMultiplier: 0.5, temperature: 0.4, topP: 0.9, thinking: 'disabled' };
         case 'deep':
-            return { tokenMultiplier: 1.3, roundMultiplier: 1.35, temperature: 0.55, thinking: 'enabled' };
+            return { tokenMultiplier: 1.1, roundMultiplier: 0.95, temperature: 0.55, thinking: 'enabled' };
         case 'max':
-            return { tokenMultiplier: 1.8, roundMultiplier: 2.0, temperature: 0.35, topP: 0.9, thinking: 'enabled' };
+            return { tokenMultiplier: 1.35, roundMultiplier: 1.2, temperature: 0.35, topP: 0.9, thinking: 'enabled' };
         default:
-            return { tokenMultiplier: 1, roundMultiplier: 1 };
+            return { tokenMultiplier: 0.85, roundMultiplier: 0.7 };
     }
 }
 
@@ -130,11 +152,14 @@ async function executeTask(
     },
     signal?: AbortSignal,
     previousContext?: string,
+    events: WorkflowEvents = {},
 ): Promise<TaskResult> {
     const t0 = Date.now();
     const model = task.model || 'mimo-v2.5-pro';
     const effortProfile = getReasoningProfile(config.reasoningEffort, config.enableThinking);
-    const maxRounds = Math.max(4, Math.round(20 * effortProfile.roundMultiplier));
+    const defaultTaskRounds = task.type === 'explore' ? 4 : 6;
+    const minRounds = task.type === 'explore' ? 2 : 3;
+    const maxRounds = Math.max(minRounds, Math.round(defaultTaskRounds * effortProfile.roundMultiplier));
     const label = task.label || task.task.substring(0, 40);
 
     const typeHint = task.type === 'explore'
@@ -200,6 +225,8 @@ Rules:
     let totalToolCalls = 0;
     let rounds = 0;
 
+    events.onReasoning?.(`[Workflow task] ${label}: ${compactOneLine(task.rationale || task.task, 180)}`);
+
     for (rounds = 1; rounds <= maxRounds; rounds++) {
         if (signal?.aborted) {
             return {
@@ -251,6 +278,7 @@ Rules:
         }
 
         if (toolCalls.length === 0) {
+            events.onReasoning?.(`[Workflow task] ${label}: completed with text output (${(content || '').length} chars).`);
             return {
                 task: task.task, label,
                 output: content || '(no output)',
@@ -271,6 +299,8 @@ Rules:
             let args: Record<string, any> = {};
             try { args = JSON.parse(tc.function.arguments); } catch { /* empty */ }
 
+            events.onReasoning?.(`[Workflow task] ${label}: ${describeWorkflowToolAction(tc.function.name, args)}.`);
+
             const toolResult = mcpManager.isMcpTool(tc.function.name)
                 ? await mcpManager.callTool(tc.function.name, args)
                 : await executeTool(
@@ -282,6 +312,12 @@ Rules:
 
             messages.push({ role: 'tool', tool_call_id: tc.id, content: toolResult });
             totalToolCalls++;
+            const resultText = String(toolResult || '');
+            const resultHead = compactOneLine(resultText.split(/\r?\n/).find(Boolean) || '', 120);
+            const isError = /^(Safety:|Tool error:|Unknown tool|Blocked by|Error:)/i.test(resultText);
+            events.onReasoning?.(
+                `[Workflow task] ${label}: ${tc.function.name} ${isError ? 'failed' : 'finished'} (${resultText.length} chars)${resultHead ? ` - ${resultHead}` : ''}.`
+            );
         }
     }
 
@@ -344,7 +380,7 @@ export async function executeWorkflow(
 
             const promises = phase.tasks.map((task, ti) => {
                 events.onWorkflowTaskStart?.(pi, ti, task.label || task.task.substring(0, 40));
-                return executeTask(task, ti, api, workspace, mcpManager, config, signal, phaseSummary)
+                return executeTask(task, ti, api, workspace, mcpManager, config, signal, phaseSummary, events)
                     .then(result => {
                         events.onWorkflowTaskEnd?.(pi, ti, result);
                         return result;
@@ -375,7 +411,7 @@ export async function executeWorkflow(
                 events.onWorkflowTaskStart?.(pi, ti, task.label || task.task.substring(0, 40));
                 events.onStatus?.(`[Workflow] Phase ${pi + 1}, Task ${ti + 1}/${phase.tasks.length}: ${task.label || task.task.substring(0, 30)}`);
 
-                const result = await executeTask(task, ti, api, workspace, mcpManager, config, signal, previousOutput);
+                const result = await executeTask(task, ti, api, workspace, mcpManager, config, signal, previousOutput, events);
                 taskResults.push(result);
                 events.onWorkflowTaskEnd?.(pi, ti, result);
 

@@ -4,15 +4,26 @@ import * as path from 'path';
 import * as os from 'os';
 import { SandboxConfig, DEFAULT_SANDBOX_CONFIG } from './sandbox';
 import { McpServerConfig } from './mcp';
+import { ApiEndpointMode, normalizeApiEndpointMode } from './api';
 
 const MAX_MODEL_TOKENS = 131072;
-const DEFAULT_MIMO_MODELS = ['mimo-v2.5-pro', 'mimo-v2.5', 'mimo-v2-pro', 'mimo-v2-mini'];
+const DEFAULT_MIMO_MODELS = [
+    'mimo-v2.5-pro',
+    'mimo-v2.5',
+    'mimo-v2.5-asr',
+    'mimo-v2.5-tts-voiceclone',
+    'mimo-v2.5-tts-voicedesign',
+    'mimo-v2.5-tts',
+    'mimo-v2-pro',
+    'mimo-v2-mini',
+];
 
 export type ProviderProfileSetting = {
     id: string;
     name: string;
     provider?: string;
     base_url: string;
+    api_endpoint: ApiEndpointMode;
     model: string;
     api_key: string;
     models: string[];
@@ -26,6 +37,7 @@ export type ModelRouteSetting = {
 export interface MiMoConfig {
     apiKey: string;
     baseUrl: string;
+    apiEndpoint: ApiEndpointMode;
     model: string;
     models: string[];
     activeProviderProfile: string;
@@ -116,6 +128,7 @@ export function loadConfig(): MiMoConfig {
         || '';
 
     const baseUrl = activeProfile?.base_url || baseUrlBeforeProfile;
+    const apiEndpoint = normalizeApiEndpointMode(activeProfile?.api_endpoint || settings?.api?.api_endpoint);
 
     const model = requestedRoute?.model
         || activeProfile?.model
@@ -138,6 +151,7 @@ export function loadConfig(): MiMoConfig {
     return {
         apiKey,
         baseUrl: baseUrl.replace(/\/+$/, ''),
+        apiEndpoint,
         model,
         models,
         activeProviderProfile: activeProviderProfile || '',
@@ -187,11 +201,11 @@ export function loadConfig(): MiMoConfig {
         },
         infinite: {
             maxRounds: cfg.get<number>('infinite.maxRounds')
-                ?? settings?.infinite?.max_rounds ?? 300,
+                ?? settings?.infinite?.max_rounds ?? 160,
             hardMultiplier: cfg.get<number>('infinite.hardMultiplier')
-                ?? settings?.infinite?.hard_multiplier ?? 2,
+                ?? settings?.infinite?.hard_multiplier ?? 1.6,
             stallLimit: cfg.get<number>('infinite.stallLimit')
-                ?? settings?.infinite?.stall_limit ?? 5,
+                ?? settings?.infinite?.stall_limit ?? 4,
         },
         context: {
             autoCompress: cfg.get<boolean>('context.autoCompress')
@@ -254,6 +268,7 @@ function sanitizeProviderProfiles(input: unknown): ProviderProfileSetting[] {
             const name = sanitizeString(raw.name, 120) || id || '';
             const provider = sanitizeString(raw.provider, 80);
             const baseUrl = sanitizeString(raw.base_url, 2048);
+            const apiEndpoint = normalizeApiEndpointMode(raw.api_endpoint);
             const model = sanitizeString(raw.model, 128);
             const apiKey = sanitizeString(raw.api_key, 4096);
             const models = Array.isArray(raw.models)
@@ -265,6 +280,7 @@ function sanitizeProviderProfiles(input: unknown): ProviderProfileSetting[] {
                 name,
                 provider: provider || inferProviderFromBaseUrl(baseUrl),
                 base_url: baseUrl.replace(/\/+$/, ''),
+                api_endpoint: apiEndpoint,
                 model: model || '',
                 api_key: apiKey || '',
                 models: models || [],
@@ -388,6 +404,7 @@ export function getSettingsPanel(): Record<string, any> {
     return {
         api_key: activeProfile?.api_key || s?.api?.api_key || s?.api?.apiKey || '',
         base_url: activeProfile?.base_url || s?.api?.base_url || 'https://token-plan-cn.xiaomimimo.com/v1',
+        api_endpoint: normalizeApiEndpointMode(activeProfile?.api_endpoint || s?.api?.api_endpoint),
         model: activeRoute?.model || activeProfile?.model || s?.api?.model || 'mimo-v2.5-pro',
         models: activeProfile?.models?.length ? activeProfile.models : (s?.api?.models || []),
         active_provider_profile: activeProviderProfile,
@@ -419,5 +436,7 @@ export function getSettingsPanel(): Record<string, any> {
         memory_learn_from_explicit_preferences: s?.memory?.learn_from_explicit_preferences ?? true,
         memory_max_items: Math.max(10, Math.min(500, s?.memory?.max_items ?? 120)),
         memory_max_injected: Math.max(0, Math.min(20, s?.memory?.max_injected ?? 8)),
+        ui_completion_sound: s?.ui?.completion_sound !== false,
+        ui_completion_sound_volume: Math.max(0, Math.min(100, s?.ui?.completion_sound_volume ?? 70)),
     };
 }

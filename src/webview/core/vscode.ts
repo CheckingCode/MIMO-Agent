@@ -119,7 +119,8 @@ export const vscode = {
     },
 
     setReasoningEffort(reasoning_effort: 'turbo' | 'fast' | 'balanced' | 'deep' | 'max'): void {
-        api.postMessage({ type: 'saveSettings', settings: { reasoning_effort }, silent: true });
+        saveWindowState({ reasoningEffort: reasoning_effort });
+        api.postMessage({ type: 'setReasoningEffort', reasoning_effort });
     },
 
     skillList(): void {
@@ -163,6 +164,7 @@ export const vscode = {
     },
 
     setUiLang(lang: 'en' | 'zh'): void {
+        saveWindowState({ uiLang: lang });
         api.postMessage({ type: 'setUiLang', lang });
     },
 

@@ -94,7 +94,35 @@ export class MiMoAgent extends EventEmitter {
     private getApiForEndpoint(endpointId?: string): MiMoAPI {
         const profile = this.getProfile(endpointId);
         if (!profile) return this.api;
-        return new MiMoAPI(profile.api_key || this.config.apiKey, profile.base_url || this.config.baseUrl);
+        return new MiMoAPI(
+            profile.api_key || this.config.apiKey,
+            profile.base_url || this.config.baseUrl,
+            profile.api_endpoint || this.config.apiEndpoint,
+        );
+    }
+
+    private prepareBuiltinMultimodalArgs(
+        toolName: string,
+        args: Record<string, any>,
+        conv?: ConversationState,
+    ): Record<string, any> {
+        const endpointId = this.getConversationEndpointId(conv);
+        const profile = this.getProfile(endpointId);
+        const prepared: Record<string, any> = {
+            ...args,
+            _mimo_api_key: args._mimo_api_key || profile?.api_key || this.config.apiKey,
+            _mimo_base_url: args._mimo_base_url || profile?.base_url || this.config.baseUrl,
+            _mimo_api_endpoint: args._mimo_api_endpoint || profile?.api_endpoint || this.config.apiEndpoint,
+            _mimo_multimodal_model: args._mimo_multimodal_model || this.findVisionModel(conv?.model || this.config.model, endpointId) || 'mimo-v2.5',
+            _mimo_tts_model: args._mimo_tts_model || 'mimo-v2.5-tts',
+            _mimo_asr_model: args._mimo_asr_model || 'mimo-v2.5-asr',
+        };
+        if (/transcribe_audio$/i.test(toolName) && !prepared.model) {
+            prepared.model = prepared._mimo_asr_model;
+        } else if (/synthesize_speech$/i.test(toolName) && !prepared.model) {
+            prepared.model = prepared._mimo_tts_model;
+        }
+        return prepared;
     }
 
     private getConversationEndpointId(conv?: ConversationState): string {
@@ -163,34 +191,102 @@ export class MiMoAgent extends EventEmitter {
         return this.getModelCapabilities(routedModel).thinkingControl;
     }
 
+    private getReasoningProfile(): {
+        tokenMultiplier: number;
+        roundMultiplier: number;
+        stallMultiplier: number;
+        temperature?: number;
+        topP?: number;
+        thinking?: 'enabled' | 'disabled';
+        directMaxTokens: number;
+    } {
+        const effort = this.config.reasoningEffort || (this.config.enableThinking ? 'deep' : 'balanced');
+        switch (effort) {
+            case 'turbo':
+                return {
+                    tokenMultiplier: 0.4,
+                    roundMultiplier: 0.3,
+                    stallMultiplier: 0.5,
+                    temperature: 0.2,
+                    topP: 0.8,
+                    thinking: 'disabled',
+                    directMaxTokens: 500,
+                };
+            case 'fast':
+                return {
+                    tokenMultiplier: 0.6,
+                    roundMultiplier: 0.5,
+                    stallMultiplier: 0.65,
+                    temperature: 0.4,
+                    topP: 0.9,
+                    thinking: 'disabled',
+                    directMaxTokens: 900,
+                };
+            case 'deep':
+                return {
+                    tokenMultiplier: 1.15,
+                    roundMultiplier: 1.05,
+                    stallMultiplier: 1.05,
+                    temperature: 0.55,
+                    thinking: 'enabled',
+                    directMaxTokens: 2600,
+                };
+            case 'max':
+                return {
+                    tokenMultiplier: 1.45,
+                    roundMultiplier: 1.35,
+                    stallMultiplier: 1.25,
+                    temperature: 0.35,
+                    topP: 0.9,
+                    thinking: 'enabled',
+                    directMaxTokens: 3800,
+                };
+            default:
+                return {
+                    tokenMultiplier: 0.85,
+                    roundMultiplier: 0.75,
+                    stallMultiplier: 0.85,
+                    directMaxTokens: 1600,
+                };
+        }
+    }
+
     private buildChatParams(
         model: string,
         messages: ChatMessage[] | Array<{ role: 'system' | 'user' | 'assistant' | 'tool'; content: any }>,
         options: Record<string, any> = {},
         endpointId = '',
     ): Record<string, any> {
-        const configuredMaxTokens = Number(options.max_tokens ?? this.config.maxTokens);
+        const reasoningProfile = this.getReasoningProfile();
+        const applyReasoningMultiplier = options._applyReasoningMultiplier !== false;
+        const requestedMaxTokens = Number(options.max_tokens ?? this.config.maxTokens);
+        const configuredMaxTokens = applyReasoningMultiplier
+            ? Math.round(requestedMaxTokens * reasoningProfile.tokenMultiplier)
+            : requestedMaxTokens;
         const maxOutputTokens = Math.max(1, Math.min(
             Number.isFinite(configuredMaxTokens) ? configuredMaxTokens : 8192,
             65536,
         ));
+        const temperature = options.temperature ?? reasoningProfile.temperature ?? this.config.temperature;
+        const topP = options.top_p ?? reasoningProfile.topP ?? this.config.topP;
         const params: Record<string, any> = {
             model,
             messages,
             max_tokens: maxOutputTokens,
-            temperature: options.temperature ?? this.config.temperature,
-            top_p: options.top_p ?? this.config.topP,
+            temperature,
+            top_p: topP,
             stream_options: options.stream_options ?? { include_usage: true },
             ...options,
         };
         params.max_tokens = maxOutputTokens;
         if (params.stream_options === null) delete params.stream_options;
-        if (!this.config.enableThinking && this.shouldSendThinkingControl(model, endpointId)) {
+        if (this.shouldSendThinkingControl(model, endpointId) && reasoningProfile.thinking) {
             params.extra_body = {
                 ...(params.extra_body || {}),
-                thinking: { type: 'disabled' },
+                thinking: { type: reasoningProfile.thinking },
             };
         }
+        delete params._applyReasoningMultiplier;
         return params;
     }
 
@@ -282,8 +378,8 @@ export class MiMoAgent extends EventEmitter {
         if (clean.length < 1800) return false;
         const headingCount = (clean.match(/^#{1,3}\s+\S+/gm) || []).length;
         const bulletCount = (clean.match(/^\s*(?:[-*]|\d+\.)\s+\S+/gm) || []).length;
-        const reportMarkers = /(summary|report|audit|review|findings|conclusion|validation|next steps|总结|报告|审计|评审|结论|验证|问题|建议|修复)/i.test(clean);
-        const finalMarkers = /(done|completed|fixed|implemented|saved|已完成|完成|已修复|已实现|已保存|无需继续|未修改文件)/i.test(clean);
+        const reportMarkers = /(summary|report|audit|review|findings|conclusion|validation|next steps|final notes|follow-up|fix|fixed|implementation|implemented)/i.test(clean);
+        const finalMarkers = /(done|completed|fixed|implemented|saved|resolved|shipped|finished)/i.test(clean);
         const looksStructured = headingCount >= 2 || bulletCount >= 6;
         return reportMarkers && looksStructured && (finalMarkers || clean.length >= 3000);
     }
@@ -291,10 +387,10 @@ export class MiMoAgent extends EventEmitter {
     private isDeliverySummary(text: string): boolean {
         const clean = (text || '').trim();
         if (clean.length < 120) return false;
-        const hasDone = /(完成总结|任务已完成|任务完成|已完成|完成|done|completed|final summary)/i.test(clean);
-        const hasFile = /(\.md\b|交付文件|文件已|文件写入|已生成|已保存|saved|generated|written)/i.test(clean);
-        const hasStats = /(统计|共\d+|包含\d+|文献|引用|验证|DOI|tokens?|lines?|words?)/i.test(clean);
-        const hasRiskOrNext = /(风险|建议|注意|后续|next|risk|warning|recommend)/i.test(clean);
+        const hasDone = /(done|completed|final summary|task completed|finished)/i.test(clean);
+        const hasFile = /(\.md\b|artifacts?:|files? written|saved|generated|written)/i.test(clean);
+        const hasStats = /(stats?|DOI|tokens?|lines?|words?|validated|verification)/i.test(clean);
+        const hasRiskOrNext = /(next|risk|warning|recommend|follow-up)/i.test(clean);
         return hasDone && hasFile && (hasStats || hasRiskOrNext);
     }
 
@@ -315,14 +411,14 @@ export class MiMoAgent extends EventEmitter {
     private maybeSaveLongFinalResponse(response: string, events: AgentEvents): string {
         const clean = (response || '').trim();
         if (clean.length < 3000 && !this.isSubstantialFinalReport(clean)) return response;
-        if (/Saved copy:\s+.+\.md|已另存为[:：]\s+.+\.md/i.test(clean)) return response;
+        if (/Saved copy:\s+.+\.md|Copy saved:\s+.+\.md/i.test(clean)) return response;
 
         try {
             const filename = this.buildSummaryFilename(clean);
             const target = path.join(this.config.workspace, filename);
             fs.writeFileSync(target, clean.endsWith('\n') ? clean : `${clean}\n`, 'utf-8');
             events.onReasoning(`[Summary] Long final response saved to ${filename}.`);
-            return `${clean}\n\n已另存为: ${filename}`;
+            return `${clean}\n\nCopy saved: ${filename}`;
         } catch (e: any) {
             events.onReasoning(`[Summary] Failed to save long final response: ${String(e?.message || e).slice(0, 160)}`);
             return response;
@@ -343,8 +439,19 @@ export class MiMoAgent extends EventEmitter {
         return String(candidate || '')
             .trim()
             .replace(/^[`"'“”‘’]+|[`"'“”‘’]+$/g, '')
-            .replace(/[.,，。:：;；)\]}]+$/g, '')
+            .replace(/[.,????????;:?\]}]+$/g, '')
             .trim();
+    }
+
+    private isDeliverablePath(filePath: string): boolean {
+        const normalized = String(filePath || '').trim().replace(/\\/g, '/');
+        if (!normalized) return false;
+        const ext = path.extname(normalized).replace(/^\./, '').toLowerCase();
+        if (!ext) return false;
+        const sourceCodeExtensions = new Set([
+            'html', 'htm', 'css', 'scss', 'sass', 'less', 'js', 'jsx', 'ts', 'tsx', 'json', 'md', 'txt', 'xml', 'yml', 'yaml', 'py', 'java', 'c', 'cc', 'cpp', 'h', 'hpp', 'rs', 'go', 'php', 'rb', 'sh', 'ps1', 'bat'
+        ]);
+        return !sourceCodeExtensions.has(ext);
     }
 
     private extractArtifactPathsFromText(text: string): string[] {
@@ -361,7 +468,7 @@ export class MiMoAgent extends EventEmitter {
         for (const pattern of patterns) {
             for (const match of raw.matchAll(pattern)) {
                 const value = this.cleanArtifactPath(match[1] || match[0] || '');
-                if (value) found.push(value);
+                if (value && this.isDeliverablePath(value)) found.push(value);
             }
         }
         return found;
@@ -372,14 +479,23 @@ export class MiMoAgent extends EventEmitter {
         const artifacts: string[] = [];
         const add = (candidate: string) => {
             const clean = this.cleanArtifactPath(candidate);
-            if (!clean) return;
+            if (!clean || !this.isDeliverablePath(clean)) return;
             const key = clean.replace(/\\/g, '/').toLowerCase();
             if (seen.has(key)) return;
             seen.add(key);
             artifacts.push(clean);
         };
 
-        for (const msg of conv.messages.slice(-lookback)) {
+        const recentMessages = conv.messages.slice(-lookback);
+        let startIndex = 0;
+        for (let i = recentMessages.length - 1; i >= 0; i--) {
+            if (recentMessages[i].role === 'user') {
+                startIndex = i;
+                break;
+            }
+        }
+
+        for (const msg of recentMessages.slice(startIndex)) {
             if (msg.role === 'assistant' && msg.tool_calls?.length) {
                 for (const tc of msg.tool_calls) {
                     const args = this.parseToolArgs(tc);
@@ -405,7 +521,7 @@ export class MiMoAgent extends EventEmitter {
         if (artifacts.length === 0) return finalText;
 
         const useChinese = conv.uiLang !== 'en' || /[\u4e00-\u9fff]/.test(cleanFinal);
-        const heading = useChinese ? '交付文件：' : 'Artifacts:';
+        const heading = 'Artifacts:';
         const lines = artifacts.map(filePath => `- \`${filePath}\``);
         return `${cleanFinal.trim()}\n\n${heading}\n${lines.join('\n')}`;
     }
@@ -447,6 +563,11 @@ export class MiMoAgent extends EventEmitter {
         this.memoryManager.updateConfig(newConfig.workspace, newConfig.memory, this.windowSessionId);
         this.mcpManager.disconnectAll();
         this.initMcp();
+    }
+
+    setReasoningEffort(effort: MiMoConfig['reasoningEffort']): void {
+        this.config.reasoningEffort = effort;
+        this.config.enableThinking = effort === 'deep' || effort === 'max';
     }
 
     private async initMcp(): Promise<void> {
@@ -1466,7 +1587,7 @@ Updated summary:`;
                 .slice(0, 240);
             if (normalized.length < 40) continue;
             const count = (counts.get(normalized) || 0) + 1;
-            if (count >= 4) return { detected: true, count };
+            if (count >= 5) return { detected: true, count };
             counts.set(normalized, count);
         }
 
@@ -2087,6 +2208,7 @@ Change strategy now:
         const trimmed = this.extractMessageText(text).trim();
         if (!trimmed) return false;
         if (this.isDeliverySummary(trimmed) || this.isSubstantialFinalReport(trimmed)) return false;
+        if (this.isRawShellCommandDraft(trimmed)) return true;
 
         const saysWillInspect = /(?:let me|i(?:'|’)ll|i will|i need to|first i|now i).{0,120}(?:inspect|check|read|list|search|look|open|scan|run|verify|diff)|(?:我来|我先|让我|先|现在|接下来).{0,120}(?:看看|查看|检查|读取|列出|浏览|搜索|找|运行|验证|确认|diff|审核)/i.test(trimmed);
         const referencesToolTarget = /[A-Za-z]:[\\/]|(?:^|[\s"'`])\.{1,2}[\\/]|(?:read_file|list_directory|search_files|glob_files|git diff|git status|execute_command)|(?:\.pptx?|\.pdf|\.docx?|\.xlsx?|\.html?|\.tsx?|\.jsx?|\.ts|\.js|\.py|\.json|\.md)\b|(?:目录|文件|文件夹|项目|代码|改动|变更|diff|暂存|git|工作区|开题)/i.test(trimmed);
@@ -2094,6 +2216,27 @@ Change strategy now:
         const tooShortToBeDeliverable = trimmed.length < 900;
 
         return (saysWillInspect || asksUserToWait) && referencesToolTarget && tooShortToBeDeliverable;
+    }
+
+    private isRawShellCommandDraft(text: string): boolean {
+        const lines = String(text || '')
+            .split(/\r?\n/)
+            .map(line => line.trim())
+            .filter(Boolean);
+        if (lines.length < 3) return false;
+
+        const commandLike = lines.filter(line =>
+            /^\$[A-Za-z_][\w-]*\s*=/.test(line)
+            || /^[A-Za-z_][\w-]*=.*$/.test(line)
+            || /^(?:chcp|cd|dir|ls|rg|grep|findstr|git|npm|pnpm|yarn|node|python|py|powershell|pwsh|cmd|foreach|for|if|Get-|Set-|Write-|Select-|Copy-|Move-|Remove-)/i.test(line)
+            || /\|\s*(?:Select-|Where-|ForEach-|findstr|grep|rg)/i.test(line)
+            || /\[System\.[^\]]+\]::/.test(line)
+        ).length;
+        const hasPlainInstruction = lines.some(line =>
+            /^(?:find|check|inspect|search|replace|update|write|read|list)\b/i.test(line)
+            && !/[;|&]|\$\(|^\w+\s*=/.test(line)
+        );
+        return commandLike >= 3 && (hasPlainInstruction || commandLike / lines.length >= 0.6);
     }
 
     private shouldContinueAutoAfterTextFinal(
@@ -2243,6 +2386,18 @@ Continue the task now. Do not repeat the final draft. Use tools if needed to ins
             child.stdin.write(patch);
             child.stdin.end();
         });
+    }
+
+    private filterNewGitPatchBlocks(previousPatch: string, currentPatch: string): string {
+        const splitBlocks = (patch: string): string[] => {
+            const normalized = String(patch || '').replace(/\r\n/g, '\n');
+            const matches = normalized.match(/^diff --git [\s\S]*?(?=^diff --git |\s*$)/gm);
+            return matches ? matches.map(block => block.trim()).filter(Boolean) : [];
+        };
+        const previous = new Set(splitBlocks(previousPatch).map(block => block.replace(/\s+$/gm, '').trim()));
+        return splitBlocks(currentPatch)
+            .filter(block => !previous.has(block.replace(/\s+$/gm, '').trim()))
+            .join('\n\n');
     }
 
     private parseGitNumstat(numstat: string): TaskChangeFile[] {
@@ -3329,6 +3484,9 @@ ${friendlyError}`;
             toolCalls.forEach((tc, i) => {
                 let args: Record<string, any> = {};
                 try { args = JSON.parse(tc.function.arguments); } catch { /* empty */ }
+                if (this.mcpManager.isMcpTool(tc.function.name) && /^mcp_mimo_multimodal_/i.test(tc.function.name)) {
+                    args = this.prepareBuiltinMultimodalArgs(tc.function.name, args, conv);
+                }
                 const isParallel = PARALLEL_TOOLS.has(tc.function.name)
                     && !this.mcpManager.isMcpTool(tc.function.name);
                     // Note: PARALLEL_TOOLS only contains read-only tools, safe to parallelize even in polling mode.
@@ -4431,6 +4589,9 @@ ISSUE: [severity:critical/high/medium/low] [文件路径:行号] [问题描述]
 
                 let args: Record<string, any> = {};
                 try { args = JSON.parse(tc.function.arguments); } catch { /* empty */ }
+                if (this.mcpManager.isMcpTool(tc.function.name) && /^mcp_mimo_multimodal_/i.test(tc.function.name)) {
+                    args = this.prepareBuiltinMultimodalArgs(tc.function.name, args, conv);
+                }
 
                 events.onAdversarialToolStart?.(persona.id, tc.function.name, args);
                 const t0 = Date.now();

@@ -25,6 +25,8 @@ const settingsTranslations: Record<SettingsLang, Record<string, string>> = {
         'profile.name': 'Name',
         'provider.select': 'Provider',
         'provider.mimo': 'MiMo',
+        'provider.mimo_balance': 'MiMo Balance',
+        'provider.mimo_token_plan': 'MiMo Token Plan',
         'provider.deepseek': 'DeepSeek',
         'provider.openai': 'OpenAI',
         'provider.qwen': 'Qwen / DashScope',
@@ -53,6 +55,9 @@ const settingsTranslations: Record<SettingsLang, Record<string, string>> = {
         'model.card.default': 'Default',
         'model.card.model': 'Model ID',
         'model.manager.hint': 'Each card is one runnable model with its own API key, endpoint, and model ID. Copy a card when two models share most settings.',
+        'mimo.endpoint.note.title': 'MiMo API note',
+        'mimo.endpoint.note.balance': 'Regular MiMo balance: use the API key from the regular MiMo console with Base URL https://api.xiaomimimo.com/v1.',
+        'mimo.endpoint.note.token': 'Token Plan: use the Token Plan key with Base URL https://token-plan-cn.xiaomimimo.com/v1. The two keys are not interchangeable.',
         'api.key.show': 'Show API Key',
         'api.key.hide': 'Hide API Key',
         'model.list.title': 'Model List',
@@ -62,6 +67,9 @@ const settingsTranslations: Record<SettingsLang, Record<string, string>> = {
         'model.connection': 'Model Connection',
         'api.key': 'API Key',
         'base.url': 'Base URL',
+        'api.endpoint': 'API Endpoint',
+        'api.endpoint.chat': 'Chat Completions',
+        'api.endpoint.responses': 'Responses',
         'default.model': 'Default Model',
         'model.list': 'Model List (one per line)',
         'generation': 'Generation',
@@ -84,6 +92,10 @@ const settingsTranslations: Record<SettingsLang, Record<string, string>> = {
         'generation.tokens.hint': 'Higher token budgets help long coding tasks but increase cost and latency.',
         'generation.timeout.hint': 'Longer command timeout is useful for installs, tests, and data processing scripts.',
         'generation.output.hint': 'Tool output is compacted when it exceeds this limit to keep the UI responsive.',
+        'notifications.title': 'Notifications',
+        'completion.sound': 'Play a sound when a task completes',
+        'completion.sound.volume': 'Volume',
+        'completion.sound.hint': 'MiMo plays a short local chime after a live task finishes. History replay and restored conversations stay silent.',
         'memory.title': 'Learning Memory',
         'memory.enabled': 'Enable local long-term memory',
         'memory.learn': 'Learn explicit preferences from chat',
@@ -158,6 +170,10 @@ const settingsTranslations: Record<SettingsLang, Record<string, string>> = {
         'generation.tokens.hint': '更高 token 预算适合长任务，但会增加成本和等待时间。',
         'generation.timeout.hint': '更长命令超时适合安装依赖、运行测试和数据处理脚本。',
         'generation.output.hint': '工具输出超过该限制会被压缩，以保持界面流畅。',
+        'notifications.title': '通知提醒',
+        'completion.sound': '任务完成时播放音效',
+        'completion.sound.volume': '音量',
+        'completion.sound.hint': 'MiMo 会在实时任务完成后播放一声本地短提示音；历史回放和恢复对话不会播放。',
         'memory.title': '学习记忆',
         'memory.enabled': '启用本地长期记忆',
         'memory.learn': '从聊天中学习明确偏好',
@@ -196,7 +212,9 @@ function t(key: string): string {
     if (settingsLang === 'zh') {
         const zhProviderFallback: Record<string, string> = {
             'provider.select': '服务商',
-            'provider.mimo': 'MiMo',
+        'provider.mimo': 'MiMo',
+        'provider.mimo_balance': 'MiMo 普通余额',
+        'provider.mimo_token_plan': 'MiMo Token Plan',
             'provider.deepseek': 'DeepSeek',
             'provider.openai': 'OpenAI',
             'provider.qwen': '通义千问 / DashScope',
@@ -225,6 +243,9 @@ function t(key: string): string {
         'model.card.default': '默认',
         'model.card.model': '模型 ID',
         'model.manager.hint': '每张卡片就是一个可运行模型，拥有自己的 API Key、Base URL 和模型 ID。配置相近时可以复制后再改。',
+        'mimo.endpoint.note.title': 'MiMo API 与 Base URL 区别',
+        'mimo.endpoint.note.balance': '普通余额：使用 MiMo 普通余额控制台的 API Key，Base URL 填 https://api.xiaomimimo.com/v1。',
+        'mimo.endpoint.note.token': 'Token Plan：使用 Token Plan 的 API Key，Base URL 填 https://token-plan-cn.xiaomimimo.com/v1。两套 Key 不通用。',
         'api.key.show': '查看 API Key',
         'api.key.hide': '隐藏 API Key',
     };
@@ -287,6 +308,9 @@ function sanitizeSettings(input: unknown): Record<string, unknown> {
     const model = sanitizeString(s.model, 128);
     if (model !== undefined) out.model = model;
 
+    const apiEndpoint = sanitizeString(s.api_endpoint, 32);
+    if (apiEndpoint && ['chat_completions', 'responses'].includes(apiEndpoint)) out.api_endpoint = apiEndpoint;
+
     const activeProviderProfile = sanitizeString(s.active_provider_profile, 80);
     if (activeProviderProfile !== undefined) out.active_provider_profile = activeProviderProfile;
     if (s.active_route && typeof s.active_route === 'object') {
@@ -305,13 +329,23 @@ function sanitizeSettings(input: unknown): Record<string, unknown> {
                 const name = sanitizeString(raw.name, 120) || id;
                 const provider = sanitizeString(raw.provider, 80) || detectProviderFromBaseUrl(String(raw.base_url || ''));
                 const baseUrl = sanitizeString(raw.base_url, 2048);
+                const apiEndpoint = sanitizeString(raw.api_endpoint, 32);
                 const profileModel = sanitizeString(raw.model, 128) || '';
                 const apiKey = sanitizeString(raw.api_key, 4096) || '';
                 const profileModels = Array.isArray(raw.models)
                     ? raw.models.map(v => sanitizeString(v, 128)).filter((v): v is string => !!v).slice(0, 100)
                     : [];
                 if (!id || !baseUrl || !/^https?:\/\//i.test(baseUrl)) return undefined;
-                return { id, name, provider, base_url: baseUrl.replace(/\/+$/, ''), model: profileModel, api_key: apiKey, models: profileModels };
+                return {
+                    id,
+                    name,
+                    provider,
+                    base_url: baseUrl.replace(/\/+$/, ''),
+                    api_endpoint: apiEndpoint === 'responses' ? 'responses' : 'chat_completions',
+                    model: profileModel,
+                    api_key: apiKey,
+                    models: profileModels,
+                };
             })
             .filter(Boolean)
             .slice(0, 50);
@@ -338,6 +372,9 @@ function sanitizeSettings(input: unknown): Record<string, unknown> {
 
     const commandTimeout = sanitizeNumber(s.command_timeout, 5, 3600);
     if (commandTimeout !== undefined) out.command_timeout = Math.round(commandTimeout);
+
+    const completionSoundVolume = sanitizeNumber(s.ui_completion_sound_volume, 0, 100);
+    if (completionSoundVolume !== undefined) out.ui_completion_sound_volume = Math.round(completionSoundVolume);
 
     const reasoningEffort = sanitizeString(s.reasoning_effort, 16);
     if (reasoningEffort && ['turbo', 'fast', 'balanced', 'deep', 'max'].includes(reasoningEffort)) {
@@ -367,7 +404,7 @@ function sanitizeSettings(input: unknown): Record<string, unknown> {
     const sandboxCpu = sanitizeNumber(s.sandbox_cpu, 1, 16);
     if (sandboxCpu !== undefined) out.sandbox_cpu = Math.round(sandboxCpu);
 
-    for (const key of ['enable_thinking', 'sandbox_enabled', 'sandbox_git_snapshot', 'sandbox_logging', 'sandbox_network_disabled', 'dependency_install_enabled', 'memory_enabled', 'memory_learn_from_explicit_preferences']) {
+    for (const key of ['enable_thinking', 'ui_completion_sound', 'sandbox_enabled', 'sandbox_git_snapshot', 'sandbox_logging', 'sandbox_network_disabled', 'dependency_install_enabled', 'memory_enabled', 'memory_learn_from_explicit_preferences']) {
         const value = sanitizeBoolean(s[key]);
         if (value !== undefined) out[key] = value;
     }
@@ -386,6 +423,7 @@ function applySettings(input: unknown): boolean {
     let ok = true;
     if (s.api_key !== undefined) ok = saveSetting('api.api_key', s.api_key) && ok;
     if (s.base_url !== undefined) ok = saveSetting('api.base_url', s.base_url) && ok;
+    if (s.api_endpoint !== undefined) ok = saveSetting('api.api_endpoint', s.api_endpoint) && ok;
     if (s.model !== undefined) ok = saveSetting('api.model', s.model) && ok;
     if (s.models !== undefined) ok = saveSetting('api.models', s.models) && ok;
     if (s.active_provider_profile !== undefined) ok = saveSetting('api.active_provider_profile', s.active_provider_profile) && ok;
@@ -398,6 +436,8 @@ function applySettings(input: unknown): boolean {
     if (s.reasoning_effort !== undefined) ok = saveSetting('agent.reasoning_effort', s.reasoning_effort) && ok;
     if (s.max_output_len !== undefined) ok = saveSetting('safety.max_output_len', s.max_output_len) && ok;
     if (s.command_timeout !== undefined) ok = saveSetting('safety.command_timeout', s.command_timeout) && ok;
+    if (s.ui_completion_sound !== undefined) ok = saveSetting('ui.completion_sound', s.ui_completion_sound) && ok;
+    if (s.ui_completion_sound_volume !== undefined) ok = saveSetting('ui.completion_sound_volume', s.ui_completion_sound_volume) && ok;
     if (s.sandbox_enabled !== undefined) ok = saveSetting('sandbox.enabled', s.sandbox_enabled) && ok;
     if (s.sandbox_mode !== undefined) ok = saveSetting('sandbox.mode', s.sandbox_mode) && ok;
     if (s.sandbox_image !== undefined) ok = saveSetting('sandbox.image', s.sandbox_image) && ok;
@@ -419,7 +459,8 @@ function applySettings(input: unknown): boolean {
 
 function providerPresetOptionsHtml(): string {
     const entries = [
-        'mimo',
+        'mimo_balance',
+        'mimo_token_plan',
         'deepseek',
         'openai',
         'qwen',
@@ -515,7 +556,7 @@ export class SettingsProvider {
 <style>
 :root{color-scheme:dark light}
 body{margin:0;background:var(--vscode-editor-background);color:var(--vscode-foreground);font-family:var(--vscode-font-family);font-size:13px}
-.page{max-width:980px;margin:0 auto;padding:24px 28px 40px}
+.page{max-width:1120px;margin:0 auto;padding:24px 28px 40px}
 .top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:20px;border-bottom:1px solid var(--vscode-editorWidget-border);padding-bottom:16px}
 h1{font-size:22px;margin:0 0 6px;font-weight:650}
 .sub{color:var(--vscode-descriptionForeground);line-height:1.5}
@@ -537,6 +578,13 @@ button:hover{filter:brightness(1.08)}
 .preset-row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .preset-btn{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);border:1px solid var(--vscode-editorWidget-border);padding:6px 8px}
 .preset-btn:hover{border-color:var(--vscode-focusBorder)}
+.preference-strip{display:grid;grid-template-columns:max-content max-content minmax(170px,.55fr) minmax(0,1fr);align-items:center;gap:8px 14px;border:1px solid var(--vscode-editorWidget-border);border-radius:6px;padding:10px 12px;background:color-mix(in srgb,var(--vscode-input-background) 78%,transparent)}
+.preference-strip-title{font-size:12px;font-weight:650;color:var(--vscode-foreground)}
+.preference-strip .check{margin:0;white-space:nowrap}
+.preference-strip .hint{margin:0}
+.volume-control{display:grid;grid-template-columns:max-content minmax(90px,1fr) 40px;align-items:center;gap:8px}
+.volume-control label,.volume-value{font-size:12px;color:var(--vscode-descriptionForeground)}
+.volume-control input[type="range"]{padding:0}
 .profile-bar{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:end;margin-bottom:12px}
 .model-row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end}
 .model-list{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 12px;min-height:30px}
@@ -545,18 +593,30 @@ button:hover{filter:brightness(1.08)}
 .model-chip.active{border-color:var(--vscode-focusBorder);box-shadow:0 0 0 1px color-mix(in srgb,var(--vscode-focusBorder) 55%,transparent)}
 .model-chip button{padding:0 4px;background:transparent;color:var(--vscode-descriptionForeground);border:0}
 .model-section .hint{margin-top:8px}
+.endpoint-note{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:4px 0 14px}
+.endpoint-note-card{border:1px solid var(--vscode-editorWidget-border);border-radius:6px;padding:10px 12px;background:color-mix(in srgb,var(--vscode-input-background) 82%,transparent)}
+.endpoint-note-title{font-size:12px;font-weight:650;margin-bottom:4px;color:var(--vscode-foreground)}
+.endpoint-note-text{font-size:12px;line-height:1.45;color:var(--vscode-descriptionForeground)}
+.endpoint-note code{font-family:var(--vscode-editor-font-family);font-size:11px;color:var(--vscode-foreground)}
 .models-toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}
 .models-toolbar .hint{margin:0;max-width:650px}
-.model-add-controls{display:grid;grid-template-columns:150px auto auto;gap:8px;align-items:center}
+.model-add-controls{display:grid;grid-template-columns:170px auto auto;gap:8px;align-items:center}
 .profile-cards{display:grid;gap:10px}
-.profile-card{border:1px solid var(--vscode-editorWidget-border);border-radius:6px;background:var(--vscode-input-background);padding:0}
+.profile-card{border:1px solid var(--vscode-editorWidget-border);border-radius:6px;background:var(--vscode-input-background);padding:0;overflow:hidden}
 .profile-card.active{border-color:var(--vscode-focusBorder);box-shadow:0 0 0 1px color-mix(in srgb,var(--vscode-focusBorder) 45%,transparent)}
-.profile-card-head{display:grid;grid-template-columns:minmax(150px,1fr) minmax(90px,.55fr) minmax(160px,1fr) minmax(180px,1.2fr) auto;align-items:center;gap:12px;padding:9px 12px}
+.profile-card-head{display:grid;grid-template-columns:24px minmax(180px,1.05fr) minmax(76px,max-content) minmax(150px,.9fr) minmax(220px,1.3fr) minmax(132px,max-content);align-items:center;gap:12px;padding:8px 12px;min-height:44px;user-select:none}
+.profile-drag-handle{display:inline-flex;align-items:center;justify-content:center;width:22px;height:28px;border:1px solid transparent;border-radius:5px;color:var(--vscode-descriptionForeground);cursor:grab;font-size:16px;line-height:1}
+.profile-drag-handle:hover{border-color:var(--vscode-editorWidget-border);background:color-mix(in srgb,var(--vscode-input-background) 70%,var(--vscode-foreground) 8%);color:var(--vscode-foreground)}
+.profile-drag-handle:active{cursor:grabbing}
+.profile-card.dragging{opacity:.35;border-style:dashed}
+.profile-card.drag-over-top{border-top:2px solid var(--vscode-focusBorder)}
+.profile-card.drag-over-bottom{border-bottom:2px solid var(--vscode-focusBorder)}
 .profile-card-title{display:flex;align-items:center;gap:8px;font-weight:650;min-width:0}
 .profile-card-title span,.profile-card-summary{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .profile-card-summary{color:var(--vscode-descriptionForeground);font-size:12px}
 .provider-pill{display:inline-flex;align-items:center;width:max-content;max-width:100%;border:1px solid var(--vscode-editorWidget-border);border-radius:999px;padding:2px 8px;color:var(--vscode-descriptionForeground);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.profile-card-actions{display:flex;gap:8px;white-space:nowrap}
+.profile-card-actions{display:flex;gap:8px;white-space:nowrap;justify-content:flex-end;min-width:0}
+.profile-card-actions button{background:transparent;color:var(--vscode-textLink-foreground);padding:3px 5px}
 .profile-card-grid{display:none;grid-template-columns:1fr 1fr;gap:10px 12px;border-top:1px solid var(--vscode-editorWidget-border);padding:12px}
 .profile-card.open .profile-card-grid{display:grid}
 .api-key-wrap{display:grid;grid-template-columns:1fr auto;gap:6px}
@@ -574,8 +634,31 @@ textarea{min-height:96px;resize:vertical}
 .check{display:flex;align-items:center;gap:8px;margin:9px 0}
 .check input{width:auto;flex:0 0 auto}
 .hint{font-size:12px;color:var(--vscode-descriptionForeground);line-height:1.45}
-.status{min-height:18px;margin-top:12px;color:var(--vscode-descriptionForeground)}
-@media (max-width:760px){.grid,.row,.param-grid,.preset-row,.profile-bar,.model-row,.profile-card-head,.profile-card-grid,.model-add-controls{grid-template-columns:1fr}.top{display:block}.actions{margin-top:12px;white-space:normal}.section.full{grid-column:auto}}
+.status{display:none;margin:0 0 14px;border:1px solid var(--vscode-editorWidget-border);border-radius:6px;padding:9px 12px;color:var(--vscode-foreground);background:var(--vscode-input-background)}
+.status.show{display:block}
+.status.ok{border-color:color-mix(in srgb,#4caf50 45%,var(--vscode-editorWidget-border));background:rgba(76,175,80,.1)}
+.status.error{border-color:color-mix(in srgb,#f44336 45%,var(--vscode-editorWidget-border));background:rgba(244,67,54,.1)}
+.toast{position:fixed;top:18px;right:22px;z-index:20;display:none;max-width:min(420px,calc(100vw - 44px));border:1px solid var(--vscode-editorWidget-border);border-radius:6px;padding:10px 12px;background:var(--vscode-editorWidget-background,var(--vscode-input-background));box-shadow:0 10px 28px rgba(0,0,0,.32);color:var(--vscode-foreground)}
+.toast.show{display:block}
+.toast.ok{border-color:rgba(76,175,80,.55)}
+.toast.error{border-color:rgba(244,67,54,.55)}
+@media (max-width:980px){
+  .models-toolbar{flex-direction:column;align-items:stretch}
+  .models-toolbar .hint{max-width:none}
+  .model-add-controls{grid-template-columns:minmax(160px,1fr) auto auto}
+  .profile-card-head{grid-template-columns:24px minmax(0,1.1fr) max-content minmax(0,1fr);grid-auto-flow:row}
+  .profile-card-actions{grid-column:1 / -1;justify-content:flex-end;flex-wrap:wrap}
+  .profile-card-summary:last-of-type{grid-column:1 / -1}
+}
+@media (max-width:760px){
+  .grid,.row,.param-grid,.preset-row,.profile-bar,.model-row,.profile-card-head,.profile-card-grid,.model-add-controls,.endpoint-note,.preference-strip{grid-template-columns:1fr}
+  .top{display:block}
+  .actions{margin-top:12px;white-space:normal}
+  .section.full{grid-column:auto}
+  .profile-card-actions{justify-content:flex-start}
+  .profile-drag-handle{align-self:start}
+  .preference-strip .check{white-space:normal}
+}
 </style>
 </head>
 <body>
@@ -590,10 +673,21 @@ textarea{min-height:96px;resize:vertical}
       <button id="save">${t('save.apply')}</button>
     </div>
   </div>
+  <div class="status" id="status" role="status" aria-live="polite"></div>
 
   <div class="grid">
     <section class="section full model-section">
       <h2>${t('model.list.title')}</h2>
+      <div class="endpoint-note">
+        <div class="endpoint-note-card">
+          <div class="endpoint-note-title">${t('mimo.endpoint.note.title')} - MiMo</div>
+          <div class="endpoint-note-text">${t('mimo.endpoint.note.balance')}</div>
+        </div>
+        <div class="endpoint-note-card">
+          <div class="endpoint-note-title">${t('mimo.endpoint.note.title')} - Token Plan</div>
+          <div class="endpoint-note-text">${t('mimo.endpoint.note.token')}</div>
+        </div>
+      </div>
       <div class="models-toolbar">
         <div class="hint">${t('model.manager.hint')}</div>
         <div class="model-add-controls">
@@ -630,6 +724,16 @@ textarea{min-height:96px;resize:vertical}
         </select>
       </div>
       <label class="check"><input id="enable_thinking" type="checkbox"> ${t('enable.thinking')}</label>
+      <div class="preference-strip">
+        <div class="preference-strip-title">${t('notifications.title')}</div>
+        <label class="check"><input id="ui_completion_sound" type="checkbox"> ${t('completion.sound')}</label>
+        <div class="volume-control">
+          <label for="ui_completion_sound_volume">${t('completion.sound.volume')}</label>
+          <input id="ui_completion_sound_volume" type="range" min="0" max="100" step="5">
+          <span class="volume-value" id="ui_completion_sound_volume_value">70%</span>
+        </div>
+        <div class="hint">${t('completion.sound.hint')}</div>
+      </div>
       <div class="generation-band">
         <div class="generation-band-title">${t('generation')}</div>
         <div class="preset-row">
@@ -646,7 +750,7 @@ textarea{min-height:96px;resize:vertical}
       </div>
     </section>
 
-    <section class="section full">
+    <section class="section">
       <h2>${t('sandbox.title')}</h2>
       <div class="row">
         <div class="field">
@@ -669,7 +773,7 @@ textarea{min-height:96px;resize:vertical}
       <div class="hint">${t('sandbox.hint')}</div>
     </section>
 
-    <section class="section full">
+    <section class="section">
       <h2>${t('dependency.title')}</h2>
       <label class="check"><input id="dependency_install_enabled" type="checkbox"> ${t('dependency.enabled')}</label>
       <div class="row">
@@ -693,7 +797,7 @@ textarea{min-height:96px;resize:vertical}
       <div class="hint">${t('dependency.hint')}</div>
     </section>
 
-    <section class="section full">
+    <section class="section">
       <h2>${t('memory.title')}</h2>
       <label class="check"><input id="memory_enabled" type="checkbox"> ${t('memory.enabled')}</label>
       <label class="check"><input id="memory_learn_from_explicit_preferences" type="checkbox"> ${t('memory.learn')}</label>
@@ -704,32 +808,34 @@ textarea{min-height:96px;resize:vertical}
       <div class="hint">${t('memory.hint')}</div>
     </section>
   </div>
-  <div class="status" id="status"></div>
 </div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script nonce="${nonce}">
 const vscode = acquireVsCodeApi();
 const $ = id => document.getElementById(id);
 const translations = ${pageTranslationsJson};
 const initialSettings = ${initialSettingsJson};
 const providerDefaults = {
-  mimo:{provider:'mimo',id:'mimo',name:'MiMo',base_url:'https://token-plan-cn.xiaomimimo.com/v1',model:'mimo-v2.5-pro',models:['mimo-v2.5-pro','mimo-v2.5','mimo-v2-pro','mimo-v2-mini']},
-  deepseek:{provider:'deepseek',id:'deepseek',name:'DeepSeek',base_url:'https://api.deepseek.com/v1',model:'deepseek-chat',models:['deepseek-chat','deepseek-reasoner']},
-  openai:{provider:'openai',id:'openai',name:'OpenAI',base_url:'https://api.openai.com/v1',model:'gpt-4o',models:['gpt-4o','gpt-4o-mini']},
-  qwen:{provider:'qwen',id:'qwen',name:'Qwen / DashScope',base_url:'https://dashscope.aliyuncs.com/compatible-mode/v1',model:'qwen-plus',models:['qwen-plus','qwen-max','qwen-turbo','qwen-long']},
-  zhipu:{provider:'zhipu',id:'zhipu',name:'Zhipu GLM',base_url:'https://open.bigmodel.cn/api/paas/v4',model:'glm-4-plus',models:['glm-4-plus','glm-4-air','glm-4-flash']},
-  moonshot:{provider:'moonshot',id:'moonshot',name:'Moonshot / Kimi',base_url:'https://api.moonshot.cn/v1',model:'moonshot-v1-8k',models:['moonshot-v1-8k','moonshot-v1-32k','moonshot-v1-128k']},
-  volcengine:{provider:'volcengine',id:'volcengine',name:'Volcengine Ark',base_url:'https://ark.cn-beijing.volces.com/api/v3',model:'doubao-1-5-pro-32k-250115',models:['doubao-1-5-pro-32k-250115','doubao-1-5-lite-32k-250115']},
-  siliconflow:{provider:'siliconflow',id:'siliconflow',name:'SiliconFlow',base_url:'https://api.siliconflow.cn/v1',model:'Qwen/Qwen2.5-72B-Instruct',models:['Qwen/Qwen2.5-72B-Instruct','deepseek-ai/DeepSeek-V3','deepseek-ai/DeepSeek-R1']},
-  qianfan:{provider:'qianfan',id:'qianfan',name:'Baidu Qianfan',base_url:'https://qianfan.baidubce.com/v2',model:'ernie-4.0-turbo-8k',models:['ernie-4.0-turbo-8k','ernie-3.5-8k','ernie-speed-8k']},
-  hunyuan:{provider:'hunyuan',id:'hunyuan',name:'Tencent Hunyuan',base_url:'https://api.hunyuan.cloud.tencent.com/v1',model:'hunyuan-turbos-latest',models:['hunyuan-turbos-latest','hunyuan-large','hunyuan-standard']},
-  openrouter:{provider:'openrouter',id:'openrouter',name:'OpenRouter',base_url:'https://openrouter.ai/api/v1',model:'openai/gpt-4o-mini',models:['openai/gpt-4o-mini','anthropic/claude-3.5-sonnet','google/gemini-2.0-flash-001','deepseek/deepseek-chat']},
-  groq:{provider:'groq',id:'groq',name:'Groq',base_url:'https://api.groq.com/openai/v1',model:'llama-3.3-70b-versatile',models:['llama-3.3-70b-versatile','llama-3.1-8b-instant','mixtral-8x7b-32768']},
-  gemini:{provider:'gemini',id:'gemini',name:'Google Gemini',base_url:'https://generativelanguage.googleapis.com/v1beta/openai',model:'gemini-2.0-flash',models:['gemini-2.0-flash','gemini-1.5-pro','gemini-1.5-flash']},
-  mistral:{provider:'mistral',id:'mistral',name:'Mistral AI',base_url:'https://api.mistral.ai/v1',model:'mistral-large-latest',models:['mistral-large-latest','mistral-small-latest','codestral-latest']},
-  xai:{provider:'xai',id:'xai',name:'xAI Grok',base_url:'https://api.x.ai/v1',model:'grok-3-mini',models:['grok-3-mini','grok-3','grok-2-vision-1212']},
-  custom:{provider:'custom',id:'custom',name:'Custom Model',base_url:'https://api.example.com/v1',model:'custom-model',models:['custom-model']},
+  mimo_balance:{provider:'mimo_balance',id:'mimo-balance',name:'MiMo Balance',base_url:'https://api.xiaomimimo.com/v1',api_endpoint:'chat_completions',model:'mimo-v2.5-pro',models:['mimo-v2.5-pro','mimo-v2.5','mimo-v2.5-asr','mimo-v2.5-tts-voiceclone','mimo-v2.5-tts-voicedesign','mimo-v2.5-tts','mimo-v2-pro']},
+  mimo_token_plan:{provider:'mimo_token_plan',id:'mimo-token-plan',name:'MiMo Token Plan',base_url:'https://token-plan-cn.xiaomimimo.com/v1',api_endpoint:'chat_completions',model:'mimo-v2.5-pro',models:['mimo-v2.5-pro','mimo-v2.5','mimo-v2.5-asr','mimo-v2.5-tts-voiceclone','mimo-v2.5-tts-voicedesign','mimo-v2.5-tts','mimo-v2-pro']},
+  mimo:{provider:'mimo_token_plan',id:'mimo-token-plan',name:'MiMo Token Plan',base_url:'https://token-plan-cn.xiaomimimo.com/v1',api_endpoint:'chat_completions',model:'mimo-v2.5-pro',models:['mimo-v2.5-pro','mimo-v2.5','mimo-v2.5-asr','mimo-v2.5-tts-voiceclone','mimo-v2.5-tts-voicedesign','mimo-v2.5-tts','mimo-v2-pro']},
+  deepseek:{provider:'deepseek',id:'deepseek',name:'DeepSeek',base_url:'https://api.deepseek.com/v1',api_endpoint:'chat_completions',model:'deepseek-chat',models:['deepseek-chat','deepseek-reasoner']},
+  openai:{provider:'openai',id:'openai',name:'OpenAI',base_url:'https://api.openai.com/v1',api_endpoint:'responses',model:'gpt-4o',models:['gpt-4o','gpt-4o-mini']},
+  qwen:{provider:'qwen',id:'qwen',name:'Qwen / DashScope',base_url:'https://dashscope.aliyuncs.com/compatible-mode/v1',api_endpoint:'chat_completions',model:'qwen-plus',models:['qwen-plus','qwen-max','qwen-turbo','qwen-long']},
+  zhipu:{provider:'zhipu',id:'zhipu',name:'Zhipu GLM',base_url:'https://open.bigmodel.cn/api/paas/v4',api_endpoint:'chat_completions',model:'glm-4-plus',models:['glm-4-plus','glm-4-air','glm-4-flash']},
+  moonshot:{provider:'moonshot',id:'moonshot',name:'Moonshot / Kimi',base_url:'https://api.moonshot.cn/v1',api_endpoint:'chat_completions',model:'moonshot-v1-8k',models:['moonshot-v1-8k','moonshot-v1-32k','moonshot-v1-128k']},
+  volcengine:{provider:'volcengine',id:'volcengine',name:'Volcengine Ark',base_url:'https://ark.cn-beijing.volces.com/api/v3',api_endpoint:'chat_completions',model:'doubao-1-5-pro-32k-250115',models:['doubao-1-5-pro-32k-250115','doubao-1-5-lite-32k-250115']},
+  siliconflow:{provider:'siliconflow',id:'siliconflow',name:'SiliconFlow',base_url:'https://api.siliconflow.cn/v1',api_endpoint:'chat_completions',model:'Qwen/Qwen2.5-72B-Instruct',models:['Qwen/Qwen2.5-72B-Instruct','deepseek-ai/DeepSeek-V3','deepseek-ai/DeepSeek-R1']},
+  qianfan:{provider:'qianfan',id:'qianfan',name:'Baidu Qianfan',base_url:'https://qianfan.baidubce.com/v2',api_endpoint:'chat_completions',model:'ernie-4.0-turbo-8k',models:['ernie-4.0-turbo-8k','ernie-3.5-8k','ernie-speed-8k']},
+  hunyuan:{provider:'hunyuan',id:'hunyuan',name:'Tencent Hunyuan',base_url:'https://api.hunyuan.cloud.tencent.com/v1',api_endpoint:'chat_completions',model:'hunyuan-turbos-latest',models:['hunyuan-turbos-latest','hunyuan-large','hunyuan-standard']},
+  openrouter:{provider:'openrouter',id:'openrouter',name:'OpenRouter',base_url:'https://openrouter.ai/api/v1',api_endpoint:'chat_completions',model:'openai/gpt-4o-mini',models:['openai/gpt-4o-mini','anthropic/claude-3.5-sonnet','google/gemini-2.0-flash-001','deepseek/deepseek-chat']},
+  groq:{provider:'groq',id:'groq',name:'Groq',base_url:'https://api.groq.com/openai/v1',api_endpoint:'chat_completions',model:'llama-3.3-70b-versatile',models:['llama-3.3-70b-versatile','llama-3.1-8b-instant','mixtral-8x7b-32768']},
+  gemini:{provider:'gemini',id:'gemini',name:'Google Gemini',base_url:'https://generativelanguage.googleapis.com/v1beta/openai',api_endpoint:'chat_completions',model:'gemini-2.0-flash',models:['gemini-2.0-flash','gemini-1.5-pro','gemini-1.5-flash']},
+  mistral:{provider:'mistral',id:'mistral',name:'Mistral AI',base_url:'https://api.mistral.ai/v1',api_endpoint:'chat_completions',model:'mistral-large-latest',models:['mistral-large-latest','mistral-small-latest','codestral-latest']},
+  xai:{provider:'xai',id:'xai',name:'xAI Grok',base_url:'https://api.x.ai/v1',api_endpoint:'chat_completions',model:'grok-3-mini',models:['grok-3-mini','grok-3','grok-2-vision-1212']},
+  custom:{provider:'custom',id:'custom',name:'Custom Model',base_url:'https://api.example.com/v1',api_endpoint:'chat_completions',model:'custom-model',models:['custom-model']},
 };
-const providerEntries = ['mimo','deepseek','openai','qwen','zhipu','moonshot','volcengine','siliconflow','qianfan','hunyuan','openrouter','groq','gemini','mistral','xai','custom'];
+const providerEntries = ['mimo_balance','mimo_token_plan','deepseek','openai','qwen','zhipu','moonshot','volcengine','siliconflow','qianfan','hunyuan','openrouter','groq','gemini','mistral','xai','custom'];
 let profiles = [];
 let activeProfileId = '';
 function trimTrailingSlashes(value){
@@ -743,6 +849,13 @@ function providerLabel(provider){
 }
 function providerOptions(selected){
   return providerEntries.map(value => '<option value="'+escapeAttr(value)+'"'+(value === selected ? ' selected' : '')+'>'+escapeHtml(providerLabel(value))+'</option>').join('');
+}
+function endpointOptions(selected){
+  const entries = [
+    { value: 'chat_completions', label: translations['api.endpoint.chat'] || 'Chat Completions' },
+    { value: 'responses', label: translations['api.endpoint.responses'] || 'Responses' },
+  ];
+  return entries.map(item => '<option value="'+escapeAttr(item.value)+'"'+(item.value === selected ? ' selected' : '')+'>'+escapeHtml(item.label)+'</option>').join('');
 }
 function normalizeProvider(profile){
   const raw = String(profile?.provider || '').trim().toLowerCase();
@@ -759,6 +872,7 @@ function normalizeProfile(profile){
     name: String(profile?.name || id).trim() || id,
     provider: normalizeProvider(profile),
     base_url: trimTrailingSlashes(profile?.base_url),
+    api_endpoint: String(profile?.api_endpoint || 'chat_completions') === 'responses' ? 'responses' : 'chat_completions',
     model,
     api_key: String(profile?.api_key || ''),
     models,
@@ -822,6 +936,15 @@ function applyProviderToProfile(profile, provider){
   profile.models = profile.model ? [profile.model] : [];
   return profile;
 }
+function defaultPresetProfiles(settings){
+  const apiKey = String(settings?.api_key || '');
+  return [
+    {...providerDefaults.mimo_balance, api_key: apiKey},
+    {...providerDefaults.mimo_token_plan, api_key: apiKey},
+    {...providerDefaults.deepseek, api_key: ''},
+    {...providerDefaults.openai, api_key: ''},
+  ];
+}
 function getActiveProfile(){
   return profiles.find(p => p.id === activeProfileId) || profiles[0];
 }
@@ -839,11 +962,13 @@ function syncProfilesFromCards(){
     const provider = card.querySelector('[data-field="provider"]')?.value || detectProvider(p);
     const model = card.querySelector('[data-field="model"]')?.value?.trim();
     const baseUrl = card.querySelector('[data-field="base_url"]')?.value;
+    const apiEndpoint = card.querySelector('[data-field="api_endpoint"]')?.value;
     const apiKey = card.querySelector('[data-field="api_key"]')?.value;
     p.name = name || model || p.id;
     p.provider = provider;
     p.model = model || p.model || p.id;
     p.base_url = trimTrailingSlashes(baseUrl);
+    p.api_endpoint = apiEndpoint === 'responses' ? 'responses' : 'chat_completions';
     p.api_key = apiKey || '';
     p.models = p.model ? [p.model] : [];
   }
@@ -858,13 +983,20 @@ function flattenProfiles(list){
       out.push(normalizeProfile(p));
       continue;
     }
+    if (modelIds.length === 1) {
+      const one = normalizeProfile({...p, model:modelIds[0], models:[modelIds[0]]});
+      if (usedIds.has(one.id)) one.id = makeStableProfileId(one.id, usedIds);
+      else usedIds.add(one.id);
+      out.push(one);
+      continue;
+    }
     for (const modelId of modelIds) {
       const model = String(modelId || '').trim();
       if (!model) continue;
       out.push(normalizeProfile({
         ...p,
-        id: makeStableProfileId(model, usedIds),
-        name: model === p.model ? p.name : model,
+        id: makeStableProfileId((p.id || p.provider || 'profile') + '-' + model, usedIds),
+        name: model === p.model ? p.name : (p.name ? p.name + ' / ' + model : model),
         model,
         models: [model],
       }));
@@ -882,6 +1014,7 @@ function renderProfiles(){
     const checked = p.id === activeProfileId ? ' checked' : '';
     return '<div class="profile-card'+active+'" data-profile-id="'+escapeAttr(p.id)+'">'
       + '<div class="profile-card-head">'
+      + '<div class="profile-drag-handle" draggable="true" title="Drag to reorder" aria-label="Drag to reorder">⋮⋮</div>'
       + '<label class="profile-card-title"><input class="default-radio" type="radio" name="default_profile" data-action="default"'+checked+'>'
       + '<span>'+escapeHtml(profileCardTitle(p))+'</span></label>'
       + '<div class="provider-pill">'+escapeHtml(providerLabel(p.provider || detectProvider(p)))+'</div>'
@@ -897,6 +1030,7 @@ function renderProfiles(){
       + '<div class="field"><label>'+escapeHtml(translations['profile.name'] || 'Name')+'</label><input data-field="name" value="'+escapeAttr(p.name || '')+'" placeholder="MiMo Pro"></div>'
       + '<div class="field"><label>'+escapeHtml(translations['model.card.model'] || 'Model ID')+'</label><input data-field="model" value="'+escapeAttr(p.model || '')+'" placeholder="mimo-v2.5-pro"></div>'
       + '<div class="field"><label>'+escapeHtml(translations['base.url'] || 'Base URL')+'</label><input data-field="base_url" value="'+escapeAttr(p.base_url || '')+'" placeholder="https://.../v1"></div>'
+      + '<div class="field"><label>'+escapeHtml(translations['api.endpoint'] || 'API Endpoint')+'</label><select data-field="api_endpoint">'+endpointOptions(p.api_endpoint || 'chat_completions')+'</select></div>'
       + '<div class="field"><label>'+escapeHtml(translations['api.key'] || 'API Key')+'</label><div class="api-key-wrap"><input data-field="api_key" type="password" autocomplete="off" value="'+escapeAttr(p.api_key || '')+'" placeholder="sk-..."><button class="secondary api-key-toggle" type="button" data-action="toggle-key" title="'+escapeAttr(translations['api.key.show'] || 'Show API Key')+'">'+eyeIcon(false)+'</button></div></div>'
       + '</div></div>';
   }).join('');
@@ -918,14 +1052,7 @@ function loadProfileToFields(profile){
 function fill(s){
   profiles = flattenProfiles(s.provider_profiles || []).filter(p => p.id && p.base_url);
   if (profiles.length === 0) {
-    profiles = flattenProfiles([{
-      id: s.active_provider_profile || 'mimo',
-      name: s.active_provider_profile || 'MiMo',
-      base_url: s.base_url || providerDefaults.mimo.base_url,
-      model: s.model || providerDefaults.mimo.model,
-      api_key: s.api_key || '',
-      models: s.models && s.models.length ? s.models : providerDefaults.mimo.models,
-    }]);
+    profiles = flattenProfiles(defaultPresetProfiles(s));
   }
   const activeRoute = s.active_route || {};
   activeProfileId = profiles.find(p => p.id === activeRoute.endpoint_id && (!activeRoute.model || p.model === activeRoute.model))?.id
@@ -940,6 +1067,9 @@ function fill(s){
   $('max_output_len').value = s.max_output_len ?? 5000;
   $('command_timeout').value = s.command_timeout ?? 120;
   $('enable_thinking').checked = !!s.enable_thinking;
+  $('ui_completion_sound').checked = s.ui_completion_sound !== false;
+  $('ui_completion_sound_volume').value = s.ui_completion_sound_volume ?? 70;
+  updateCompletionVolumeLabel();
   $('reasoning_effort').value = s.reasoning_effort || (s.enable_thinking ? 'deep' : 'balanced');
   $('sandbox_enabled').checked = !!s.sandbox_enabled;
   $('sandbox_mode').value = s.sandbox_mode || 'safe';
@@ -965,6 +1095,7 @@ function collect(){
   return {
     api_key:active.api_key || '',
     base_url:active.base_url || '',
+    api_endpoint:active.api_endpoint || 'chat_completions',
     model:active.model || '',
     models:active.models || [],
     active_provider_profile:active.id || '',
@@ -976,6 +1107,8 @@ function collect(){
     max_output_len:Number($('max_output_len').value),
     command_timeout:Number($('command_timeout').value),
     enable_thinking:$('enable_thinking').checked,
+    ui_completion_sound:$('ui_completion_sound').checked,
+    ui_completion_sound_volume:Number($('ui_completion_sound_volume').value),
     reasoning_effort:$('reasoning_effort').value,
     sandbox_enabled:$('sandbox_enabled').checked,
     sandbox_mode:$('sandbox_mode').value,
@@ -997,15 +1130,85 @@ function collect(){
 }
 function escapeHtml(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function escapeAttr(s){return escapeHtml(s).replace(new RegExp(String.fromCharCode(96),'g'),'&#96;');}
+let toastTimer = null;
+function showSaveFeedback(ok, text){
+  const status = $('status');
+  const toast = $('toast');
+  const cls = ok ? 'ok' : 'error';
+  if (status) {
+    status.textContent = text;
+    status.className = 'status show ' + cls;
+  }
+  if (toast) {
+    toast.textContent = text;
+    toast.className = 'toast show ' + cls;
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      toast.className = 'toast';
+    }, 3600);
+  }
+}
+function updateCompletionVolumeLabel(){
+  const value = Math.max(0, Math.min(100, Number($('ui_completion_sound_volume')?.value || 70)));
+  const label = $('ui_completion_sound_volume_value');
+  if (label) label.textContent = value + '%';
+}
+let previewAudioCtx = null;
+let lastCompletionPreviewAt = 0;
+function getPreviewAudioContext(){
+  const AudioCtor = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtor) return null;
+  previewAudioCtx = previewAudioCtx || new AudioCtor();
+  return previewAudioCtx;
+}
+function previewTone(ctx, start, frequency, duration, gainValue){
+  const oscillator = ctx.createOscillator();
+  const gain = ctx.createGain();
+  oscillator.type = 'sine';
+  oscillator.frequency.setValueAtTime(frequency, start);
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(gainValue, start + 0.012);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+  oscillator.connect(gain);
+  gain.connect(ctx.destination);
+  oscillator.start(start);
+  oscillator.stop(start + duration + 0.025);
+}
+async function playCompletionPreview(force){
+  const slider = $('ui_completion_sound_volume');
+  const raw = Number(slider?.value ?? 70);
+  const volume = Math.max(0, Math.min(100, Number.isFinite(raw) ? raw : 70)) / 100;
+  if (volume <= 0) return;
+  const now = Date.now();
+  if (!force && now - lastCompletionPreviewAt < 380) return;
+  lastCompletionPreviewAt = now;
+  try {
+    const ctx = getPreviewAudioContext();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') await ctx.resume();
+    if (ctx.state !== 'running') return;
+    const start = ctx.currentTime + 0.02;
+    previewTone(ctx, start, 659.25, 0.15, 0.18 * volume);
+    previewTone(ctx, start + 0.11, 880, 0.22, 0.15 * volume);
+  } catch {
+  }
+}
 window.addEventListener('message', e => {
   const msg = e.data || {};
   if (msg.type === 'settingsData') fill(msg.settings || {});
   if (msg.type === 'saveResult') {
-    $('status').textContent = msg.ok ? translations['saved.success'] : translations['saved.failed'];
+    showSaveFeedback(msg.ok, msg.ok ? translations['saved.success'] : translations['saved.failed']);
     if (msg.settings) fill(msg.settings);
   }
 });
 $('save').addEventListener('click', () => vscode.postMessage({type:'saveSettings', settings: collect()}));
+$('ui_completion_sound_volume').addEventListener('input', () => {
+  updateCompletionVolumeLabel();
+  void playCompletionPreview(false);
+});
+$('ui_completion_sound_volume').addEventListener('change', () => {
+  void playCompletionPreview(true);
+});
 $('open-file').addEventListener('click', () => vscode.postMessage({type:'openSettingsFile'}));
 $('profile_add').addEventListener('click', () => {
   syncProfilesFromCards();
@@ -1079,6 +1282,78 @@ $('profile_cards').addEventListener('click', e => {
     target.title = visible ? (translations['api.key.show'] || 'Show API Key') : (translations['api.key.hide'] || 'Hide API Key');
   }
 });
+// ── Drag-and-drop reorder for profile cards ──
+{
+  let draggedId = null;
+  const clearIndicators = () => {
+    $('profile_cards').querySelectorAll('.drag-over-top,.drag-over-bottom').forEach(el => {
+      el.classList.remove('drag-over-top', 'drag-over-bottom');
+    });
+  };
+  $('profile_cards').addEventListener('dragstart', e => {
+    const handle = e.target?.closest?.('.profile-drag-handle');
+    if (!handle) {
+      e.preventDefault();
+      return;
+    }
+    syncProfilesFromCards();
+    const card = handle.closest?.('.profile-card[data-profile-id]');
+    if (!card) return;
+    draggedId = card.getAttribute('data-profile-id');
+    if (!draggedId) return;
+    card.classList.add('dragging');
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', draggedId);
+    }
+  });
+  $('profile_cards').addEventListener('dragend', e => {
+    const card = e.target?.closest?.('.profile-card');
+    if (card) card.classList.remove('dragging');
+    clearIndicators();
+    draggedId = null;
+  });
+  $('profile_cards').addEventListener('dragover', e => {
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    clearIndicators();
+    const card = e.target?.closest?.('.profile-card[data-profile-id]');
+    if (!card || card.getAttribute('data-profile-id') === draggedId) return;
+    const rect = card.getBoundingClientRect();
+    const midY = rect.top + rect.height / 2;
+    if (e.clientY < midY) {
+      card.classList.add('drag-over-top');
+    } else {
+      card.classList.add('drag-over-bottom');
+    }
+  });
+  $('profile_cards').addEventListener('dragleave', e => {
+    const card = e.target?.closest?.('.profile-card');
+    if (card) card.classList.remove('drag-over-top', 'drag-over-bottom');
+  });
+  $('profile_cards').addEventListener('drop', e => {
+    e.preventDefault();
+    clearIndicators();
+    if (!draggedId) return;
+    const targetCard = e.target?.closest?.('.profile-card[data-profile-id]');
+    if (!targetCard) return;
+    const targetId = targetCard.getAttribute('data-profile-id');
+    if (targetId === draggedId) return;
+    const fromIdx = profiles.findIndex(p => p.id === draggedId);
+    let toIdx = profiles.findIndex(p => p.id === targetId);
+    if (fromIdx < 0 || toIdx < 0) return;
+    const rect = targetCard.getBoundingClientRect();
+    const midY = rect.top + rect.height / 2;
+    const insertAfter = e.clientY >= midY;
+    const [item] = profiles.splice(fromIdx, 1);
+    // After splice, adjust toIdx: target shifts left if source was before it
+    if (fromIdx < toIdx) toIdx--;
+    if (insertAfter) toIdx++;
+    profiles.splice(toIdx, 0, item);
+    renderProfiles();
+    renderModels();
+  });
+}
 $('toggle_raw_profiles').addEventListener('click', () => {
   syncProfilesFromCards();
   renderProfiles();

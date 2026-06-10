@@ -14,7 +14,8 @@ import { InputArea } from './components/input';
 import { Panels } from './components/panels';
 import { CommandPalette } from './components/commandPalette';
 import { ImageUpload } from './components/imageUpload';
-import { setLang, getWelcomePair, t } from './core/i18n';
+import { CompletionSound } from './components/completionSound';
+import { setLang, getWelcomePair, t, getLangToggleText } from './core/i18n';
 
 let activeReplayId = 0;
 
@@ -110,7 +111,7 @@ class RenderQueue {
             case 'finalAnswer': bus.emit('finalAnswer', msg.html); break;
             case 'reasoning': bus.emit('reasoning', msg.token); break;
             case 'toolCallStart': bus.emit('toolCallStart', msg.name, msg.args); break;
-            case 'toolCallEnd': bus.emit('toolCallEnd', msg.name, msg.result, msg.isError, msg.elapsed); break;
+            case 'toolCallEnd': bus.emit('toolCallEnd', msg.name, msg.result, msg.isError, msg.elapsed, msg.gitDiff); break;
             case 'roundStart': bus.emit('roundStart', msg.round); break;
             case 'done': bus.emit('done', msg.response, msg.elapsedSec); break;
             case 'error': bus.emit('error', msg.error); break;
@@ -156,9 +157,10 @@ function init(): void {
     Panels.mount();
     CommandPalette.mount();
     ImageUpload.mount();
-    setLang('zh');
+    CompletionSound.mount();
+    // 等待扩展端发送语言设置，不要在这里强制设置
     const langBtn = document.getElementById('btn-lang');
-    if (langBtn) langBtn.textContent = 'EN';
+    if (langBtn) langBtn.textContent = getLangToggleText();
 
     // 閳光偓閳光偓 Initialize welcome text with random variant 閳光偓閳光偓
     initWelcome();
@@ -226,6 +228,7 @@ function init(): void {
 
             case 'done':
                 renderQueue.flush();
+                bus.emit('liveDone');
                 bus.emit('done', msg.response, msg.elapsedSec);
                 break;
 
@@ -492,7 +495,7 @@ function init(): void {
                 setLang(msg.lang);
                 // Update lang toggle button text
                 const langBtn = document.getElementById('btn-lang');
-                if (langBtn) langBtn.textContent = msg.lang === 'zh' ? 'EN' : '中';
+                if (langBtn) langBtn.textContent = getLangToggleText();
                 bus.emit('langChanged');
                 break;
             case 'modeSwitched': {

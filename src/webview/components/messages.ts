@@ -312,7 +312,7 @@ export const Messages = {
         bus.on('streamSegmentEnd', () => this.commitStreamSegment());
         bus.on('reasoning', (token: string) => this.handleReasoning(token));
         bus.on('toolCallStart', (name: string, args: any) => this.addToolCard(name, args));
-        bus.on('toolCallEnd', (name: string, result: string, isError: boolean, elapsed: number) => this.handleToolCallEnd(name, result, isError, elapsed));
+        bus.on('toolCallEnd', (name: string, result: string, isError: boolean, elapsed: number, gitDiff?: string) => this.handleToolCallEnd(name, result, isError, elapsed, gitDiff));
         bus.on('roundStart', (round: number) => this.handleRoundStart(round));
         bus.on('done', (_response?: string, elapsedSec?: number) => this.handleDone(elapsedSec));
         bus.on('error', (error: string) => this.handleError(error));
@@ -874,7 +874,7 @@ export const Messages = {
         return '';
     },
 
-    handleToolCallEnd(name: string, result: string, isError: boolean, elapsed: number): void {
+    handleToolCallEnd(name: string, result: string, isError: boolean, elapsed: number, gitDiff?: string): void {
         const messagesDiv = document.getElementById('messages')!;
         const streamingMsg = store.get('streamingMsg');
         // Search in streamingMsg first (tool cards are now inside it), fallback to #messages
@@ -953,6 +953,14 @@ export const Messages = {
             }
             const timeEl = last.querySelector('.tool-card-time') as HTMLElement | null;
             if (timeEl) timeEl.textContent = elapsed.toFixed(1) + 's';
+            // Show git diff card if command modified files
+            if (gitDiff && !isError) {
+                const diffCard = createElement('div', 'diff-card');
+                this.renderGitDiff(diffCard, gitDiff);
+                if (diffCard.innerHTML) {
+                    last.after(diffCard);
+                }
+            }
             // Don't clear streamingMsg - allow thinking to continue
             return;
         }
@@ -978,10 +986,23 @@ export const Messages = {
         });
     },
 
+    ensureStreamingAssistantMessage(): HTMLElement {
+        let streamingMsg = store.get('streamingMsg');
+        if (!streamingMsg) {
+            streamingMsg = this.createAssistantMsg();
+            const mc = createElement('div', 'md-content');
+            streamingMsg.appendChild(mc);
+            store.set('streamingMsg', streamingMsg);
+            store.set('rawHtml', '');
+        }
+        return streamingMsg;
+    },
+
     ensureLiveProgressCard(): HTMLElement | null {
         if (!store.get('planExecutionActive')) return null;
         const messagesDiv = document.getElementById('messages')!;
-        let card = document.querySelector('.live-progress-card[data-active="true"]') as HTMLElement | null;
+        const streamingMsg = this.ensureStreamingAssistantMessage();
+        let card = streamingMsg.querySelector('.live-progress-card[data-active="true"]') as HTMLElement | null;
         if (card) return card;
         card = createElement('div', 'live-progress-card');
         card.setAttribute('data-active', 'true');
@@ -990,7 +1011,12 @@ export const Messages = {
             `<span class="live-progress-title">Execution Progress</span>` +
             `<span class="live-progress-count">0/0</span>` +
             `</div><div class="live-progress-items"></div>`;
-        messagesDiv.appendChild(card);
+        const mdContent = streamingMsg.querySelector('.md-content:not([data-stream-finalized="true"])');
+        if (mdContent) {
+            streamingMsg.insertBefore(card, mdContent);
+        } else {
+            streamingMsg.appendChild(card);
+        }
         smartScroll(messagesDiv);
         return card;
     },
@@ -1059,7 +1085,7 @@ export const Messages = {
         // Header
         card.innerHTML = `<div class="diff-card-header">` +
             `<span class="diff-file">${escapeHtml(filePath)}</span>` +
-            `<span class="diff-stats">${added} added, ${removed} removed</span>` +
+            `<span class="diff-stats">${added} lines added, ${removed} lines removed</span>` +
             `<span class="diff-chevron">▸</span>` +
             `</div><div class="diff-card-body"></div>`;
 
@@ -1268,13 +1294,13 @@ export const Messages = {
             }
 
             // Per-file summary
-            html += `<div class="diff-file-summary"><span class="diff-stats-add">+${file.added}</span><span class="diff-stats-del">−${file.removed}</span></div>`;
+            html += `<div class="diff-file-summary"><span class="diff-stats-add">+${file.added} lines</span><span class="diff-stats-del">−${file.removed} lines</span></div>`;
         }
 
         // Total summary bar at top
         if (totalAdded > 0 || totalRemoved > 0) {
             const label = files.length > 1 ? `${files.length} files` : (files[0]?.name || 'changes');
-            html = `<div class="diff-summary"><span class="diff-file-name">${escapeHtml(label)}</span><span class="diff-stats-add">+${totalAdded}</span><span class="diff-stats-del">−${totalRemoved}</span></div>` + html;
+            html = `<div class="diff-summary"><span class="diff-file-name">${escapeHtml(label)}</span><span class="diff-stats-add">+${totalAdded} lines</span><span class="diff-stats-del">−${totalRemoved} lines</span></div>` + html;
         }
 
         if (truncated) html += `<div class="diff-info">... (truncated, ${txt.length} chars total)</div>`;
@@ -1320,7 +1346,10 @@ export const Messages = {
         const messagesDiv = document.getElementById('messages');
         if (!messagesDiv) return null;
         const assistants = Array.from(messagesDiv.querySelectorAll<HTMLElement>('.msg-assistant, .streaming'));
-        const assistant = assistants.reverse().find(el => el.classList.contains('execution-compacted') || el.querySelector('.execution-drawer, .task-changes-card, .diff-card'));
+        const assistant = assistants.reverse().find(el =>
+            el.classList.contains('execution-compacted') ||
+            el.querySelector('.execution-drawer, .task-changes-card, .diff-card, .todo-tool-result, .task-checklist')
+        );
         if (!assistant) return null;
         const userMessages = Array.from(messagesDiv.querySelectorAll<HTMLElement>('.msg-user'));
         const user = userMessages[userMessages.length - 1] || null;
@@ -1366,6 +1395,7 @@ export const Messages = {
                 el.classList.contains('md-content-update') ||
                 el.classList.contains('tool-line') ||
                 el.classList.contains('tool-card') ||
+                el.classList.contains('todo-tool-result') ||
                 el.classList.contains('diff-card') ||
                 el.classList.contains('workflow-card') ||
                 el.classList.contains('live-progress-card') ||
@@ -1595,7 +1625,7 @@ export const Messages = {
             const action = file.action ? `<span class="task-change-binary">${escapeHtml(file.action)}</span>` : '';
             return `<button class="task-change-row" type="button" data-file="${escapeHtml(file.path)}">` +
                 `<span class="task-change-path">${escapeHtml(file.path)}</span>` +
-                `<span class="task-change-row-stats">${binary}${staged}${external}${action}<span class="diff-stats-add">+${file.added}</span> <span class="diff-stats-del">-${file.removed}</span></span>` +
+                `<span class="task-change-row-stats">${binary}${staged}${external}${action}<span class="diff-stats-add">+${file.added} lines</span> <span class="diff-stats-del">-${file.removed} lines</span></span>` +
                 `</button>`;
         }).join('');
 
@@ -1604,7 +1634,7 @@ export const Messages = {
                 <div class="task-changes-icon"><span class="task-changes-icon-add">+</span><span class="task-changes-icon-del">-</span></div>
                 <div class="task-changes-title">
                     <div>已编辑 ${fileText}</div>
-                    <div class="task-changes-stats"><span class="diff-stats-add">+${summary.totalAdded}</span> <span class="diff-stats-del">-${summary.totalRemoved}</span></div>
+                    <div class="task-changes-stats"><span class="diff-stats-add">+${summary.totalAdded} lines</span> <span class="diff-stats-del">-${summary.totalRemoved} lines</span></div>
                 </div>
                 <div class="task-changes-actions">
                     <button class="task-changes-undo" type="button">撤销</button>

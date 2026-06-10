@@ -120,7 +120,11 @@ export const Panels = {
                 command_timeout: parseInt((document.getElementById('set-command-timeout') as HTMLInputElement)?.value || '120') || 120,
                 max_output_len: parseInt((document.getElementById('set-max-output-len') as HTMLInputElement)?.value || '5000') || 5000,
                 enable_thinking: (document.getElementById('set-thinking') as HTMLInputElement).checked,
-                reasoning_effort: store.get('reasoningEffort'),
+                ui_completion_sound: (document.getElementById('set-completion-sound') as HTMLInputElement)?.checked ?? true,
+                ui_completion_sound_volume: (() => {
+                    const raw = parseInt((document.getElementById('set-completion-sound-volume') as HTMLInputElement)?.value || '70');
+                    return Number.isFinite(raw) ? raw : 70;
+                })(),
                 sandbox_enabled: (document.getElementById('set-sandbox') as HTMLInputElement).checked,
                 sandbox_image: (document.getElementById('set-sandbox-image') as HTMLInputElement).value,
                 sandbox_memory: (document.getElementById('set-sandbox-memory') as HTMLInputElement).value,
@@ -137,6 +141,18 @@ export const Panels = {
                 memory_max_injected: parseInt((document.getElementById('set-memory-max-injected') as HTMLInputElement)?.value || '8') || 8,
             });
         });
+        const completionVolume = document.getElementById('set-completion-sound-volume');
+        if (completionVolume) {
+            completionVolume.addEventListener('input', () => {
+                this.updateCompletionVolumeLabel();
+                const value = parseInt((completionVolume as HTMLInputElement).value || '70');
+                bus.emit('previewCompletionSound', Number.isFinite(value) ? value : 70);
+            });
+            completionVolume.addEventListener('change', () => {
+                const value = parseInt((completionVolume as HTMLInputElement).value || '70');
+                bus.emit('previewCompletionSound', Number.isFinite(value) ? value : 70, true);
+            });
+        }
 
         // Listen for data
         bus.on('historyList', (items: HistoryEntry[]) => this.renderHistory(items));
@@ -203,6 +219,11 @@ export const Panels = {
         const maxOutputLen = document.getElementById('set-max-output-len') as HTMLInputElement;
         if (maxOutputLen) maxOutputLen.value = String(s.max_output_len ?? 5000);
         (document.getElementById('set-thinking') as HTMLInputElement).checked = !!s.enable_thinking;
+        const completionSound = document.getElementById('set-completion-sound') as HTMLInputElement;
+        if (completionSound) completionSound.checked = s.ui_completion_sound !== false;
+        const completionVolume = document.getElementById('set-completion-sound-volume') as HTMLInputElement;
+        if (completionVolume) completionVolume.value = String(s.ui_completion_sound_volume ?? 70);
+        this.updateCompletionVolumeLabel();
         (document.getElementById('set-sandbox') as HTMLInputElement).checked = !!s.sandbox_enabled;
         (document.getElementById('set-sandbox-image') as HTMLInputElement).value = s.sandbox_image || 'node:20-alpine';
         (document.getElementById('set-sandbox-memory') as HTMLInputElement).value = s.sandbox_memory || '512m';
@@ -227,5 +248,13 @@ export const Panels = {
         if (memoryMaxItems) memoryMaxItems.value = String(s.memory_max_items ?? 120);
         const memoryMaxInjected = document.getElementById('set-memory-max-injected') as HTMLInputElement;
         if (memoryMaxInjected) memoryMaxInjected.value = String(s.memory_max_injected ?? 8);
+    },
+
+    updateCompletionVolumeLabel(): void {
+        const input = document.getElementById('set-completion-sound-volume') as HTMLInputElement | null;
+        const label = document.getElementById('set-completion-sound-volume-value');
+        if (!input || !label) return;
+        const value = Math.max(0, Math.min(100, parseInt(input.value || '70') || 0));
+        label.textContent = `${value}%`;
     },
 };
