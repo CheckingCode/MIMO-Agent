@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.7.1 (2026-06-11)
+
+### Fixes
+- Reduced Auto completion-gate over-continuation so completed Chinese summaries are less likely to be reopened for repeated self-check loops.
+- Preserved already-visible final drafts when extra verification is needed, with follow-up validation rendered as a separate verification card instead of replacing the answer.
+- Localized visible task checklist labels, summaries, and statuses in Chinese UI, and hid priority badges when every todo has the same priority.
+- Clarified task/todo tool guidance so visible todo content follows the user's language and high priority is reserved for truly blocking work.
+
 ## 1.7.0 (2026-06-11)
 
 ### Features

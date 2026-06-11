@@ -38,6 +38,7 @@ class RenderQueue {
                 this.latestStreamHtml = msg.html || '';
                 break;
             case 'assistantUpdate':
+            case 'verificationUpdate':
             case 'finalAnswer':
                 this.latestStreamHtml = undefined;
                 this.pending.push(msg);
@@ -108,6 +109,7 @@ class RenderQueue {
             case 'userMessage': bus.emit('userMessage', msg.text, msg.images); break;
             case 'streamHtml': bus.emit('streamHtml', msg.html); break;
             case 'assistantUpdate': bus.emit('assistantUpdate', msg.html); break;
+            case 'verificationUpdate': bus.emit('verificationUpdate', msg.html); break;
             case 'finalAnswer': bus.emit('finalAnswer', msg.html); break;
             case 'reasoning': bus.emit('reasoning', msg.token); break;
             case 'toolCallStart': bus.emit('toolCallStart', msg.name, msg.args); break;
@@ -198,6 +200,10 @@ function init(): void {
                 break;
 
             case 'assistantUpdate':
+                renderQueue.enqueue(msg);
+                break;
+
+            case 'verificationUpdate':
                 renderQueue.enqueue(msg);
                 break;
 

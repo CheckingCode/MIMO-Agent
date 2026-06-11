@@ -58,9 +58,9 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
                             type: 'object',
                             properties: {
                                 id: { type: 'string', description: 'Stable short id, e.g. inspect-settings' },
-                                content: { type: 'string', description: 'Concrete task description' },
+                                content: { type: 'string', description: 'Concrete task description. Use the same language as the user unless the user asks otherwise.' },
                                 complexity: { type: 'string', enum: ['simple', 'moderate', 'complex'] },
-                                priority: { type: 'string', enum: ['high', 'medium', 'low'] },
+                                priority: { type: 'string', enum: ['high', 'medium', 'low'], description: 'Use high only for blocking/urgent work, medium for normal required work, and low for optional/follow-up work. Do not mark every item high.' },
                                 depends_on: {
                                     type: 'array',
                                     items: { type: 'string' },
@@ -92,9 +92,9 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
                             type: 'object',
                             properties: {
                                 id: { type: 'string', description: 'Stable short id for the todo item' },
-                                content: { type: 'string', description: 'Concrete task description' },
+                                content: { type: 'string', description: 'Concrete task description. Use the same language as the user unless the user asks otherwise.' },
                                 status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] },
-                                priority: { type: 'string', enum: ['high', 'medium', 'low'] },
+                                priority: { type: 'string', enum: ['high', 'medium', 'low'], description: 'Use high only for blocking/urgent work, medium for normal required work, and low for optional/follow-up work. Do not mark every item high.' },
                             },
                             required: ['content', 'status'],
                         },

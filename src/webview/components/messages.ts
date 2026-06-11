@@ -382,6 +382,7 @@ export const Messages = {
         bus.on('userMessage', (text: string, images?: ImageData[] | null) => this.addUserMessage(text, images));
         bus.on('streamHtml', (html: string) => this.handleStream(html));
         bus.on('assistantUpdate', (html: string) => this.handleAssistantUpdate(html));
+        bus.on('verificationUpdate', (html: string) => this.handleVerificationUpdate(html));
         bus.on('finalAnswer', (html: string) => this.handleFinalAnswer(html));
         bus.on('streamSegmentEnd', () => this.commitStreamSegment());
         bus.on('reasoning', (token: string) => this.handleReasoning(token));
@@ -604,12 +605,15 @@ export const Messages = {
     },
 
     // ── Enhance task checklists ──
-    appendFixedAssistantSegment(html: string, kind: 'update' | 'final'): void {
+    appendFixedAssistantSegment(html: string, kind: 'update' | 'verification' | 'final'): void {
         this.handleStream(html || '');
         this.commitStreamSegment();
         const streamingMsg = store.get('streamingMsg');
         const finalized = streamingMsg?.querySelector('.md-content-final:last-of-type') as HTMLElement | null;
-        if (finalized) finalized.classList.add(`md-content-${kind}`);
+        if (finalized) {
+            finalized.classList.add(`md-content-${kind}`);
+            if (kind === 'verification') finalized.dataset.label = t('assistant.verification.followup');
+        }
         if (kind === 'final') {
             this._markThinkingDone();
         }
@@ -619,6 +623,10 @@ export const Messages = {
 
     handleAssistantUpdate(html: string): void {
         this.appendFixedAssistantSegment(html, 'update');
+    },
+
+    handleVerificationUpdate(html: string): void {
+        this.appendFixedAssistantSegment(html, 'verification');
     },
 
     handleFinalAnswer(html: string): void {
@@ -892,8 +900,8 @@ export const Messages = {
 
     getToolLabel(name: string): string {
         const labels: Record<string, string> = {
-            schedule_tasks: 'Schedule',
-            update_todos: 'Todos',
+            schedule_tasks: t('tool.schedule'),
+            update_todos: t('tool.todos'),
             read_file: 'Read', write_file: 'Write', edit_file: 'Edit',
             list_directory: 'List', search_files: 'Search', glob_files: 'Glob',
             execute_command: 'Bash', fetch_url: 'Fetch', web_search: 'Search',
@@ -996,9 +1004,11 @@ export const Messages = {
                     if (!text) return null;
                     const priorityText = String(item?.priority || '').toLowerCase();
                     const priority = priorityText === 'high' ? 'P1' : priorityText === 'low' ? 'P3' : 'P2';
+                    const status = String(item?.status || '');
                     return {
-                        text: item?.status === 'in_progress' ? `${text} (in progress)` : text,
-                        done: /completed|done/i.test(String(item?.status || '')),
+                        text,
+                        active: /in[_-]?progress|active|doing/i.test(status),
+                        done: /completed|done/i.test(status),
                         priority,
                     };
                 })
@@ -1082,7 +1092,7 @@ export const Messages = {
         card.setAttribute('data-active', 'true');
         card.innerHTML =
             `<div class="live-progress-header">` +
-            `<span class="live-progress-title">Execution Progress</span>` +
+            `<span class="live-progress-title">${escapeHtml(t('todo.progress.title'))}</span>` +
             `<span class="live-progress-count">0/0</span>` +
             `</div><div class="live-progress-items"></div>`;
         const mdContent = streamingMsg.querySelector('.md-content:not([data-stream-finalized="true"])');
@@ -1474,8 +1484,8 @@ export const Messages = {
     localizeAssistantActions(): void {},
 
     extractAssistantCopyText(assistant: HTMLElement): string {
-        const finalContents = Array.from(assistant.querySelectorAll<HTMLElement>('.md-content-final:not(.md-content-update)'));
-        const normalContents = Array.from(assistant.querySelectorAll<HTMLElement>('.md-content:not(.md-content-update)'));
+        const finalContents = Array.from(assistant.querySelectorAll<HTMLElement>('.md-content-final:not(.md-content-update):not(.md-content-verification)'));
+        const normalContents = Array.from(assistant.querySelectorAll<HTMLElement>('.md-content:not(.md-content-update):not(.md-content-verification)'));
         const source = finalContents.length > 0
             ? finalContents[finalContents.length - 1]
             : normalContents.length > 0
@@ -1579,7 +1589,7 @@ export const Messages = {
         const streamingMsg = store.get('streamingMsg');
         if (!streamingMsg || streamingMsg.classList.contains('execution-compacted')) return;
 
-        const finalContents = Array.from(streamingMsg.querySelectorAll('.md-content-final:not(.md-content-update)')) as HTMLElement[];
+        const finalContents = Array.from(streamingMsg.querySelectorAll('.md-content-final:not(.md-content-update):not(.md-content-verification)')) as HTMLElement[];
         const finalContent = [...finalContents]
             .reverse()
             .find(el => !!el.textContent?.trim() || !!el.querySelector('*')) || null;

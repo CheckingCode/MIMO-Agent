@@ -186,6 +186,57 @@ describe('agent convergence guards', () => {
         expect(decision.reason).toContain('pending tool-backed step');
     });
 
+    it('does not keep Auto mode open only because a Chinese final summary says completed', () => {
+        const agent = makeAgent();
+        const conv = makeConv([
+            { role: 'user', content: 'fix the homepage styles and summarize the result' },
+            { role: 'tool', _toolName: 'read_file', content: 'Read src/webview/styles.css' } as any,
+        ]);
+
+        const decision = agent.shouldContinueAutoAfterTextFinal(
+            conv,
+            'moderate',
+            [
+                '任务已完成。',
+                '',
+                '处理结果：',
+                '- 调整了标题样式',
+                '- 统一了按钮间距',
+                '',
+                '修改已经保存到目标文件。',
+            ].join('\n'),
+            2,
+            600,
+        );
+
+        expect(decision.shouldContinue).toBe(false);
+    });
+
+    it('recognizes Chinese delivery summaries as finalizable', () => {
+        const agent = makeAgent();
+        const deliverySummary = [
+            '任务完成',
+            '',
+            '交付文件：',
+            '- `src/webview/styles.css`',
+            '',
+            '验证：已检查修改是否写入目标文件。',
+            '下一步建议：如需更稳妥可再补一次界面预览。',
+        ].join('\n');
+
+        expect(agent.isDeliverySummary(deliverySummary)).toBe(true);
+    });
+
+    it('keeps self-check instructions append-only instead of asking for a rewrite', () => {
+        const agent = makeAgent();
+        const msg = agent.buildSelfCheckInstruction('auto', 'needs validation', 'Task completed.');
+        const text = String(msg.content || '');
+
+        expect(text).toContain('preserve it');
+        expect(text).toContain('append-only');
+        expect(text).toContain('Do not retract or rewrite the whole draft');
+    });
+
     it('filters unchanged dirty workspace diff blocks from execute_command previews', () => {
         const agent = makeAgent();
         const oldDirty = [

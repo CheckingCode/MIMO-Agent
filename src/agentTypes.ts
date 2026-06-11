@@ -31,6 +31,7 @@ export interface AgentEvents {
     onToken: (token: string) => void;
     onReasoning: (token: string) => void;
     onAssistantUpdate?: (text: string) => void;
+    onVerificationUpdate?: (text: string, preservedDraft?: string) => void;
     onFinalAnswer?: (text: string) => void;
     onThoughtSummary?: (text: string) => void;
     onToolCallStart: (name: string, args: Record<string, any>) => void;

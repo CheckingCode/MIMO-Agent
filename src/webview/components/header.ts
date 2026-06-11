@@ -76,7 +76,8 @@ export const Header = {
         const used = usage.usedLabel || String(usage.used || 0);
         const total = usage.totalLabel || String(usage.total || 0);
         el.textContent = `${percent}%`;
-        el.title = `${used} / ${total} (${percent}%)`;
+        el.title = '';
+        el.setAttribute('data-tooltip', `${used} / ${total} (${percent}%)`);
         el.setAttribute('aria-label', `Context usage ${used} / ${total} (${percent}%)`);
         el.style.display = '';
         el.classList.remove('context-low', 'context-mid', 'context-high', 'context-critical');

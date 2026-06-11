@@ -1,6 +1,7 @@
 import { describe, it, expect } from './test-runner';
 import { isRenderableImageDataUrl } from '../webview/components/messages/ChatBubble';
 import { sanitizeReasoningForDisplay } from '../webview/components/messages/ThinkingBlock';
+import { renderTaskChecklist } from '../webview/components/taskChecklist';
 
 describe('webview chat bubble image handling', () => {
     it('accepts safe image data URLs for inline previews', () => {
@@ -27,5 +28,26 @@ describe('webview chat bubble image handling', () => {
         expect(display).toContain('[Role: 解决方案架构师]');
         expect(display.includes('<!DOCTYPE html>')).toBe(false);
         expect(display.includes('fuselage coordinates')).toBe(false);
+    });
+
+    it('hides todo priority badges when every item has the same priority', () => {
+        const html = renderTaskChecklist([
+            { text: 'Inspect files', done: false, priority: 'P1' },
+            { text: 'Apply change', done: false, priority: 'P1' },
+        ]);
+
+        expect(html.includes('todo-priority')).toBe(false);
+        expect(html.includes('P1')).toBe(false);
+    });
+
+    it('shows todo priority badges only when priorities differ', () => {
+        const html = renderTaskChecklist([
+            { text: 'Fix blocking issue', done: false, priority: 'P1' },
+            { text: 'Optional cleanup', done: false, priority: 'P3' },
+        ]);
+
+        expect(html.includes('todo-priority')).toBe(true);
+        expect(html.includes('P1')).toBe(true);
+        expect(html.includes('P3')).toBe(true);
     });
 });

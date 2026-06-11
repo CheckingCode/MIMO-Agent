@@ -61,14 +61,19 @@ export function toolSummary(name: string, args: any): string {
             const tasks = Array.isArray(args.tasks) ? args.tasks : [];
             const simple = tasks.filter((item: any) => String(item?.complexity || '').toLowerCase() === 'simple').length;
             const complex = tasks.filter((item: any) => String(item?.complexity || '').toLowerCase() === 'complex').length;
-            return `${tasks.length} tasks, ${simple} simple, ${complex} complex`;
+            return t('tool.summary.tasks')
+                .replace('{total}', String(tasks.length))
+                .replace('{simple}', String(simple))
+                .replace('{complex}', String(complex));
         }
         case 'update_todos': {
             const todos = Array.isArray(args.todos) ? args.todos : [];
             const done = todos.filter((item: any) => /completed|done/i.test(String(item?.status || ''))).length;
             const active = todos.find((item: any) => /in[_-]?progress|active|doing/i.test(String(item?.status || '')));
             const activeText = active ? ` - ${(active.content || active.text || active.title || '').substring(0, 40)}` : '';
-            return `${done}/${todos.length} completed${activeText}`;
+            return t('tool.summary.todos')
+                .replace('{done}', String(done))
+                .replace('{total}', String(todos.length)) + activeText;
         }
         case 'read_file': {
             let summary = args.path || '';
@@ -127,9 +132,9 @@ export function toolSummary(name: string, args: any): string {
 
 export function getToolLabel(name: string): string {
     const labels: Record<string, string> = {
-        schedule_tasks: 'Schedule',
+        schedule_tasks: t('tool.schedule'),
         read_file: 'Read', write_file: 'Write', edit_file: 'Edit',
-        update_todos: 'Todos',
+        update_todos: t('tool.todos'),
         list_directory: 'List', search_files: 'Search', glob_files: 'Glob',
         execute_command: 'Bash', fetch_url: 'Fetch', web_search: 'Search',
         git_status: 'Git', git_diff: 'Diff', git_log: 'Log',

@@ -416,19 +416,19 @@ export class MiMoAgent extends EventEmitter {
         if (clean.length < 1800) return false;
         const headingCount = (clean.match(/^#{1,3}\s+\S+/gm) || []).length;
         const bulletCount = (clean.match(/^\s*(?:[-*]|\d+\.)\s+\S+/gm) || []).length;
-        const reportMarkers = /(summary|report|audit|review|findings|conclusion|validation|next steps|final notes|follow-up|fix|fixed|implementation|implemented)/i.test(clean);
-        const finalMarkers = /(done|completed|fixed|implemented|saved|resolved|shipped|finished)/i.test(clean);
+        const reportMarkers = /(summary|report|audit|review|findings|conclusion|validation|next steps|final notes|follow-up|fix|fixed|implementation|implemented|总结|报告|审查|评审|结论|验证|后续|修复|实现|交付|结果|楠岃瘉|浜や粯|涓嬩竴姝)/i.test(clean);
+        const finalMarkers = /(done|completed|fixed|implemented|saved|resolved|shipped|finished|已完成|任务完成|完成总结|已修复|已实现|已保存|已交付|处理完成|浠诲姟瀹屾垚)/i.test(clean);
         const looksStructured = headingCount >= 2 || bulletCount >= 6;
         return reportMarkers && looksStructured && (finalMarkers || clean.length >= 3000);
     }
 
     private isDeliverySummary(text: string): boolean {
         const clean = (text || '').trim();
-        if (clean.length < 120) return false;
-        const hasDone = /(done|completed|final summary|task completed|finished)/i.test(clean);
-        const hasFile = /(\.md\b|artifacts?:|files? written|saved|generated|written)/i.test(clean);
-        const hasStats = /(stats?|DOI|tokens?|lines?|words?|validated|verification)/i.test(clean);
-        const hasRiskOrNext = /(next|risk|warning|recommend|follow-up)/i.test(clean);
+        if (clean.length < 60) return false;
+        const hasDone = /(done|completed|final summary|task completed|finished|任务完成|已完成|完成总结|交付完成|处理完成|浠诲姟瀹屾垚)/i.test(clean);
+        const hasFile = /(\.(?:md|txt|json|html?|css|scss|less|tsx?|jsx?|js|py|java|go|rs)\b|artifacts?:|files? written|saved|generated|written|交付文件|文件[:：]|已保存|已生成|输出文件|浜や粯鏂囦欢)/i.test(clean);
+        const hasStats = /(stats?|DOI|tokens?|lines?|words?|validated|verification|验证|测试|校验|检查|已检查|行数|字数|耗时|轮次|楠岃瘉|妫€鏌)/i.test(clean);
+        const hasRiskOrNext = /(next|risk|warning|recommend|follow-up|下一步|风险|注意事项|建议|后续|涓嬩竴姝|寤鸿)/i.test(clean);
         return hasDone && hasFile && (hasStats || hasRiskOrNext);
     }
 
@@ -2279,6 +2279,17 @@ Change strategy now:
         const avoidsChangeClaims = !/(changed|modified|updated|implemented|fixed|created|wrote|edited)/i.test(lower);
         return saysNoChanges && isAnalysisStyle && avoidsAction && avoidsChangeClaims;
     }
+
+    private hasExplicitChangeClaim(text: string): boolean {
+        const lower = String(text || '').toLowerCase();
+        return /changed|modified|updated|implemented|fixed|created|wrote|edited|refactored|rewired|patched|已修改|已实现|已修复|已创建|新增|更新了|优化了|重构了|调整了|改了/.test(lower);
+    }
+
+    private admitsMissingValidation(text: string): boolean {
+        const lower = String(text || '').toLowerCase();
+        return /not run|did not run|untested|not verified|validation not run|tests? not run|未运行|未验证|没有验证|未测试|未跑测试|未执行验证|未执行测试/.test(lower);
+    }
+
     private shouldContinueInfiniteAfterTextFinal(
         conv: ConversationState,
         taskComplexity: 'simple' | 'moderate' | 'complex',
@@ -2386,11 +2397,10 @@ Change strategy now:
         ], 40);
         const hasMutation = this.hasRecentTool(conv, ['edit_file', 'write_file', 'delete_file', 'move_file', 'copy_file'], 50);
         const hasValidation = this.hasRecentValidation(conv, 60);
-        const lower = finalText.toLowerCase();
-        const claimsChanged = /changed|modified|updated|implemented|fixed|created|wrote|edited|已修改|已实现|已修复|已创建|完成/.test(lower);
-        const admitsNoValidation = /not run|did not run|untested|not verified|未运行|未验证|没有验证/.test(lower);
+        const claimsChanged = this.hasExplicitChangeClaim(finalText);
+        const admitsNoValidation = this.admitsMissingValidation(finalText);
 
-        const userVisibleDone = /任务完成|验证结果|文件保存|作文已保存|符合要求|内容充实|task complete|saved to|validation result|meets? the requirement/i.test(finalText);
+        const userVisibleDone = /任务完成|已完成|完成总结|交付文件|验证结果|文件保存|作文已保存|符合要求|内容充实|task complete|saved to|validation result|meets? the requirement/i.test(finalText);
         if (userVisibleDone && (hasValidation || /验证结果|符合要求|validation result|meets? the requirement/i.test(finalText))) {
             return { shouldContinue: false, reason: '' };
         }
@@ -2411,8 +2421,12 @@ Change strategy now:
             return { shouldContinue: true, reason: 'complex Auto task needs file exploration before finalizing' };
         }
 
-        if ((hasMutation || claimsChanged) && !hasValidation && !admitsNoValidation) {
+        if (hasMutation && !hasValidation && !admitsNoValidation) {
             return { shouldContinue: true, reason: 'Auto task appears to have changes but no validation evidence' };
+        }
+
+        if (!hasMutation && claimsChanged && taskComplexity === 'complex' && round < 4 && !this.isDeliverySummary(finalText) && !this.isSubstantialFinalReport(finalText)) {
+            return { shouldContinue: true, reason: 'complex Auto task claims changes but lacks strong workspace-backed evidence' };
         }
 
         if (hasMutation && admitsNoValidation && round < Math.min(hardMaxRounds, 6)) {
@@ -2431,7 +2445,7 @@ The previous assistant response looked like a final answer, but the completion g
 Previous final draft:
 ${finalText.slice(0, 1600)}
 
-Continue the task now. Do not repeat the final draft. Use tools if needed to inspect files, validate changes, or close the missing evidence. Keep user-visible progress concise and in the user's language. Avoid "Let me..." narration; state only the concrete next action. Only produce a final answer after the user requirements, file evidence, and validation status are clear.`,
+Continue the task now. Treat the previous final draft as already shown to the user and preserve it unless new evidence proves it wrong. Prefer append-only follow-up: verification results, concrete checks, or a concise correction. Do not retract or rewrite the whole draft just to restate it. Use tools if needed to inspect files, validate changes, or close the missing evidence. Keep user-visible progress concise and in the user's language. Avoid "Let me..." narration; state only the concrete next action. Only produce a final answer after the user requirements, file evidence, and validation status are clear.`,
         } as any;
     }
 
@@ -3590,6 +3604,12 @@ ${friendlyError}`;
                         HARD_MAX_ROUNDS,
                     );
                 if (completionGate.shouldContinue) {
+                    const preservedDraft = this.appendMissingArtifactSummary(conv, finalResponse);
+                    const lastAssistant = conv.messages[conv.messages.length - 1];
+                    if (lastAssistant?.role === 'assistant') {
+                        lastAssistant.content = preservedDraft;
+                    }
+                    events.onVerificationUpdate?.('继续补充验证与收尾检查中。', preservedDraft);
                     conv.messages.push(this.buildSelfCheckInstruction(conv.mode, completionGate.reason, finalResponse));
                     this.saveConversations();
                     this.traceEvent(conv, 'completion_gate.continue', { round, reason: completionGate.reason });

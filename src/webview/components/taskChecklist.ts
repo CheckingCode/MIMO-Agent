@@ -3,10 +3,12 @@
  */
 
 import { escapeHtml } from '../utils/dom';
+import { t } from '../core/i18n';
 
 export interface TodoItem {
     text: string;
     done: boolean;
+    active?: boolean;
     priority?: 'P0' | 'P1' | 'P2' | 'P3';
 }
 
@@ -31,11 +33,15 @@ export function renderTaskChecklist(items: TodoItem[]): string {
     const doneCount = items.filter(i => i.done).length;
     const total = items.length;
     const percent = Math.round((doneCount / total) * 100);
-    const sorted = [...items].sort((a, b) => priorityRank(a.priority) - priorityRank(b.priority));
+    const distinctPriorities = new Set(items.map(item => item.priority).filter(Boolean));
+    const showPriority = distinctPriorities.size > 1;
+    const sorted = showPriority
+        ? [...items].sort((a, b) => priorityRank(a.priority) - priorityRank(b.priority))
+        : [...items];
 
     let html = `<div class="task-checklist">`;
     html += `<div class="task-checklist-header">`;
-    html += `<span><span class="todo-icon">&#9744;</span>Execution Progress</span>`;
+    html += `<span><span class="todo-icon">&#9744;</span>${escapeHtml(t('todo.progress.title'))}</span>`;
     html += `<div class="task-checklist-progress">`;
     html += `<span class="progress-text">${doneCount}/${total}</span>`;
     html += `<div class="progress-bar"><div class="progress-fill" style="width:${percent}%"></div></div>`;
@@ -46,10 +52,14 @@ export function renderTaskChecklist(items: TodoItem[]): string {
     for (const item of sorted) {
         const cls = item.done ? 'todo done' : 'todo';
         const check = item.done ? '&#10003;' : '';
-        const status = item.done ? 'done' : 'pending';
+        const status = item.done
+            ? t('todo.status.done')
+            : item.active
+                ? t('todo.status.inProgress')
+                : t('todo.status.pending');
         html += `<div class="${cls}">`;
         html += `<span class="todo-check">${check}</span>`;
-        if (item.priority) {
+        if (showPriority && item.priority) {
             html += `<span class="todo-priority priority-${item.priority.toLowerCase()}">${item.priority}</span>`;
         }
         html += `<span class="todo-text">${escapeHtml(item.text)}</span>`;

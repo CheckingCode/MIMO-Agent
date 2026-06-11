@@ -437,7 +437,7 @@ function createStreamingRenderQueue(post: (msg: any) => void) {
     };
 }
 
-function renderAssistantMarkdown(post: (msg: any) => void, type: 'assistantUpdate' | 'finalAnswer', text: string): void {
+function renderAssistantMarkdown(post: (msg: any) => void, type: 'assistantUpdate' | 'verificationUpdate' | 'finalAnswer', text: string): void {
     if (!text.trim()) return;
     try {
         post({ type, html: renderMarkdown(text) });
@@ -1571,6 +1571,18 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     committedResponseText += text;
                     responseText = '';
                 },
+                onVerificationUpdate: (text: string, preservedDraft?: string) => {
+                    streamRender.cancel();
+                    if (responseText.trim()) {
+                        renderAssistantMarkdown(post, 'finalAnswer', responseText);
+                        committedResponseText += responseText;
+                        responseText = '';
+                    } else if (preservedDraft?.trim()) {
+                        renderAssistantMarkdown(post, 'finalAnswer', preservedDraft);
+                        committedResponseText += preservedDraft;
+                    }
+                    renderAssistantMarkdown(post, 'verificationUpdate', text);
+                },
                 onFinalAnswer: (text: string) => {
                     streamRender.cancel();
                     emitFinalAnswer(text);
@@ -2031,6 +2043,18 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     committedResponseText += text;
                     responseText = '';
                 },
+                onVerificationUpdate: (text: string, preservedDraft?: string) => {
+                    streamRender.cancel();
+                    if (responseText.trim()) {
+                        renderAssistantMarkdown(post, 'finalAnswer', responseText);
+                        committedResponseText += responseText;
+                        responseText = '';
+                    } else if (preservedDraft?.trim()) {
+                        renderAssistantMarkdown(post, 'finalAnswer', preservedDraft);
+                        committedResponseText += preservedDraft;
+                    }
+                    renderAssistantMarkdown(post, 'verificationUpdate', text);
+                },
                 onFinalAnswer: (text: string) => {
                     streamRender.cancel();
                     emitFinalAnswer(text);
@@ -2386,7 +2410,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
 <body>
 <div id="header">
     <input type="text" id="conv-title" class="conv-title-input" value="New Chat" spellcheck="false">
-    <span id="context-usage" class="context-usage context-low" title="" aria-label="Context usage" style="display:none">0%</span>
+    <span id="context-usage" class="context-usage context-low" data-tooltip="" aria-label="Context usage" style="display:none">0%</span>
     <div id="header-actions">
         <button class="tb-icon" id="btn-lang" title="Language"></button>
         <button class="tb-icon" id="btn-history" title="History"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></button>
