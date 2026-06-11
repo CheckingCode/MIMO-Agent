@@ -2,12 +2,18 @@ import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as vscode from 'vscode';
-import { getSettingsPanel, loadConfig, saveSetting } from '../config';
+import { getSettingsPanel, loadConfig, readSettings, saveSetting } from '../config';
 import { MiMoAgent } from '../agent';
 
 // Simple i18n for settings page
 type SettingsLang = 'en' | 'zh';
-let settingsLang: SettingsLang = vscode.env.language.startsWith('zh') ? 'zh' : 'en';
+function resolveSettingsLang(): SettingsLang {
+    const saved = readSettings()?.ui?.language;
+    if (saved === 'en' || saved === 'zh') return saved;
+    return vscode.env.language.startsWith('zh') ? 'zh' : 'en';
+}
+
+let settingsLang: SettingsLang = resolveSettingsLang();
 
 const settingsTranslations: Record<SettingsLang, Record<string, string>> = {
     en: {
@@ -208,7 +214,158 @@ const settingsTranslations: Record<SettingsLang, Record<string, string>> = {
     },
 };
 
+const cleanZhOverrides: Record<string, string> = {
+    'title': 'MiMo 设置',
+    'subtitle': '模型调用设置保存在 <code>~/.mimo/settings.json</code>。VS Code 设置和环境变量仍可作为备用方案，但此文件是主要运行时配置。',
+    'open.config': '打开配置文件',
+    'save.apply': '保存并应用',
+    'provider': '提供商预设',
+    'provider.hint': '为常见国内外模型服务提供 OpenAI 兼容接口预设；未覆盖的服务仍可选择自定义兼容。',
+    'api.connection': 'API 连接',
+    'active.profile': '当前配置 ID',
+    'provider.profiles': '模型配置 Profiles JSON',
+    'provider.profiles.hint': '可选的 CC-switch 风格配置。每个 profile 支持 id、name、base_url、model、api_key 和 models。',
+    'profile.select': 'API 配置',
+    'profile.name': '名称',
+    'provider.select': '服务商',
+    'provider.mimo_balance': 'MiMo 普通余额',
+    'provider.qwen': '通义千问 / DashScope',
+    'provider.zhipu': '智谱 GLM',
+    'provider.volcengine': '火山方舟',
+    'provider.siliconflow': '硅基流动',
+    'provider.qianfan': '百度千帆',
+    'provider.hunyuan': '腾讯混元',
+    'provider.custom': '自定义兼容',
+    'provider.add.with': '新增服务商',
+    'profile.add': '新增',
+    'profile.delete': '删除',
+    'model.add': '添加模型',
+    'model.add.card': '新增模型',
+    'model.card.copy': '复制',
+    'model.card.delete': '删除',
+    'model.card.details': '详情',
+    'model.card.collapse': '收起',
+    'model.card.default': '默认',
+    'model.card.model': '模型 ID',
+    'model.manager.hint': '每张卡片就是一个可运行模型，拥有自己的 API Key、Base URL 和模型 ID。配置相近时可以复制后再改。',
+    'mimo.endpoint.note.title': 'MiMo API 与 Base URL 区别',
+    'mimo.endpoint.note.balance': '普通余额：使用 MiMo 普通余额控制台的 API Key，Base URL 填 https://api.xiaomimimo.com/v1。',
+    'mimo.endpoint.note.token': 'Token Plan：使用 Token Plan 的 API Key，Base URL 填 https://token-plan-cn.xiaomimimo.com/v1。两套 Key 不通用。',
+    'api.key.show': '查看 API Key',
+    'api.key.hide': '隐藏 API Key',
+    'model.list.title': '模型列表',
+    'model.list.hint': '每个 API 配置都有自己的模型 ID 列表。点击标签设为默认模型，也可以移除不用的模型。',
+    'model.new.label': '添加模型 ID',
+    'model.new.placeholder': 'model-id，多个可用逗号或换行',
+    'model.connection': '模型连接',
+    'default.model': '默认模型',
+    'model.list': '模型列表（每行一个）',
+    'generation': '生成参数',
+    'max.tokens': '最大 Tokens',
+    'command.timeout': '命令超时 (秒)',
+    'max.tool.output': '工具最大输出',
+    'enable.thinking': '启用模型思考控制（当提供商支持时）',
+    'reasoning.profile': '推理策略',
+    'reasoning.turbo': '极速',
+    'reasoning.fast': '快速',
+    'reasoning.balanced': '均衡',
+    'reasoning.deep': '深入',
+    'reasoning.max': '极限',
+    'preset.fast': '快速编码',
+    'preset.balanced': '均衡',
+    'preset.long': '长任务',
+    'generation.hint': '生成参数会影响编码速度、稳定性，以及 MiMo 每轮可处理的输出和工具上下文。',
+    'generation.tokens.hint': '更高 token 预算适合长任务，但会增加成本和等待时间。',
+    'generation.timeout.hint': '更长命令超时适合安装依赖、运行测试和数据处理脚本。',
+    'generation.output.hint': '工具输出超过该限制会被压缩，以保持界面流畅。',
+    'notifications.title': '通知提醒',
+    'completion.sound': '任务完成时播放音效',
+    'completion.sound.volume': '音量',
+    'completion.sound.hint': 'MiMo 会在实时任务完成后播放一声本地短提示音；历史回放和恢复对话不会播放。',
+    'memory.title': '学习记忆',
+    'memory.enabled': '启用本地长期记忆',
+    'memory.learn': '从聊天中学习明确偏好',
+    'memory.max.items': '最大记忆条数',
+    'memory.max.injected': '每轮注入的记忆条数',
+    'memory.hint': 'MiMo 会把学到的偏好本地保存到 ~/.mimo/memory.json，只学习明确的偏好类消息，并过滤疑似密钥内容。',
+    'sandbox.title': '沙箱和命令安全',
+    'sandbox.mode': '沙箱模式',
+    'sandbox.safe': '安全模式（默认本地受保护执行）',
+    'sandbox.docker': 'Docker（更强隔离，需要 Docker Desktop）',
+    'docker.image': 'Docker 镜像',
+    'memory.limit': '内存限制',
+    'cpu.limit': 'CPU 限制',
+    'prefer.sandbox': '优先使用沙箱执行；当 Docker 不可用时回退到安全模式',
+    'git.snapshot': '执行风险命令前创建可选 Git 快照（默认关闭）',
+    'audit.logs': '记录命令审计日志',
+    'block.network': '在安全模式下阻止常见网络命令',
+    'sandbox.hint': '安全模式会添加命令检查、工作区边界检查、超时、输出限制、可选 Git 快照和审计日志。Git 快照默认关闭，因为它会创建提交。',
+    'dependency.title': '依赖安装策略',
+    'dependency.enabled': '启用依赖安装策略',
+    'dependency.project.mode': '项目依赖安装',
+    'dependency.project.auto': '自动安装项目依赖',
+    'dependency.project.confirm': '安装项目依赖前询问',
+    'dependency.project.disabled': '禁止安装项目依赖',
+    'dependency.system.mode': '系统软件安装',
+    'dependency.system.confirm': '系统安装前始终询问',
+    'dependency.system.disabled': '禁止系统安装',
+    'dependency.long.timeout': '长安装超时 (秒)',
+    'dependency.hint': '项目包管理器安装可以自动执行并等待更久；系统级软件安装必须确认，或可直接禁用。',
+    'saved.success': '已保存到 ~/.mimo/settings.json 并应用。',
+    'saved.failed': '保存失败。请检查设置文件权限。',
+};
+
+const cleanZhProviderFallback: Record<string, string> = {
+    'provider.select': '服务商',
+    'provider.mimo': 'MiMo',
+    'provider.mimo_balance': 'MiMo 普通余额',
+    'provider.mimo_token_plan': 'MiMo Token Plan',
+    'provider.deepseek': 'DeepSeek',
+    'provider.openai': 'OpenAI',
+    'provider.qwen': '通义千问 / DashScope',
+    'provider.zhipu': '智谱 GLM',
+    'provider.moonshot': 'Moonshot / Kimi',
+    'provider.volcengine': '火山方舟',
+    'provider.siliconflow': '硅基流动',
+    'provider.qianfan': '百度千帆',
+    'provider.hunyuan': '腾讯混元',
+    'provider.openrouter': 'OpenRouter',
+    'provider.groq': 'Groq',
+    'provider.gemini': 'Google Gemini',
+    'provider.mistral': 'Mistral AI',
+    'provider.xai': 'xAI Grok',
+    'provider.custom': '自定义兼容',
+    'provider.add.with': '新增服务商',
+};
+
+const cleanZhModelFallback: Record<string, string> = {
+    'model.add.card': '新增模型',
+    'model.card.copy': '复制',
+    'model.card.delete': '删除',
+    'model.card.details': '详情',
+    'model.card.collapse': '收起',
+    'model.card.default': '默认',
+    'model.card.model': '模型 ID',
+    'model.manager.hint': '每张卡片就是一个可运行模型，拥有自己的 API Key、Base URL 和模型 ID。配置相近时可以复制后再改。',
+    'mimo.endpoint.note.title': 'MiMo API 与 Base URL 区别',
+    'mimo.endpoint.note.balance': '普通余额：使用 MiMo 普通余额控制台的 API Key，Base URL 填 https://api.xiaomimimo.com/v1。',
+    'mimo.endpoint.note.token': 'Token Plan：使用 Token Plan 的 API Key，Base URL 填 https://token-plan-cn.xiaomimimo.com/v1。两套 Key 不通用。',
+    'api.key.show': '查看 API Key',
+    'api.key.hide': '隐藏 API Key',
+};
+
+const cleanZhFallback: Record<string, string> = {
+    'api.connection': 'API 连接',
+    'model.list.title': '模型列表',
+    'model.list.hint': '每个 API 配置都有自己的模型 ID 列表。点击标签设为默认模型，也可以移除不用的模型。',
+    'model.new.label': '添加模型 ID',
+};
+
 function t(key: string): string {
+    if (settingsLang === 'zh' && cleanZhOverrides[key]) return cleanZhOverrides[key];
+    if (settingsLang === 'zh' && cleanZhProviderFallback[key]) return cleanZhProviderFallback[key];
+    if (settingsLang === 'zh' && cleanZhModelFallback[key]) return cleanZhModelFallback[key];
+    if (settingsLang === 'zh' && cleanZhFallback[key]) return cleanZhFallback[key];
     if (settingsLang === 'zh') {
         const zhProviderFallback: Record<string, string> = {
             'provider.select': '服务商',
@@ -493,7 +650,10 @@ export class SettingsProvider {
     ) {}
 
     show(): void {
+        settingsLang = resolveSettingsLang();
         if (this.panel) {
+            this.panel.title = t('title');
+            this.panel.webview.html = this.getHtml(this.panel.webview);
             this.panel.reveal(vscode.ViewColumn.Active, false);
             this.panel.webview.postMessage({ type: 'settingsData', settings: getSettingsPanel() });
             return;
@@ -526,6 +686,13 @@ export class SettingsProvider {
                 vscode.commands.executeCommand('vscode.open', vscode.Uri.file(settingsPath));
             }
         });
+    }
+
+    refreshLanguage(): void {
+        settingsLang = resolveSettingsLang();
+        if (!this.panel) return;
+        this.panel.title = t('title');
+        this.panel.webview.html = this.getHtml(this.panel.webview);
     }
 
     private getHtml(_webview: vscode.Webview): string {
@@ -599,19 +766,20 @@ button:hover{filter:brightness(1.08)}
 .endpoint-note-title{font-size:12px;font-weight:650;margin-bottom:4px;color:var(--vscode-foreground)}
 .endpoint-note-text{font-size:12px;line-height:1.45;color:var(--vscode-descriptionForeground)}
 .endpoint-note code{font-family:var(--vscode-editor-font-family);font-size:11px;color:var(--vscode-foreground)}
-.models-toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}
-.models-toolbar .hint{margin:0;max-width:650px}
-.model-summary-bar{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;margin:0 0 14px;padding:10px 12px;border:1px solid var(--vscode-editorWidget-border);border-radius:8px;background:color-mix(in srgb,var(--vscode-input-background) 78%,transparent)}
+.models-toolbar{display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,max-content);gap:12px 16px;align-items:start;margin-bottom:12px}
+.models-toolbar .hint{margin:0;max-width:none;min-width:0}
+.model-summary-bar{display:grid;grid-template-columns:minmax(0,1fr) minmax(220px,max-content);gap:10px 14px;align-items:center;margin:0 0 14px;padding:10px 12px;border:1px solid var(--vscode-editorWidget-border);border-radius:8px;background:color-mix(in srgb,var(--vscode-input-background) 78%,transparent)}
 .model-summary-main{display:grid;gap:4px;min-width:0}
 .model-summary-title{font-size:13px;font-weight:650;color:var(--vscode-foreground)}
 .model-summary-sub{font-size:12px;color:var(--vscode-descriptionForeground);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.model-summary-side{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.model-summary-side{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;min-width:0}
 .summary-pill{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--vscode-editorWidget-border);border-radius:999px;padding:4px 10px;font-size:12px;color:var(--vscode-descriptionForeground);background:color-mix(in srgb,var(--vscode-input-background) 86%,transparent)}
-.model-add-controls{display:grid;grid-template-columns:170px auto auto;gap:8px;align-items:center}
+.model-add-controls{display:grid;grid-template-columns:minmax(170px,240px) repeat(2,max-content);gap:8px;align-items:center;justify-content:end;min-width:0}
 .profile-cards{display:grid;gap:10px}
 .profile-card{border:1px solid var(--vscode-editorWidget-border);border-radius:6px;background:var(--vscode-input-background);padding:0;overflow:hidden}
 .profile-card.active{border-color:var(--vscode-focusBorder);box-shadow:0 0 0 1px color-mix(in srgb,var(--vscode-focusBorder) 45%,transparent)}
-.profile-card-head{display:grid;grid-template-columns:24px minmax(0,1fr) max-content;align-items:start;gap:12px;padding:10px 12px;min-height:56px;user-select:none}
+.profile-card-head{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:12px 16px;padding:12px;user-select:none}
+.profile-card-leading{display:grid;grid-template-columns:auto auto minmax(0,1fr);align-items:center;gap:10px;min-width:0}
 .profile-drag-handle{display:inline-flex;align-items:center;justify-content:center;width:22px;height:28px;border:1px solid transparent;border-radius:5px;color:var(--vscode-descriptionForeground);cursor:grab;font-size:16px;line-height:1}
 .profile-drag-handle:hover{border-color:var(--vscode-editorWidget-border);background:color-mix(in srgb,var(--vscode-input-background) 70%,var(--vscode-foreground) 8%);color:var(--vscode-foreground)}
 .profile-drag-handle:active{cursor:grabbing}
@@ -619,21 +787,22 @@ button:hover{filter:brightness(1.08)}
 .profile-card.drag-over-top{border-top:2px solid var(--vscode-focusBorder)}
 .profile-card.drag-over-bottom{border-bottom:2px solid var(--vscode-focusBorder)}
 .profile-card-main{display:grid;gap:8px;min-width:0}
-.profile-card-top{display:flex;align-items:center;gap:10px;min-width:0;flex-wrap:wrap}
-.profile-card-title{display:flex;align-items:center;gap:8px;font-weight:650;min-width:0;max-width:100%}
-.profile-card-title span,.profile-card-summary{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.profile-card-badges{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+.profile-card-top{display:flex;align-items:center;gap:8px 12px;min-width:0;flex-wrap:wrap}
+.profile-card-title{display:flex;align-items:center;gap:8px;font-weight:650;min-width:0;max-width:100%;flex:0 1 auto}
+.profile-card-title span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.profile-card-badges{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0;justify-content:flex-start;flex:0 1 auto}
+.profile-card-summary{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .profile-card-summary{color:var(--vscode-descriptionForeground);font-size:12px}
-.profile-card-summary.code{font-family:var(--vscode-editor-font-family);color:var(--vscode-foreground)}
-.profile-card-summary.url{font-family:var(--vscode-editor-font-family);opacity:.9}
-.profile-card-meta{display:grid;grid-template-columns:minmax(180px,max-content) minmax(0,1fr);gap:8px 12px;align-items:center;min-width:0}
+.profile-card-summary.code{font-family:var(--vscode-editor-font-family);color:var(--vscode-foreground);flex:0 0 auto;max-width:100%}
+.profile-card-summary.url{font-family:var(--vscode-editor-font-family);opacity:.9;flex:1 1 320px;min-width:220px}
+.profile-card-meta{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;min-width:0}
 .provider-pill,.profile-badge{display:inline-flex;align-items:center;width:max-content;max-width:100%;border:1px solid var(--vscode-editorWidget-border);border-radius:999px;padding:2px 8px;color:var(--vscode-descriptionForeground);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.profile-visibility-toggle{width:14px;height:14px;border-radius:999px;border:2px solid var(--vscode-descriptionForeground);background:transparent;display:inline-block;box-sizing:border-box;cursor:pointer;flex:0 0 auto}
+.profile-visibility-toggle{width:14px;height:14px;border-radius:999px;border:2px solid var(--vscode-descriptionForeground);background:transparent;display:inline-block;box-sizing:border-box;cursor:pointer;flex:0 0 auto;align-self:center}
 .profile-visibility-toggle.on{border-color:var(--vscode-focusBorder);background:var(--vscode-focusBorder);box-shadow:0 0 0 2px color-mix(in srgb,var(--vscode-focusBorder) 20%,transparent)}
 .profile-badge.hidden{opacity:.72}
 .profile-badge.kind{background:color-mix(in srgb,var(--vscode-input-background) 60%,var(--vscode-descriptionForeground) 8%)}
 .profile-badge.endpoint{font-family:var(--vscode-editor-font-family)}
-.profile-card-actions{display:flex;gap:8px;white-space:nowrap;justify-content:flex-end;min-width:0}
+.profile-card-actions{display:flex;gap:8px;white-space:nowrap;justify-content:flex-end;align-items:center;flex-wrap:nowrap;min-width:0}
 .profile-card-actions button{background:transparent;color:var(--vscode-textLink-foreground);padding:3px 5px}
 .profile-card-grid{display:none;grid-template-columns:1fr 1fr;gap:10px 12px;border-top:1px solid var(--vscode-editorWidget-border);padding:12px}
 .profile-card.open .profile-card-grid{display:grid}
@@ -660,25 +829,30 @@ textarea{min-height:96px;resize:vertical}
 .toast.show{display:block}
 .toast.ok{border-color:rgba(76,175,80,.55)}
 .toast.error{border-color:rgba(244,67,54,.55)}
-@media (max-width:980px){
-  .models-toolbar{flex-direction:column;align-items:stretch}
-  .models-toolbar .hint{max-width:none}
+@media (max-width:900px){
+  .models-toolbar{grid-template-columns:1fr}
   .model-summary-bar{grid-template-columns:1fr}
+  .model-summary-sub{white-space:normal;overflow:visible;text-overflow:clip}
   .model-summary-side{justify-content:flex-start}
-  .model-add-controls{grid-template-columns:minmax(160px,1fr) auto auto}
-  .profile-card-head{grid-template-columns:24px minmax(0,1fr);grid-auto-flow:row}
-  .profile-card-actions{grid-column:2;justify-content:flex-start;flex-wrap:wrap}
-  .profile-card-meta{grid-template-columns:1fr}
+  .model-add-controls{grid-template-columns:minmax(160px,1fr) repeat(2,max-content);justify-content:start}
+  .profile-card-head{grid-template-columns:1fr}
+  .profile-card-actions{justify-content:flex-start;align-items:flex-start;flex-wrap:wrap}
 }
 @media (max-width:760px){
-  .grid,.row,.param-grid,.preset-row,.profile-bar,.model-row,.profile-card-head,.profile-card-grid,.model-add-controls,.endpoint-note,.preference-strip{grid-template-columns:1fr}
+  .grid,.row,.param-grid,.preset-row,.profile-bar,.model-row,.profile-card-grid,.endpoint-note,.preference-strip{grid-template-columns:1fr}
   .top{display:block}
   .actions{margin-top:12px;white-space:normal}
   .section.full{grid-column:auto}
   .profile-card-actions{justify-content:flex-start}
-  .profile-drag-handle{align-self:start}
+  .profile-card-leading{grid-template-columns:auto minmax(0,1fr);grid-template-areas:"drag main" "toggle main";align-items:start}
+  .profile-drag-handle{grid-area:drag;align-self:start}
+  .profile-visibility-toggle{grid-area:toggle;margin-left:4px}
+  .profile-card-main{grid-area:main}
   .preference-strip .check{white-space:normal}
   .profile-card-top{align-items:flex-start}
+  .profile-card-meta{display:grid;grid-template-columns:1fr}
+  .model-add-controls{grid-template-columns:1fr}
+  .model-summary-sub{white-space:normal;overflow:visible;text-overflow:clip}
 }
 </style>
 </head>
@@ -1097,6 +1271,7 @@ function renderProfiles(){
     const checked = p.id === activeProfileId ? ' checked' : '';
     return '<div class="profile-card'+active+'" data-profile-id="'+escapeAttr(p.id)+'">'
       + '<div class="profile-card-head">'
+      + '<div class="profile-card-leading">'
       + '<div class="profile-drag-handle" draggable="true" title="Drag to reorder" aria-label="Drag to reorder">⋮⋮</div>'
       + '<div class="profile-visibility-toggle'+(p.show_in_picker === false ? '' : ' on')+'" data-action="toggle-visibility" role="button" aria-label="'+escapeAttr(uiText('切换是否显示在输入框模型列表', 'Toggle input picker visibility'))+'" title="'+escapeAttr(uiText('切换是否显示在输入框模型列表', 'Toggle input picker visibility'))+'"></div>'
       + '<div class="profile-card-main">'
@@ -1108,6 +1283,7 @@ function renderProfiles(){
       + '<div class="profile-card-meta">'
       + '<div class="profile-card-summary code" title="'+escapeAttr(p.model || '')+'">'+escapeHtml(p.model || '')+'</div>'
       + '<div class="profile-card-summary url" title="'+escapeAttr(p.base_url || '')+'">'+escapeHtml(p.base_url || '')+'</div>'
+      + '</div>'
       + '</div>'
       + '</div>'
       + '<div class="profile-card-actions">'

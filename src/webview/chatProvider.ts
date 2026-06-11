@@ -1064,6 +1064,7 @@ export class ChatViewProvider {
                     const lang = msg.lang === 'en' ? 'en' : 'zh';
                     this.agent.setUiLang(lang, stLang?.activeConvId || convId);
                     saveSetting('ui.language', lang);
+                    void vscode.commands.executeCommand('mimo-agent.refreshSettingsLanguage');
                     break;
                 }
                 case 'clear': {

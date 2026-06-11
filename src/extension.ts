@@ -97,6 +97,18 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     context.subscriptions.push(
+        vscode.commands.registerCommand('mimo-agent.refreshSettingsLanguage', () => {
+            settingsProvider.refreshLanguage();
+        }),
+    );
+
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration(() => {
+            settingsProvider.refreshLanguage();
+        }),
+    );
+
+    context.subscriptions.push(
         vscode.commands.registerCommand('mimo-agent.switchModel', async () => {
             const options = agent.getModelOptions();
             if (options.length === 0) {
