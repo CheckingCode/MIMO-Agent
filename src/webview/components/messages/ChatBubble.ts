@@ -5,7 +5,7 @@
 import { ImageData } from '../../core/store';
 import { bus } from '../../core/bus';
 import { createElement } from '../../utils/dom';
-import { createCopyButton } from './CodeBlock';
+import { buildRichMessageClipboardPayload, createCopyButton } from './CodeBlock';
 
 export function isRenderableImageDataUrl(value: string): boolean {
     return /^data:image\/(?:png|jpe?g|webp|gif);base64,[a-z0-9+/=\s]+$/i.test(String(value || '').trim());
@@ -47,15 +47,25 @@ export function createUserBubble(text: string, images?: ImageData[] | null, clas
         bubble.appendChild(textDiv);
     }
 
-    bubble.appendChild(createCopyButton(() => {
-        let fullText = text || '';
-        if (images && images.length > 0) {
-            fullText += (fullText ? '\n' : '') + images.map(img => `[Image: ${img.name}]`).join('\n');
-        }
-        return fullText;
-    }));
+    bubble.appendChild(createCopyButton(() => buildRichMessageClipboardPayload(text || '', validImages)));
 
     return bubble;
+}
+
+function setUserBubbleExpandedState(bubble: HTMLElement, expandBtn: HTMLButtonElement): void {
+    expandBtn.textContent = bubble.classList.contains('expanded')
+        ? '\u6536\u8d77 \u25b4'
+        : '\u5c55\u5f00 \u25be';
+}
+
+function toggleUserBubbleExpanded(bubble: HTMLElement, expandBtn: HTMLButtonElement): void {
+    bubble.classList.toggle('expanded');
+    setUserBubbleExpandedState(bubble, expandBtn);
+}
+
+function isUserBubbleInteractiveTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement)) return false;
+    return !!target.closest('button, a, input, textarea, select, summary, .msg-copy, .expand-toggle, .msg-img');
 }
 
 export function installUserBubbleCollapse(bubble: HTMLElement, images?: ImageData[] | null, text?: string): void {
@@ -63,18 +73,40 @@ export function installUserBubbleCollapse(bubble: HTMLElement, images?: ImageDat
         const textDiv = bubble.querySelector('.text-content') as HTMLElement | null;
         const lineHeight = 1.5 * 13;
         const maxHeight = lineHeight * 3 + 16;
-        const shouldCollapse = textDiv && (textDiv.scrollHeight > maxHeight + 10 || (images && images.length > 0 && text));
+        const hasImages = (images?.length || 0) > 0 || !!bubble.querySelector('.msg-img, .msg-image-note');
+        const hasText = !!((text || textDiv?.textContent || '').trim());
+        const shouldCollapse = !!textDiv && (textDiv.scrollHeight > maxHeight + 10 || (hasImages && hasText));
 
-        if (shouldCollapse) {
-            const expandBtn = createElement('button', 'expand-toggle');
-            expandBtn.textContent = '展开 ▼';
-            expandBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                bubble.classList.toggle('expanded');
-                expandBtn.textContent = bubble.classList.contains('expanded') ? '收起 ▲' : '展开 ▼';
-            });
+        const existingBtn = bubble.querySelector<HTMLButtonElement>('.expand-toggle');
+        if (!shouldCollapse) {
+            bubble.classList.remove('collapsible', 'expanded');
+            existingBtn?.remove();
+            return;
+        }
+
+        bubble.classList.add('collapsible');
+        let expandBtn = existingBtn;
+        if (expandBtn) {
+            const clone = expandBtn.cloneNode(true) as HTMLButtonElement;
+            expandBtn.replaceWith(clone);
+            expandBtn = clone;
+        } else {
+            expandBtn = createElement('button', 'expand-toggle') as HTMLButtonElement;
             bubble.appendChild(expandBtn);
-            bubble.classList.add('collapsible');
+        }
+
+        setUserBubbleExpandedState(bubble, expandBtn);
+        expandBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleUserBubbleExpanded(bubble, expandBtn!);
+        });
+
+        if (!(bubble as any)._userBubbleCollapseBound) {
+            bubble.addEventListener('click', (e) => {
+                if (!bubble.classList.contains('collapsible') || isUserBubbleInteractiveTarget(e.target)) return;
+                toggleUserBubbleExpanded(bubble, expandBtn!);
+            });
+            (bubble as any)._userBubbleCollapseBound = true;
         }
     });
 }

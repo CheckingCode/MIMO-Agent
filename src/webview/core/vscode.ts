@@ -110,6 +110,22 @@ export const vscode = {
         api.postMessage({ type: 'openFile', path, beside: true });
     },
 
+    openMarkdownPreviewBeside(path: string): void {
+        api.postMessage({ type: 'openMarkdownPreview', path, beside: true });
+    },
+
+    openScratchDocument(title: string, content: string, language = 'plaintext', beside = true): void {
+        api.postMessage({ type: 'openScratchDocument', title, content, language, beside });
+    },
+
+    openReadonlyDiff(title: string, filePath: string, before: string, after: string, language = 'plaintext', beside = true): void {
+        api.postMessage({ type: 'openReadonlyDiff', title, filePath, before, after, language, beside });
+    },
+
+    openDiffReview(title: string, items: Array<{ filePath: string; patch: string; before: string; after: string }>): void {
+        api.postMessage({ type: 'openDiffReview', title, items });
+    },
+
     getSettings(): void {
         api.postMessage({ type: 'getSettings' });
     },
@@ -155,8 +171,8 @@ export const vscode = {
         api.postMessage({ type: 'askUserConfirm', previewId, answer });
     },
 
-    taskChangesUndo(id: string, patch: string): void {
-        api.postMessage({ type: 'taskChangesUndo', id, patch });
+    taskChangesUndo(id: string, patch: string, filePath?: string): void {
+        api.postMessage({ type: 'taskChangesUndo', id, patch, filePath });
     },
 
     historySnapshot(snapshot: any): void {

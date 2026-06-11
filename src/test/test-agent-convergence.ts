@@ -472,7 +472,7 @@ describe('agent convergence guards', () => {
         expect(values.includes('mimo-v2-5-pro::mimo-v2-pro')).toBe(false);
     });
 
-    it('adds generated artifact paths to sparse final summaries', () => {
+    it('does not infer deliverables from ffprobe-style source paths alone', () => {
         const agent = makeAgent();
         const audioPath = 'g:\\AI World\\output\\高考作文音频\\voicedesign_test.wav';
         const conv = makeConv([
@@ -496,10 +496,15 @@ describe('agent convergence guards', () => {
                 content: `Input #0, wav, from '${audioPath}': Duration: 00:00:23.20`,
             } as any,
         ]);
+        const stableFinalText = agent.appendMissingArtifactSummary(conv, 'Task completed.');
+        expect(stableFinalText.includes('交付文件')).toBe(false);
+        expect(stableFinalText.includes('Artifacts:')).toBe(false);
+        expect(stableFinalText.includes(audioPath)).toBe(false);
+        return;
 
         const finalText = agent.appendMissingArtifactSummary(conv, '任务完成。');
         expect(finalText.includes('交付文件')).toBe(true);
-        expect(finalText.includes(audioPath)).toBe(true);
+        expect(finalText.includes(audioPath)).toBe(false);
     });
 
     it('does not duplicate artifact paths already present in final summaries', () => {
@@ -557,6 +562,29 @@ describe('agent convergence guards', () => {
         expect(finalText.includes(realArtifact)).toBe(true);
         expect(finalText.includes('ctx.beginPath')).toBe(false);
         expect(finalText.includes('ctx.mov')).toBe(false);
+    });
+
+    it('does not treat input or source asset paths introduced by from as new deliverables', () => {
+        const agent = makeAgent();
+        const sourceAsset = 'G:\\AI World\\moon_texture_4k.jpg';
+        const outputHtml = 'G:\\AI World\\tuxedo-cat\\index.html';
+        const conv = makeConv([
+            { role: 'user', content: '只改一个 HTML 文件。' } as any,
+            {
+                role: 'tool',
+                _toolName: 'execute_command',
+                content: `Input #0, image2, from '${sourceAsset}': metadata loaded`,
+            } as any,
+            {
+                role: 'tool',
+                _toolName: 'write_file',
+                content: `Updated file: ${outputHtml}`,
+            } as any,
+        ]);
+
+        const finalText = agent.appendMissingArtifactSummary(conv, '任务完成。');
+        expect(finalText.includes(outputHtml)).toBe(false);
+        expect(finalText.includes(sourceAsset)).toBe(false);
     });
 });
 

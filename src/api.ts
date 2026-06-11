@@ -284,6 +284,27 @@ export class MiMoAPI {
         params: Record<string, any>,
         signal?: AbortSignal,
     ): Promise<string> {
+        const maxRetries = 3;
+        let lastError: Error | null = null;
+
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            try {
+                return await this.doChatCompletion(params, signal);
+            } catch (e: any) {
+                lastError = e;
+                if (!isRetryableStreamError(e) || signal?.aborted || attempt >= maxRetries) {
+                    throw e;
+                }
+                await abortableDelay(retryDelayMs(e, attempt), signal);
+            }
+        }
+        throw lastError || new Error('Max retries exceeded');
+    }
+
+    private async doChatCompletion(
+        params: Record<string, any>,
+        signal?: AbortSignal,
+    ): Promise<string> {
         const url = this.buildUrl();
         const requestBody = this.transformRequest(params, false);
         const body = Buffer.from(JSON.stringify(requestBody), 'utf-8');
@@ -356,7 +377,13 @@ export class MiMoAPI {
 
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
             try {
-                return await this.doChatCompletionsStream(params, callbacks, signal);
+                const result = await this.doChatCompletionsStream(params, callbacks, signal);
+                // Detect silent empty response: stream ended without [DONE] and produced nothing.
+                // This typically happens when the connection drops mid-stream on first attempt.
+                if (!result.content && result.toolCalls.length === 0 && !result.reasoningContent && !signal?.aborted) {
+                    throw new Error('unexpected end of data: empty stream response');
+                }
+                return result;
             } catch (e: any) {
                 lastError = e;
                 if (!isRetryableStreamError(e) || signal?.aborted || attempt >= maxRetries) {
@@ -517,6 +544,43 @@ export class MiMoAPI {
                     });
 
                     res.on('end', () => {
+                        // Flush any remaining buffered data (partial last line)
+                        if (buffer.trim()) {
+                            const leftover = buffer.trim();
+                            if (leftover === 'data: [DONE]') {
+                                // Normal end marker arrived in final chunk
+                            } else if (leftover.startsWith('data: ')) {
+                                try {
+                                    const parsed = JSON.parse(leftover.slice(6));
+                                    if (this.apiEndpoint === 'responses') {
+                                        const rs = this.handleResponsesStreamEvent(parsed, toolCallsMap, callbacks);
+                                        if (rs.contentDelta) collectedContent += rs.contentDelta;
+                                        if (rs.reasoningDelta) collectedReasoning += rs.reasoningDelta;
+                                        if (rs.usage) collectedUsage = rs.usage;
+                                    } else {
+                                        const choices = parsed.choices;
+                                        if (choices?.length) {
+                                            const delta: StreamDelta = choices[0].delta || {};
+                                            if (delta.reasoning_content) collectedReasoning += delta.reasoning_content;
+                                            if (delta.content) { collectedContent += delta.content; callbacks.onToken?.(delta.content); }
+                                            if (delta.tool_calls) {
+                                                for (const tc of delta.tool_calls) {
+                                                    const idx = tc.index;
+                                                    if (!toolCallsMap.has(idx)) toolCallsMap.set(idx, { id: '', name: '', arguments: '' });
+                                                    const existing = toolCallsMap.get(idx)!;
+                                                    if (tc.id) existing.id = tc.id;
+                                                    if (tc.function?.name) existing.name = tc.function.name;
+                                                    if (tc.function?.arguments) existing.arguments += tc.function.arguments;
+                                                }
+                                            }
+                                            if (parsed.usage) {
+                                                collectedUsage = { promptTokens: parsed.usage.prompt_tokens || 0, completionTokens: parsed.usage.completion_tokens || 0, totalTokens: parsed.usage.total_tokens || 0 };
+                                            }
+                                        }
+                                    }
+                                } catch { /* ignore unparseable leftover */ }
+                            }
+                        }
                         // If we get here without [DONE], resolve with what we have
                         const toolCalls: ToolCall[] = [];
                         for (const [, tc] of toolCallsMap) {

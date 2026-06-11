@@ -10,6 +10,8 @@ import { readSettings, saveSetting, getSettingsPanel, loadConfig } from '../conf
 import { renderMarkdown } from '../markdown';
 import { ApiEndpointMode, ContentPart, ChatMessage, MiMoAPI, normalizeApiEndpointMode } from '../api';
 import { getContextStats } from '../context';
+import { buildPlanExecutionMessage, getMimoPlansDir, looksLikePlanResponse, sanitizePlanMarkdown } from '../planMode';
+import { ReadonlyPreviewProvider } from '../readonlyPreview';
 
 /**
  * Auto-clean old plan files in ~/.mimo/plans/
@@ -66,16 +68,28 @@ function extractText(content: string | ContentPart[] | null | undefined): string
     return content.filter(p => p.type === 'text').map(p => p.text || '').join('');
 }
 
-function extractInputHistory(messages: ChatMessage[]): string[] {
+function extractInputHistory(messages: ChatMessage[]): Array<{ text: string; images: Array<{ dataUrl: string; name: string; size: number }> | null }> {
     const seen = new Set<string>();
-    const result: string[] = [];
+    const result: Array<{ text: string; images: Array<{ dataUrl: string; name: string; size: number }> | null }> = [];
     for (let i = messages.length - 1; i >= 0; i--) {
         const msg = messages[i];
         if (msg.role !== 'user') continue;
         const text = extractText(msg.content).trim();
-        if (!text || seen.has(text)) continue;
-        seen.add(text);
-        result.push(text);
+        const images = Array.isArray(msg.content)
+            ? msg.content
+                .filter((part: any) => part?.type === 'image_url' && /^data:image\/(?:png|jpe?g|webp|gif);base64,[a-z0-9+/=\s]+$/i.test(String(part?.image_url?.url || '')))
+                .map((part: any, index: number) => ({
+                    dataUrl: String(part.image_url?.url || ''),
+                    name: `image-${index + 1}`,
+                    size: 0,
+                }))
+                .slice(0, 12)
+            : [];
+        if (!text && images.length === 0) continue;
+        const key = JSON.stringify({ text, images: images.map(image => image.dataUrl) });
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.push({ text, images: images.length > 0 ? images : null });
         if (result.length >= 50) break;
     }
     return result;
@@ -102,6 +116,16 @@ function isPathInside(parent: string, child: string): boolean {
 function sanitizeString(value: unknown, maxLen: number): string | undefined {
     if (typeof value !== 'string') return undefined;
     return value.replace(/\x00/g, '').trim().slice(0, maxLen);
+}
+
+function escapeHtml(value: string): string {
+    return String(value || '').replace(/[&<>"']/g, (ch) => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        '\'': '&#39;',
+    }[ch] || ch));
 }
 
 function sanitizeNumber(value: unknown, min: number, max: number): number | undefined {
@@ -137,25 +161,6 @@ function sanitizeMode(value: unknown): AgentMode | undefined {
     return value === 'auto' || value === 'polling' || value === 'plan' || value === 'adversarial' || value === 'infinite'
         ? value
         : undefined;
-}
-
-function looksLikePlanResponse(response: string): boolean {
-    const text = (response || '').trim();
-    if (text.length < 120) return false;
-    const headings = text.match(/^#{1,3}\s+\S.+$/gm)?.length ?? 0;
-    const checklist = text.match(/^\s*[-*]\s+\[[ xX]\]\s+\S/gm)?.length ?? 0;
-    const numbered = text.match(/^\s*\d+[.)]\s+\S/gm)?.length ?? 0;
-    const lower = text.toLowerCase();
-    const englishHits = [
-        'implementation', 'plan', 'steps', 'tasks', 'files',
-        'risks', 'validation', 'acceptance', 'execute', 'todo',
-    ].filter(k => lower.includes(k)).length;
-    const hasChinesePlanMarker = ['计划', '步骤', '任务', '文件', '风险', '验证', '实现', '方案']
-        .some(k => text.includes(k));
-    return checklist >= 2
-        || numbered >= 3
-        || (headings >= 2 && (englishHits > 0 || hasChinesePlanMarker))
-        || (headings >= 1 && englishHits >= 2);
 }
 
 function pendingAiTitle(input: string): string {
@@ -265,6 +270,7 @@ function sanitizeSettings(input: unknown): Record<string, unknown> {
                     id,
                     name,
                     provider,
+                    show_in_picker: raw.show_in_picker !== false,
                     base_url: baseUrl.replace(/\/+$/, ''),
                     api_endpoint: apiEndpoint,
                     model: profileModel,
@@ -455,8 +461,16 @@ interface TurnChangeFile {
     hasToolDiff?: boolean;
 }
 
+interface TurnFileSnapshot {
+    path: string;
+    existed: boolean;
+    content?: string;
+    skipped?: string;
+}
+
 interface TurnChangeTracker {
     files: Map<string, TurnChangeFile>;
+    snapshots: Map<string, TurnFileSnapshot>;
 }
 
 interface PanelState {
@@ -477,6 +491,14 @@ interface PanelState {
     /** Plan mode: per-panel plan file path and ID */
     planPath?: string;
     planId?: string;
+    planContent?: string;
+    /** User explicitly pressed Stop for the current turn */
+    stopRequested?: boolean;
+}
+
+function isUserStoppedMessage(value: unknown): boolean {
+    const text = String(value || '').trim();
+    return text === '(stopped by user)' || /^aborted$/i.test(text) || /stopped by user|stopped manually|aborted by user/i.test(text);
 }
 
 interface SerializedChatPanelState {
@@ -508,6 +530,7 @@ export class ChatViewProvider {
     constructor(
         private readonly extensionUri: vscode.Uri,
         agent: MiMoAgent,
+        private readonly readonlyPreviewProvider: ReadonlyPreviewProvider,
         private readonly windowSessionId?: string,
     ) {
         this.agent = agent;
@@ -704,6 +727,25 @@ export class ChatViewProvider {
         text: string,
         pendingTitle: string,
     ): void {
+        const startedAt = Date.now();
+        const runWhenIdle = () => {
+            const conv = this.agent.getConversation(activeId);
+            if (!conv || conv.title !== pendingTitle) return;
+            if (this.agent.isConvBusy(activeId) && Date.now() - startedAt < 120_000) {
+                setTimeout(runWhenIdle, 1_500);
+                return;
+            }
+            this.runAiTitleGeneration(activeId, panel, text, pendingTitle);
+        };
+        setTimeout(runWhenIdle, 2_500);
+    }
+
+    private runAiTitleGeneration(
+        activeId: string,
+        panel: vscode.WebviewPanel,
+        text: string,
+        pendingTitle: string,
+    ): void {
         this.generateAiTitle(text).then((title) => {
             if (!title) {
                 console.warn(`[MiMo] AI title generation produced no usable title for convId=${activeId}.`);
@@ -835,6 +877,7 @@ export class ChatViewProvider {
         // Handle visibility changes 鈥?restore state when panel is shown again
         panel.onDidChangeViewState((e) => {
             if (e.webviewPanel.visible) {
+                this.panel = e.webviewPanel;
                 // restoreStateToWebview already posts busy/idle + history
                 this.restoreStateToWebview(panel);
             }
@@ -842,6 +885,7 @@ export class ChatViewProvider {
 
         // Handle messages from webview 鈥?capture panelId and convId in closure
         panel.webview.onDidReceiveMessage(async (msg) => {
+            this.panel = panel;
             const post = (m: any) => panel.webview.postMessage(m);
 
             switch (msg.type) {
@@ -896,7 +940,7 @@ export class ChatViewProvider {
                     // 5. Restore conversation if it has messages (full replay with reasoning, tool cards, etc.)
                     if (initConv && initConv.messages.length > 0) {
                         post({ type: 'clearMessages' });
-                        this.replayConversation(initConv.messages);
+                        this.replayConversation(initConv.messages, panel);
                         post({ type: 'restoreMode', mode: initConv.mode, label: initConv.mode });
                     }
 
@@ -928,8 +972,9 @@ export class ChatViewProvider {
                         post({ type: 'modelCaps', caps: this.agent.getModelCapabilities(this.agent.getModelSelectionValue(msg.id)) });
                         post({ type: 'restoreMode', mode: conv.mode, label: conv.mode });
                         post(this.contextUsageMessage(msg.id));
-                        // Restore busy state (only if THIS conversation is running)
-                        post(this.agent.isConvRunning(msg.id) ? { type: 'busy' } : { type: 'idle' });
+                        // Restore busy state for the full lifecycle, including outer-turn cleanup
+                        // and recovery paths where the chat promise is still active.
+                        post(this.agent.isConvBusy(msg.id) ? { type: 'busy' } : { type: 'idle' });
                     }
                     break;
                 }
@@ -983,6 +1028,7 @@ export class ChatViewProvider {
                     const text = sanitizeString(msg.text, 200_000) || '';
                     const images = sanitizeImages(msg.images);
                     if (!text && !images?.length) break;
+                    if (st) st.stopRequested = false;
                     if (this.agent.isConvBusy(sendConvId)) {
                         post({ type: 'system', text: 'A message is already running. Wait for it to finish or press Stop before sending another message.' });
                         post({ type: 'clearQueue' });
@@ -998,6 +1044,7 @@ export class ChatViewProvider {
                     const images = sanitizeImages(msg.images);
                     if (!text && !images?.length) break;
                     if (st) st.messageQueue = [];
+                    if (st) st.stopRequested = false;
 
                     if (this.agent.isConvBusy(sendConvId)) {
                         post({ type: 'system', text: vscode.env.language.startsWith('zh') ? '正在中断当前任务，并切换到选中的排队消息...' : 'Interrupting the current run and switching to the selected queued message...' });
@@ -1052,6 +1099,7 @@ export class ChatViewProvider {
                     post({ type: 'idle' });
                     // Clear message queue so queued messages don't auto-send
                     if (stStop) stStop.messageQueue = [];
+                    if (stStop) stStop.stopRequested = true;
                     // Clear webview queue display too
                     post({ type: 'clearQueue' });
                     // Abort the agent 鈥?only if we have a valid convId
@@ -1076,8 +1124,10 @@ export class ChatViewProvider {
                     this.agent.confirmAskUser(msg.previewId, msg.answer);
                     break;
                 case 'taskChangesUndo': {
+                    console.log('[MiMo] taskChangesUndo: id=' + msg.id + ', patchLen=' + (msg.patch || '').length);
                     const result = await this.agent.undoWorkspaceChanges(String(msg.patch || ''));
-                    post({ type: 'taskChangesUndoResult', id: msg.id, ...result });
+                    console.log('[MiMo] taskChangesUndo: id=' + msg.id + ', patchLen=' + (msg.patch || '').length);
+                    post({ type: 'taskChangesUndoResult', id: msg.id, filePath: sanitizeString(msg.filePath, 4096), ...result });
                     if (result.ok) {
                         const summary = await this.agent.getWorkspaceChangeSummary();
                         post({ type: 'taskChangesRefresh', summary });
@@ -1099,8 +1149,10 @@ export class ChatViewProvider {
                     this.agent.confirmPlan(true, stPlan?.activeConvId);
                     post({ type: 'system', text: vscode.env.language.startsWith('zh') ? '计划已确认，开始执行...' : 'Plan confirmed. Starting execution...' });
                     const planRef = stPlan?.planPath
-                        ? `Read the plan file ${stPlan.planPath} and execute the plan.`
-                        : 'Execute the confirmed plan.';
+                        ? buildPlanExecutionMessage(stPlan.planPath)
+                        : stPlan?.planContent
+                            ? `Execute the confirmed plan below.\n\n[CONFIRMED PLAN]\n${sanitizePlanMarkdown(stPlan.planContent)}\n[END PLAN]`
+                            : 'Execute the confirmed plan.';
                     await this.handleUserMessage(planRef, [], stPlan?.activeConvId || convId, panel);
                     break;
                 }
@@ -1113,7 +1165,12 @@ export class ChatViewProvider {
                 case 'planModify': {
                     const stMod = this.panels.get(panelId);
                     this.agent.confirmPlan(false, stMod?.activeConvId);
-                    post({ type: 'system', text: `Plan modification requested: ${msg.feedback}` });
+                    post({
+                        type: 'system',
+                        text: vscode.env.language.startsWith('zh')
+                            ? `已请求修改计划：${msg.feedback}`
+                            : `Plan modification requested: ${msg.feedback}`,
+                    });
                     await this.handleUserMessage(
                         `Please revise the plan based on this feedback:\n\n${msg.feedback}\n\nAnalyze the requirement again and output the revised plan.`,
                         [], stMod?.activeConvId || convId, panel
@@ -1319,6 +1376,89 @@ export class ChatViewProvider {
                     }
                     break;
                 }
+                case 'openMarkdownPreview': {
+                    try {
+                        let filePath = sanitizeString(msg.path, 4096);
+                        if (!filePath) break;
+                        if (filePath && !filePath.match(/^[A-Z]:\\/i) && !filePath.startsWith('/')) {
+                            const workspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+                            if (workspace) {
+                                filePath = path.join(workspace, filePath);
+                            }
+                        }
+                        const uri = vscode.Uri.file(filePath);
+                        await vscode.commands.executeCommand('markdown.showPreviewToSide', uri);
+                        post({ type: 'fileOpenResult', path: msg.path, ok: true });
+                    } catch (e: any) {
+                        vscode.window.showWarningMessage(`Cannot open markdown preview: ${e.message}`);
+                        post({ type: 'fileOpenResult', path: msg.path, ok: false, error: e.message });
+                    }
+                    break;
+                }
+                case 'openScratchDocument': {
+                    try {
+                        const title = sanitizeString(msg.title, 240) || 'MiMo Preview';
+                        const content = typeof msg.content === 'string' ? msg.content : String(msg.content || '');
+                        const language = sanitizeString(msg.language, 40) || 'plaintext';
+                        const uri = this.readonlyPreviewProvider.createUri(title, content, language);
+                        const doc = await vscode.workspace.openTextDocument(uri);
+                        const typedDoc = await vscode.languages.setTextDocumentLanguage(doc, language);
+                        const column = msg.beside ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
+                        await vscode.window.showTextDocument(typedDoc, { preview: false, viewColumn: column });
+                        post({ type: 'fileOpenResult', path: title, ok: true });
+                    } catch (e: any) {
+                        vscode.window.showWarningMessage(`Cannot open preview document: ${e.message}`);
+                        post({ type: 'fileOpenResult', path: msg.title, ok: false, error: e.message });
+                    }
+                    break;
+                }
+                case 'openReadonlyDiff': {
+                    try {
+                        const title = sanitizeString(msg.title, 240) || 'MiMo Diff';
+                        const filePath = sanitizeString(msg.filePath, 4096) || 'changes.txt';
+                        const before = typeof msg.before === 'string' ? msg.before : String(msg.before || '');
+                        const after = typeof msg.after === 'string' ? msg.after : String(msg.after || '');
+                        const language = sanitizeString(msg.language, 40) || 'plaintext';
+                        const leftUri = this.readonlyPreviewProvider.createUri(`${title} (Before)`, before, language, filePath);
+                        const rightUri = this.readonlyPreviewProvider.createUri(`${title} (After)`, after, language, filePath);
+                        await vscode.commands.executeCommand(
+                            'vscode.diff',
+                            leftUri,
+                            rightUri,
+                            title,
+                            { preview: false, viewColumn: msg.beside ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active },
+                        );
+                        post({ type: 'fileOpenResult', path: filePath, ok: true });
+                    } catch (e: any) {
+                        vscode.window.showWarningMessage(`Cannot open diff preview: ${e.message}`);
+                        post({ type: 'fileOpenResult', path: msg.filePath, ok: false, error: e.message });
+                    }
+                    break;
+                }
+                case 'openDiffReview': {
+                    try {
+                        const title = sanitizeString(msg.title, 240) || 'MiMo Diff Review';
+                        const rawItems = Array.isArray(msg.items) ? msg.items : [];
+                        const items = rawItems
+                            .map((item: any) => {
+                                const filePath = sanitizeString(item?.filePath, 4096) || '';
+                                const patch = typeof item?.patch === 'string' ? item.patch : String(item?.patch || '');
+                                const before = typeof item?.before === 'string' ? item.before : String(item?.before || '');
+                                const after = typeof item?.after === 'string' ? item.after : String(item?.after || '');
+                                if (!filePath || !patch) return null;
+                                return { filePath, patch, before, after };
+                            })
+                            .filter((item: { filePath: string; patch: string; before: string; after: string } | null): item is { filePath: string; patch: string; before: string; after: string } => !!item)
+                            .slice(0, 200);
+                        if (items.length === 0) break;
+                        this.openDiffReviewPanel(title, items);
+                        post({ type: 'fileOpenResult', path: title, ok: true });
+                    } catch (e: any) {
+                        vscode.window.showWarningMessage(`Cannot open diff review: ${e.message}`);
+                        post({ type: 'fileOpenResult', path: msg.title, ok: false, error: e.message });
+                    }
+                    break;
+                }
                 // 鈹€鈹€ Skill management 鈹€鈹€
                 case 'skillList':
                     post({
@@ -1471,6 +1611,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
     async handleUserMessage(text: string, images?: Array<{dataUrl: string; name: string; size: number}>, convId?: string, targetPanel?: vscode.WebviewPanel) {
         const panel = targetPanel || this.panel;
         if (!panel) return;
+        const panelState = this.findStateByPanel(panel);
         // Local post function - always sends to THIS panel, no race condition.
         const rawPost = (msg: any) => panel.webview.postMessage(msg);
         // MUST have a valid convId 鈥?never fall back to global activeId
@@ -1513,7 +1654,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         const turnStartedAt = Date.now();
         const baselineChanges = await this.agent.getWorkspaceChangeSummary();
         const baselinePatch = baselineChanges?.patch || '';
-        const turnToolChanges: TurnChangeTracker = { files: new Map() };
+        const turnToolChanges: TurnChangeTracker = { files: new Map(), snapshots: new Map() };
         post({ type: 'userMessage', text, images: images || null });
         post(this.contextUsageMessage(activeId, { text, images: images || null }));
         post({ type: 'busy' });
@@ -1524,6 +1665,8 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         let hasToolCalls = false;
         let totalToolCalls = 0;
         let turnHadError = false;
+        let turnStoppedByUser = false;
+        const wasStopRequested = () => this.findStateByPanel(panel)?.stopRequested === true;
         const startedAsPlanExecution = conv.mode === 'plan' && !!conv.planConfirmed;
         const pendingToolArgs: Array<{ name: string; args: Record<string, any> }> = [];
         const streamRender = createStreamingRenderQueue(post);
@@ -1595,6 +1738,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                 },
                 onToolCallStart: (name: string, args: Record<string, any>) => {
                     pendingToolArgs.push({ name, args });
+                    this.snapshotTurnToolChange(turnToolChanges, name, args);
                     reasoningPost.flush();
                     if (responseText.trim()) {
                         commitAssistantUpdate();
@@ -1634,11 +1778,11 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     post({ type: 'tokenUsage', usage });
                     post(this.contextUsageMessage(activeId));
                 },
-                onEditPreview: (previewId: string, path: string, oldText: string, newText: string, matchCount: number) => {
-                    post({ type: 'editPreview', previewId, path, oldText, newText, matchCount });
+                onEditPreview: (previewId: string, path: string, oldText: string, newText: string, matchCount: number, lineStart?: number, lineEnd?: number) => {
+                    post({ type: 'editPreview', previewId, path, oldText, newText, matchCount, lineStart, lineEnd });
                 },
-                onWritePreview: (previewId: string, filePath: string, content: string, isCreate: boolean) => {
-                    post({ type: 'writePreview', previewId, filePath, content, isCreate });
+                onWritePreview: (previewId: string, filePath: string, content: string, isCreate: boolean, oldText?: string) => {
+                    post({ type: 'writePreview', previewId, filePath, content, isCreate, oldText });
                 },
                 onAskUser: (previewId: string, question: string, options: string[]) => {
                     post({ type: 'askUser', previewId, question, options });
@@ -1676,7 +1820,8 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                 onDone: (response: string) => {
                     reasoningPost.flush();
                     const elapsedSec = Math.max(0, (Date.now() - turnStartedAt) / 1000);
-                    const stoppedByUser = response === '(stopped by user)';
+                    const stoppedByUser = response === '(stopped by user)' || (wasStopRequested() && isUserStoppedMessage(response));
+                    turnStoppedByUser = stoppedByUser;
                     if (!stoppedByUser) {
                         streamRender.cancel();
                         emitFinalAnswer(response);
@@ -1698,32 +1843,41 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     this.queueHistorySave(activeId, conv.title, msgs, conv.model, this.historyMetadata(conv));
                     post(this.contextUsageMessage(activeId));
                     this.postTaskChanges(post, baselinePatch, turnToolChanges);
+                    if (stoppedByUser) {
+                        post({ type: 'system', text: vscode.env.language.startsWith('zh') ? '已手动停止当前任务。' : 'Stopped this task manually.' });
+                    }
                     // Plan mode: auto-save plan text to ~/.mimo/plans/, show confirm buttons
                     // Skip if response is a greeting/direct reply (not an actual plan)
                     const _hasPlanMarkers = looksLikePlanResponse(response);
                     if (conv.mode === 'plan' && !startedAsPlanExecution && response && _hasPlanMarkers) {
                         try {
+                            const cleanedPlan = sanitizePlanMarkdown(response);
                             // Use user home ~/.mimo/plans/ (not workspace .mimo)
-                            const mimoPlansDir = path.join(os.homedir(), '.mimo', 'plans');
+                            const mimoPlansDir = getMimoPlansDir();
                             fs.mkdirSync(mimoPlansDir, { recursive: true });
                             // Unique filename: plan-{convId}-{timestamp}.md
                             const planId = `plan-${activeId}-${Date.now()}`;
                             const planFilename = `${planId}.md`;
                             const planPath = path.join(mimoPlansDir, planFilename);
-                            fs.writeFileSync(planPath, response, 'utf-8');
+                            fs.writeFileSync(planPath, cleanedPlan, 'utf-8');
                             // Store plan path in per-panel state
                             const stPlan2 = this.findStateByPanel(panel);
                             if (stPlan2) {
                                 stPlan2.planPath = planPath;
                                 stPlan2.planId = planId;
+                                stPlan2.planContent = cleanedPlan;
                             }
                             // Auto-clean old plan files
                             cleanOldPlans(mimoPlansDir);
                         } catch { /* ignore save errors */ }
-                        post({ type: 'planReady', planContent: response, planPath: this.findStateByPanel(panel)?.planPath });
+                        post({ type: 'planReady', planContent: this.findStateByPanel(panel)?.planContent, planPath: this.findStateByPanel(panel)?.planPath });
                     }
                 },
                 onError: (error: string) => {
+                    if (turnStoppedByUser || (wasStopRequested() && isUserStoppedMessage(error)) || String(error || '').trim() === '(stopped by user)') {
+                        turnStoppedByUser = true;
+                        return;
+                    }
                     turnHadError = true;
                     this.agent.releaseConversation(activeId);
                     finalizePartialAssistant();
@@ -1740,15 +1894,20 @@ while ($true) { Start-Sleep -Milliseconds 100 }
 
             await this.agent.chat(text, handlers, images, activeId);
         } catch (e: any) {
-            turnHadError = true;
-            this.agent.releaseConversation(activeId);
-            finalizePartialAssistant();
-            const stErr = this.findStateByPanel(panel);
-            if (stErr) stErr.messageQueue = [];
-            post({ type: 'clearQueue' });
-            post({ type: 'error', error: e.message });
-            post(this.contextUsageMessage(activeId));
+            if (turnStoppedByUser || (wasStopRequested() && isUserStoppedMessage(e?.message || e)) || String(e?.message || e || '').trim() === '(stopped by user)') {
+                turnStoppedByUser = true;
+            } else {
+                turnHadError = true;
+                this.agent.releaseConversation(activeId);
+                finalizePartialAssistant();
+                const stErr = this.findStateByPanel(panel);
+                if (stErr) stErr.messageQueue = [];
+                post({ type: 'clearQueue' });
+                post({ type: 'error', error: e.message });
+                post(this.contextUsageMessage(activeId));
+            }
         } finally {
+            if (panelState) panelState.stopRequested = false;
             reasoningPost.cancel();
             streamRender.cancel();
             if (turnHadError) this.agent.releaseConversation(activeId);
@@ -1826,6 +1985,28 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         return text.split(/\r\n|\r|\n/).length;
     }
 
+    private countPatchChanges(patch: string): { added: number; removed: number } {
+        const text = String(patch || '');
+        if (!text.trim()) return { added: 0, removed: 0 };
+        let added = 0;
+        let removed = 0;
+        for (const line of text.split(/\r?\n/)) {
+            if (!line) continue;
+            if (
+                line.startsWith('diff --git') ||
+                line.startsWith('index ') ||
+                line.startsWith('---') ||
+                line.startsWith('+++') ||
+                line.startsWith('@@')
+            ) {
+                continue;
+            }
+            if (line.startsWith('+')) added++;
+            else if (line.startsWith('-')) removed++;
+        }
+        return { added, removed };
+    }
+
     private estimateEditCounts(args: Record<string, any>): { added: number; removed: number } {
         if (typeof args.old_text === 'string' || typeof args.new_text === 'string') {
             return {
@@ -1838,6 +2019,319 @@ while ($true) { Start-Sleep -Milliseconds 100 }
             return { added: this.lineCount(String(args.new_text || '')), removed };
         }
         return { added: 0, removed: 0 };
+    }
+
+    private getWorkspaceRoot(): string {
+        return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    }
+
+    private resolveTurnToolPath(filePath: string): { fullPath: string; relativePath: string } | null {
+        const workspace = this.getWorkspaceRoot();
+        if (!workspace || !filePath) return null;
+        const fullPath = path.isAbsolute(filePath)
+            ? path.resolve(filePath)
+            : path.resolve(workspace, filePath);
+        if (!isPathInside(workspace, fullPath)) return null;
+        const relativePath = path.relative(workspace, fullPath).replace(/\\/g, '/');
+        if (!relativePath || relativePath.startsWith('..')) return null;
+        return { fullPath, relativePath };
+    }
+
+    private turnMutationPaths(name: string, args: Record<string, any>): string[] {
+        if (name === 'move_file') {
+            return [
+                String(args.source || args.src || args.from || ''),
+                String(args.destination || args.dest || args.to || ''),
+            ].filter(Boolean);
+        }
+        if (name === 'copy_file') {
+            return [String(args.destination || args.dest || args.to || '')].filter(Boolean);
+        }
+        if (['write_file', 'edit_file', 'delete_file'].includes(name)) {
+            return [String(args.path || args.filePath || args.file || '')].filter(Boolean);
+        }
+        return [];
+    }
+
+    private snapshotTurnToolChange(tracker: TurnChangeTracker, name: string, args: Record<string, any>): void {
+        const mutationTools = new Set(['write_file', 'edit_file', 'delete_file', 'move_file', 'copy_file']);
+        if (!mutationTools.has(name)) return;
+        for (const rawPath of this.turnMutationPaths(name, args)) {
+            const resolved = this.resolveTurnToolPath(rawPath);
+            if (!resolved) continue;
+            const key = this.normalizeTurnChangePath(resolved.relativePath);
+            if (tracker.snapshots.has(key)) continue;
+            try {
+                if (!fs.existsSync(resolved.fullPath)) {
+                    tracker.snapshots.set(key, { path: resolved.relativePath, existed: false });
+                    continue;
+                }
+                const stat = fs.statSync(resolved.fullPath);
+                if (!stat.isFile()) {
+                    tracker.snapshots.set(key, { path: resolved.relativePath, existed: true, skipped: 'not a regular file' });
+                    continue;
+                }
+                if (stat.size > 1024 * 1024) {
+                    tracker.snapshots.set(key, { path: resolved.relativePath, existed: true, skipped: 'file is larger than 1MB' });
+                    continue;
+                }
+                const buffer = fs.readFileSync(resolved.fullPath);
+                if (!this.isTextBufferForTurnPatch(buffer)) {
+                    tracker.snapshots.set(key, { path: resolved.relativePath, existed: true, skipped: 'binary file' });
+                    continue;
+                }
+                tracker.snapshots.set(key, {
+                    path: resolved.relativePath,
+                    existed: true,
+                    content: buffer.toString('utf8'),
+                });
+            } catch (e: any) {
+                tracker.snapshots.set(key, {
+                    path: resolved.relativePath,
+                    existed: true,
+                    skipped: String(e?.message || e || 'snapshot failed').slice(0, 120),
+                });
+            }
+        }
+    }
+
+    private isTextBufferForTurnPatch(buffer: Buffer): boolean {
+        if (buffer.length === 0) return true;
+        const sample = buffer.subarray(0, Math.min(buffer.length, 8192));
+        let nul = 0;
+        for (const byte of sample) {
+            if (byte === 0) nul++;
+        }
+        return nul <= sample.length * 0.05;
+    }
+
+    private readCurrentTurnFile(relativePath: string): { existed: boolean; content?: string; skipped?: string } {
+        const resolved = this.resolveTurnToolPath(relativePath);
+        if (!resolved) return { existed: false, skipped: 'path is outside workspace' };
+        try {
+            if (!fs.existsSync(resolved.fullPath)) return { existed: false };
+            const stat = fs.statSync(resolved.fullPath);
+            if (!stat.isFile()) return { existed: true, skipped: 'not a regular file' };
+            if (stat.size > 1024 * 1024) return { existed: true, skipped: 'file is larger than 1MB' };
+            const buffer = fs.readFileSync(resolved.fullPath);
+            if (!this.isTextBufferForTurnPatch(buffer)) return { existed: true, skipped: 'binary file' };
+            return { existed: true, content: buffer.toString('utf8') };
+        } catch (e: any) {
+            return { existed: false, skipped: String(e?.message || e || 'read failed').slice(0, 120) };
+        }
+    }
+
+    private patchLineParts(content: string): { lines: string[]; hasFinalNewline: boolean } {
+        const normalized = String(content || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        if (!normalized) return { lines: [], hasFinalNewline: true };
+        const hasFinalNewline = normalized.endsWith('\n');
+        const lines = hasFinalNewline ? normalized.slice(0, -1).split('\n') : normalized.split('\n');
+        return { lines, hasFinalNewline };
+    }
+
+    private patchRange(content: string, existed: boolean): string {
+        if (!existed || !content) return '0,0';
+        const count = this.patchLineParts(content).lines.length;
+        return count > 0 ? `1,${count}` : '0,0';
+    }
+
+    private appendPatchLines(prefix: '+' | '-', content: string): string[] {
+        const parts = this.patchLineParts(content);
+        const out = parts.lines.map(line => `${prefix}${line}`);
+        if (!parts.hasFinalNewline && out.length > 0) {
+            out.push('\\ No newline at end of file');
+        }
+        return out;
+    }
+
+    private escapeTurnPatchPath(filePath: string): string {
+        return filePath.replace(/\\/g, '/').replace(/\t/g, ' ');
+    }
+
+    private computeSnapshotLineDiff(
+        oldLines: string[],
+        newLines: string[],
+    ): Array<{ type: 'ctx' | 'del' | 'add'; text: string; oldLn?: number; newLn?: number }> {
+        const m = oldLines.length;
+        const n = newLines.length;
+        if (m * n > 250_000) {
+            const out: Array<{ type: 'ctx' | 'del' | 'add'; text: string; oldLn?: number; newLn?: number }> = [];
+            oldLines.forEach((line, index) => out.push({ type: 'del', text: line, oldLn: index + 1 }));
+            newLines.forEach((line, index) => out.push({ type: 'add', text: line, newLn: index + 1 }));
+            return out;
+        }
+
+        const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+        for (let i = 1; i <= m; i++) {
+            for (let j = 1; j <= n; j++) {
+                dp[i][j] = oldLines[i - 1] === newLines[j - 1]
+                    ? dp[i - 1][j - 1] + 1
+                    : Math.max(dp[i - 1][j], dp[i][j - 1]);
+            }
+        }
+
+        const reversed: Array<{ type: 'ctx' | 'del' | 'add'; text: string; oldLn?: number; newLn?: number }> = [];
+        let i = m;
+        let j = n;
+        while (i > 0 || j > 0) {
+            if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) {
+                reversed.push({ type: 'ctx', text: oldLines[i - 1], oldLn: i, newLn: j });
+                i--;
+                j--;
+            } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+                reversed.push({ type: 'add', text: newLines[j - 1], newLn: j });
+                j--;
+            } else {
+                reversed.push({ type: 'del', text: oldLines[i - 1], oldLn: i });
+                i--;
+            }
+        }
+        return reversed.reverse();
+    }
+
+    private formatHunkRange(start: number, count: number): string {
+        if (count === 1) return String(start);
+        return `${start},${count}`;
+    }
+
+    private buildCompactModificationPatch(filePath: string, beforeContent: string, afterContent: string): string {
+        const before = this.patchLineParts(beforeContent);
+        const after = this.patchLineParts(afterContent);
+        const diff = this.computeSnapshotLineDiff(before.lines, after.lines);
+        const changedIndexes = diff
+            .map((line, index) => line.type === 'add' || line.type === 'del' ? index : -1)
+            .filter(index => index >= 0);
+        if (changedIndexes.length === 0) return '';
+
+        const context = 3;
+        const ranges: Array<{ start: number; end: number }> = [];
+        for (const index of changedIndexes) {
+            const start = Math.max(0, index - context);
+            const end = Math.min(diff.length - 1, index + context);
+            const last = ranges[ranges.length - 1];
+            if (last && start <= last.end + 1) {
+                last.end = Math.max(last.end, end);
+            } else {
+                ranges.push({ start, end });
+            }
+        }
+
+        const safePath = this.escapeTurnPatchPath(filePath);
+        const out = [
+            `diff --git a/${safePath} b/${safePath}`,
+            `--- a/${safePath}`,
+            `+++ b/${safePath}`,
+        ];
+
+        for (const range of ranges) {
+            const hunk = diff.slice(range.start, range.end + 1);
+            const oldCount = hunk.filter(line => line.type === 'ctx' || line.type === 'del').length;
+            const newCount = hunk.filter(line => line.type === 'ctx' || line.type === 'add').length;
+            const firstOld = hunk.find(line => typeof line.oldLn === 'number')?.oldLn;
+            const firstNew = hunk.find(line => typeof line.newLn === 'number')?.newLn;
+            const oldStart = firstOld ?? Math.max(0, (firstNew ?? 1) - 1);
+            const newStart = firstNew ?? Math.max(0, (firstOld ?? 1) - 1);
+            out.push(`@@ -${this.formatHunkRange(oldStart, oldCount)} +${this.formatHunkRange(newStart, newCount)} @@`);
+
+            for (const line of hunk) {
+                if (line.type === 'ctx') {
+                    out.push(` ${line.text}`);
+                } else if (line.type === 'del') {
+                    out.push(`-${line.text}`);
+                    if (!before.hasFinalNewline && line.oldLn === before.lines.length) {
+                        out.push('\\ No newline at end of file');
+                    }
+                } else {
+                    out.push(`+${line.text}`);
+                    if (!after.hasFinalNewline && line.newLn === after.lines.length) {
+                        out.push('\\ No newline at end of file');
+                    }
+                }
+            }
+        }
+
+        return out.join('\n') + '\n';
+    }
+
+    private buildFullFileTurnPatch(filePath: string, before: TurnFileSnapshot, after: { existed: boolean; content?: string }): string {
+        const safePath = this.escapeTurnPatchPath(filePath);
+        const beforeContent = before.existed ? String(before.content || '') : '';
+        const afterContent = after.existed ? String(after.content || '') : '';
+        if (before.existed && after.existed) {
+            return this.buildCompactModificationPatch(filePath, beforeContent, afterContent);
+        }
+        const oldRange = this.patchRange(beforeContent, before.existed);
+        const newRange = this.patchRange(afterContent, after.existed);
+        const header = [
+            `diff --git a/${safePath} b/${safePath}`,
+            before.existed && !after.existed ? 'deleted file mode 100644' : '',
+            !before.existed && after.existed ? 'new file mode 100644' : '',
+            before.existed ? `--- a/${safePath}` : '--- /dev/null',
+            after.existed ? `+++ b/${safePath}` : '+++ /dev/null',
+            `@@ -${oldRange} +${newRange} @@`,
+        ].filter(Boolean);
+        return [
+            ...header,
+            ...this.appendPatchLines('-', beforeContent),
+            ...this.appendPatchLines('+', afterContent),
+        ].join('\n') + '\n';
+    }
+
+    private buildSnapshotTurnSummary(tracker: TurnChangeTracker): any | null {
+        const files: TurnChangeFile[] = [];
+        const patches: string[] = [];
+        const warnings: string[] = [];
+        const seen = new Set<string>();
+
+        for (const snapshot of tracker.snapshots.values()) {
+            const key = this.normalizeTurnChangePath(snapshot.path);
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const current = this.readCurrentTurnFile(snapshot.path);
+            const skipped = snapshot.skipped || current.skipped;
+            const beforeContent = snapshot.existed ? String(snapshot.content || '') : '';
+            const afterContent = current.existed ? String(current.content || '') : '';
+            if (!snapshot.existed && !current.existed) continue;
+            if (!skipped && snapshot.existed === current.existed && beforeContent === afterContent) continue;
+
+            const beforeLines = snapshot.existed ? this.lineCount(beforeContent) : 0;
+            const afterLines = current.existed ? this.lineCount(afterContent) : 0;
+            const tracked = Array.from(tracker.files.values()).find(file => this.fileKeysMatch(file.path, snapshot.path));
+            const filePatch = !skipped ? this.buildFullFileTurnPatch(snapshot.path, snapshot, current) : '';
+            const patchCounts = this.countPatchChanges(filePatch);
+            files.push({
+                path: snapshot.path,
+                added: patchCounts.added || tracked?.added || Math.max(0, afterLines - beforeLines),
+                removed: patchCounts.removed || tracked?.removed || Math.max(0, beforeLines - afterLines),
+                action: tracked?.action || (!snapshot.existed ? 'write' : !current.existed ? 'delete' : 'edit'),
+                source: 'tool',
+                hasToolDiff: tracked?.hasToolDiff,
+                binary: !!skipped,
+                toolDiff: filePatch || undefined,
+            } as any);
+            if (skipped) {
+                warnings.push(`${snapshot.path}: ${skipped}`);
+                continue;
+            }
+            if (filePatch) patches.push(filePatch);
+        }
+
+        if (files.length === 0) return null;
+        const patch = patches.join('\n');
+        const totals = this.countPatchChanges(patch);
+        const warning = warnings.length > 0
+            ? `部分文件无法生成本轮快照 patch，已禁用自动撤销：${warnings.slice(0, 3).join('；')}${warnings.length > 3 ? '；...' : ''}`
+            : undefined;
+        return {
+            id: `turn_changes_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            files: files.sort((a, b) => a.path.localeCompare(b.path)),
+            totalAdded: totals.added,
+            totalRemoved: totals.removed,
+            patch,
+            createdAt: Date.now(),
+            canUndo: !!patch && warnings.length === 0,
+            warning,
+        };
     }
 
     private recordTurnToolChange(
@@ -1917,11 +2411,12 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         );
         if (filtered.length === 0) return null;
         const patch = this.filterPatchToTurnChanges(String(summary.patch || ''), tracker);
+        const totals = this.countPatchChanges(patch);
         return {
             ...summary,
             files: filtered,
-            totalAdded: filtered.reduce((sum: number, file: any) => sum + (file.added || 0), 0),
-            totalRemoved: filtered.reduce((sum: number, file: any) => sum + (file.removed || 0), 0),
+            totalAdded: totals.added,
+            totalRemoved: totals.removed,
             patch,
             canUndo: patch ? summary.canUndo : false,
             warning: patch ? summary.warning : (summary.warning || '本轮文件已记录，但没有可安全隔离的 Git patch；可查看工具记录，自动撤销不可用。'),
@@ -1967,6 +2462,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
     private async handleSkillInvocation(skillName: string, text: string, convId?: string, targetPanel?: vscode.WebviewPanel) {
         const panel = targetPanel || this.panel;
         if (!panel) return;
+        const panelState = this.findStateByPanel(panel);
         const rawPost = (msg: any) => panel.webview.postMessage(msg);
         if (!convId) return;
         const activeId = convId;
@@ -1990,7 +2486,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         const turnStartedAt = Date.now();
         const baselineChanges = await this.agent.getWorkspaceChangeSummary();
         const baselinePatch = baselineChanges?.patch || '';
-        const turnToolChanges: TurnChangeTracker = { files: new Map() };
+        const turnToolChanges: TurnChangeTracker = { files: new Map(), snapshots: new Map() };
         post({ type: 'busy' });
 
         let responseText = '';
@@ -1998,6 +2494,8 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         let finalAnswerEmitted = false;
         let hasToolCalls = false;
         let totalToolCalls = 0;
+        let turnStoppedByUser = false;
+        const wasStopRequested = () => this.findStateByPanel(panel)?.stopRequested === true;
         const pendingToolArgs: Array<{ name: string; args: Record<string, any> }> = [];
         const streamRender = createStreamingRenderQueue(post);
         const reasoningPost = createReasoningPostQueue(post);
@@ -2063,6 +2561,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                 onReasoning: (token) => reasoningPost.push(token),
                 onToolCallStart: (name, args) => {
                     pendingToolArgs.push({ name, args });
+                    this.snapshotTurnToolChange(turnToolChanges, name, args);
                     reasoningPost.flush();
                     if (responseText.trim()) {
                         commitAssistantUpdate();
@@ -2095,11 +2594,11 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     post({ type: 'tokenUsage', usage });
                     post(this.contextUsageMessage(activeId));
                 },
-                onEditPreview: (previewId: string, path: string, oldText: string, newText: string, matchCount: number) => {
-                    post({ type: 'editPreview', previewId, path, oldText, newText, matchCount });
+                onEditPreview: (previewId: string, path: string, oldText: string, newText: string, matchCount: number, lineStart?: number, lineEnd?: number) => {
+                    post({ type: 'editPreview', previewId, path, oldText, newText, matchCount, lineStart, lineEnd });
                 },
-                onWritePreview: (previewId: string, filePath: string, content: string, isCreate: boolean) => {
-                    post({ type: 'writePreview', previewId, filePath, content, isCreate });
+                onWritePreview: (previewId: string, filePath: string, content: string, isCreate: boolean, oldText?: string) => {
+                    post({ type: 'writePreview', previewId, filePath, content, isCreate, oldText });
                 },
                 onAskUser: (previewId: string, question: string, options: string[]) => {
                     post({ type: 'askUser', previewId, question, options });
@@ -2137,8 +2636,10 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                 onDone: (response: string) => {
                     reasoningPost.flush();
                     const elapsedSec = Math.max(0, (Date.now() - turnStartedAt) / 1000);
+                    const stoppedByUser = response === '(stopped by user)' || (wasStopRequested() && isUserStoppedMessage(response));
+                    turnStoppedByUser = stoppedByUser;
                     streamRender.cancel();
-                    if (response === '(stopped by user)' && responseText.trim()) {
+                    if (stoppedByUser && responseText.trim()) {
                         commitAssistantUpdate();
                     } else {
                         emitFinalAnswer(response);
@@ -2156,8 +2657,15 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                     this.queueHistorySave(activeId, conv.title, msgs, conv.model, this.historyMetadata(conv));
                     post(this.contextUsageMessage(activeId));
                     this.postTaskChanges(post, baselinePatch, turnToolChanges);
+                    if (stoppedByUser) {
+                        post({ type: 'system', text: vscode.env.language.startsWith('zh') ? '已手动停止当前任务。' : 'Stopped this task manually.' });
+                    }
                 },
                 onError: (error) => {
+                    if (turnStoppedByUser || (wasStopRequested() && isUserStoppedMessage(error)) || String(error || '').trim() === '(stopped by user)') {
+                        turnStoppedByUser = true;
+                        return;
+                    }
                     finalizePartialAssistant();
                     reasoningPost.flush();
                     this.saveRecoverySnapshot(activeId, conv);
@@ -2167,10 +2675,15 @@ while ($true) { Start-Sleep -Milliseconds 100 }
                 },
             });
         } catch (e: any) {
-            finalizePartialAssistant();
-            post({ type: 'error', error: e.message });
-            post(this.contextUsageMessage(activeId));
+            if (turnStoppedByUser || (wasStopRequested() && isUserStoppedMessage(e?.message || e)) || String(e?.message || e || '').trim() === '(stopped by user)') {
+                turnStoppedByUser = true;
+            } else {
+                finalizePartialAssistant();
+                post({ type: 'error', error: e.message });
+                post(this.contextUsageMessage(activeId));
+            }
         } finally {
+            if (panelState) panelState.stopRequested = false;
             reasoningPost.cancel();
             streamRender.cancel();
             const finishUiTurn = () => {
@@ -2190,6 +2703,11 @@ while ($true) { Start-Sleep -Milliseconds 100 }
 
     private postTaskChanges(post: (msg: any) => void, baselinePatch = '', turnToolChanges?: TurnChangeTracker): void {
         if (!turnToolChanges || turnToolChanges.files.size === 0) return;
+        const snapshotSummary = this.buildSnapshotTurnSummary(turnToolChanges);
+        if (snapshotSummary) {
+            post({ type: 'taskChanges', summary: snapshotSummary });
+            return;
+        }
         void this.agent.getWorkspaceChangeSummary()
             .then(summary => {
                 const filteredSummary = this.filterSummaryToTurnChanges(summary, turnToolChanges);
@@ -2247,7 +2765,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         this.postToWebview({ type: 'modelCaps', caps: this.agent.getModelCapabilities(model) }, p);
         this.postToWebview(this.contextUsageMessage(convId), p);
         this.postToWebview({ type: 'restoreMode', mode: conv.mode, label: conv.mode }, p);
-        this.postToWebview(this.agent.isConvRunning(convId) ? { type: 'busy' } : { type: 'idle' }, p);
+        this.postToWebview(this.agent.isConvBusy(convId) ? { type: 'busy' } : { type: 'idle' }, p);
 
         // Refresh history list
         this.postToWebview({ type: 'historyList', items: this.history.list() }, p);
@@ -2560,6 +3078,229 @@ while ($true) { Start-Sleep -Milliseconds 100 }
 <div id="img-overlay"><img id="overlay-img"></div>
 
 <script nonce="${nonce}" src="${scriptUri}"></script>
+</body>
+</html>`;
+    }
+
+    private openDiffReviewPanel(
+        title: string,
+        items: Array<{ filePath: string; patch: string; before: string; after: string }>,
+    ): void {
+        const panel = vscode.window.createWebviewPanel(
+            'mimo-agent.diffReview',
+            title,
+            vscode.ViewColumn.Beside,
+            { enableScripts: true, retainContextWhenHidden: true },
+        );
+        panel.iconPath = vscode.Uri.joinPath(this.extensionUri, 'assets', 'mimo-agent-icon.svg');
+        panel.webview.html = this.getDiffReviewHtml(panel.webview, title, items);
+        panel.webview.onDidReceiveMessage(async (msg) => {
+            if (msg?.type !== 'openReadonlyDiff') return;
+            try {
+                const reviewTitle = sanitizeString(msg.title, 240) || 'MiMo Diff';
+                const filePath = sanitizeString(msg.filePath, 4096) || 'changes.txt';
+                const before = typeof msg.before === 'string' ? msg.before : String(msg.before || '');
+                const after = typeof msg.after === 'string' ? msg.after : String(msg.after || '');
+                const language = sanitizeString(msg.language, 40) || 'plaintext';
+                const leftUri = this.readonlyPreviewProvider.createUri(`${reviewTitle} (Before)`, before, language, filePath);
+                const rightUri = this.readonlyPreviewProvider.createUri(`${reviewTitle} (After)`, after, language, filePath);
+                await vscode.commands.executeCommand('vscode.diff', leftUri, rightUri, reviewTitle, {
+                    preview: false,
+                    viewColumn: vscode.ViewColumn.Beside,
+                });
+            } catch (e: any) {
+                vscode.window.showWarningMessage(`Cannot open diff preview: ${e.message}`);
+            }
+        });
+    }
+
+    private getDiffReviewHtml(
+        webview: vscode.Webview,
+        title: string,
+        items: Array<{ filePath: string; patch: string; before: string; after: string }>,
+    ): string {
+        const nonce = getNonce();
+        const payload = JSON.stringify(items).replace(/</g, '\\u003c');
+        const countPatch = (patch: string) => this.countPatchChanges(patch);
+        return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy"
+    content="default-src 'none';
+             style-src 'unsafe-inline';
+             script-src 'nonce-${nonce}';">
+<title>${escapeHtml(title)}</title>
+<style>
+body{margin:0;background:#111315;color:#e6e6e6;font-family:Consolas,'Microsoft YaHei UI',monospace}
+.layout{display:grid;grid-template-columns:280px 1fr;height:100vh}
+.sidebar{border-right:1px solid rgba(255,255,255,.08);background:#0d0f11;overflow:auto}
+.main{display:flex;flex-direction:column;min-width:0}
+.header{padding:14px 16px;border-bottom:1px solid rgba(255,255,255,.08);display:flex;justify-content:space-between;align-items:center;background:#15181b}
+.title{font-size:14px;font-weight:700}
+.meta{font-size:12px;color:#9aa4af}
+.file-btn{display:block;width:100%;padding:12px 14px;border:0;border-bottom:1px solid rgba(255,255,255,.05);background:transparent;color:inherit;text-align:left;cursor:pointer;position:relative}
+.file-btn:hover,.file-btn.active{background:#1b2127}
+.file-btn.active::before{content:'';position:absolute;left:0;top:8px;bottom:8px;width:3px;border-radius:999px;background:#ff7a1a}
+.file-name{display:block;font-size:13px;word-break:break-all}
+.file-stats{display:block;margin-top:4px;font-size:11px;color:#9aa4af}
+.viewer{padding:0;overflow:auto}
+.toolbar{display:flex;gap:10px;align-items:center;padding:12px 16px;border-bottom:1px solid rgba(255,255,255,.08);background:#121518;position:sticky;top:0;z-index:2;flex-wrap:wrap}
+.native-btn{border:1px solid rgba(255,255,255,.18);background:#1d232a;color:#f2f4f7;border-radius:8px;padding:6px 12px;cursor:pointer}
+.native-btn:hover{background:#262d35}
+.nav-btn{border:1px solid rgba(255,255,255,.12);background:#151a1f;color:#dce3ea;border-radius:8px;padding:6px 10px;cursor:pointer}
+.nav-btn:hover{background:#20262d}
+.nav-btn:disabled{opacity:.45;cursor:default}
+.file-chip{display:inline-flex;align-items:center;gap:8px;border:1px solid rgba(255,255,255,.08);background:#161a1e;color:#dbe2e9;border-radius:999px;padding:5px 10px;font-size:11px}
+.file-progress{color:#8a949f;font-size:11px}
+.patch{padding:14px 16px;overflow:auto;font-size:12px;line-height:1.55}
+.line{display:grid;grid-template-columns:56px 56px minmax(0,1fr);align-items:start}
+.line.add{background:rgba(52,208,88,.08);color:#9ee6b0}
+.line.del{background:rgba(255,69,58,.08);color:#ffb0aa}
+.line.ctx{color:#b8c0c8}
+.line.meta{color:#6cb6ff}
+.line.hunk{color:#d2a8ff;background:rgba(210,168,255,.07)}
+.ln{padding:0 10px 0 0;text-align:right;color:#6f7a85;user-select:none}
+.ln.blank{color:transparent}
+.code{white-space:pre;overflow-x:auto}
+.code.full{grid-column:1 / -1}
+.legend{display:flex;gap:8px;align-items:center;margin-left:auto;flex-wrap:wrap}
+.legend span{font-size:11px;color:#8f98a3}
+.legend em{font-style:normal;padding:2px 6px;border-radius:999px}
+.legend .add{background:rgba(52,208,88,.12);color:#9ee6b0}
+.legend .del{background:rgba(255,69,58,.12);color:#ffb0aa}
+@media (max-width: 900px){
+  .layout{grid-template-columns:1fr}
+  .sidebar{max-height:32vh;border-right:0;border-bottom:1px solid rgba(255,255,255,.08)}
+  .legend{margin-left:0}
+}
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    ${items.map((item, index) => {
+            const { added, removed } = countPatch(item.patch);
+            return `<button class="file-btn${index === 0 ? ' active' : ''}" data-index="${index}">
+              <span class="file-name">${escapeHtml(item.filePath)}</span>
+              <span class="file-stats">+${added} / -${removed}</span>
+            </button>`;
+        }).join('')}
+  </aside>
+  <main class="main">
+    <div class="header">
+      <div class="title">${escapeHtml(title)}</div>
+      <div class="meta">${items.length} files</div>
+    </div>
+    <div class="toolbar">
+      <button id="prev-file" class="nav-btn">上一个</button>
+      <button id="next-file" class="nav-btn">下一个</button>
+      <span id="current-file" class="file-chip"></span>
+      <span id="file-progress" class="file-progress"></span>
+      <button id="open-native" class="native-btn">打开原生 Diff</button>
+      <div class="legend"><span><em class="add">+</em> Added</span><span><em class="del">-</em> Removed</span></div>
+    </div>
+    <div class="viewer">
+      <div id="patch" class="patch"></div>
+    </div>
+  </main>
+</div>
+<script nonce="${nonce}">
+const vscode = acquireVsCodeApi();
+const items = ${payload};
+const patchEl = document.getElementById('patch');
+const fileEl = document.getElementById('current-file');
+const progressEl = document.getElementById('file-progress');
+const nativeBtn = document.getElementById('open-native');
+const prevBtn = document.getElementById('prev-file');
+const nextBtn = document.getElementById('next-file');
+let activeIndex = 0;
+function detectLanguage(filePath){
+  const ext = (String(filePath||'').match(/\\.([A-Za-z0-9_-]+)$/)?.[1] || '').toLowerCase();
+  if(ext === 'svg') return 'xml';
+  if(ext === 'md') return 'markdown';
+  if(['ts','tsx','js','jsx','json','css','html','svg','py'].includes(ext)) return ext;
+  return 'plaintext';
+}
+function renderPatch(patch){
+  let oldLine = 0;
+  let newLine = 0;
+  patchEl.innerHTML = String(patch||'').split(/\\r?\\n/).map(line => {
+    let cls = 'ctx';
+    let left = '';
+    let right = '';
+    let full = false;
+    if(line.startsWith('diff --git') || line.startsWith('--- ') || line.startsWith('+++ ') || line.startsWith('index ')){
+      cls = 'meta';
+      full = true;
+    } else if(line.startsWith('@@')) {
+      cls = 'hunk';
+      full = true;
+      const match = line.match(/^@@\\s+-(\\d+)(?:,(\\d+))?\\s+\\+(\\d+)(?:,(\\d+))?\\s+@@/);
+      if(match){
+        oldLine = Math.max(0, Number(match[1] || '0') - 1);
+        newLine = Math.max(0, Number(match[3] || '0') - 1);
+      }
+    } else if(line.startsWith('+') && !line.startsWith('+++')) {
+      cls = 'add';
+      newLine += 1;
+      right = String(newLine);
+    } else if(line.startsWith('-') && !line.startsWith('---')) {
+      cls = 'del';
+      oldLine += 1;
+      left = String(oldLine);
+    } else {
+      oldLine += 1;
+      newLine += 1;
+      left = String(oldLine);
+      right = String(newLine);
+    }
+    const safe = line.replace(/[&<>\"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[ch]));
+    if(full){
+      return '<span class="line '+cls+'"><span class="code full">'+safe+'</span></span>';
+    }
+    return '<span class="line '+cls+'"><span class="ln'+(left ? '' : ' blank')+'">'+left+'</span><span class="ln'+(right ? '' : ' blank')+'">'+right+'</span><span class="code">'+safe+'</span></span>';
+  }).join('');
+}
+function setActive(index){
+  if(index < 0 || index >= items.length) return;
+  activeIndex = index;
+  document.querySelectorAll('.file-btn').forEach((btn, idx) => btn.classList.toggle('active', idx === index));
+  const item = items[index];
+  const patchLines = String(item.patch || '').split(/\\r?\\n/);
+  const added = patchLines.filter(line => line.startsWith('+') && !line.startsWith('+++')).length;
+  const removed = patchLines.filter(line => line.startsWith('-') && !line.startsWith('---')).length;
+  fileEl.textContent = item.filePath + '  +' + added + ' / -' + removed;
+  progressEl.textContent = '文件 ' + (index + 1) + ' / ' + items.length;
+  prevBtn.disabled = index <= 0;
+  nextBtn.disabled = index >= items.length - 1;
+  renderPatch(item.patch);
+  document.querySelector('.file-btn.active')?.scrollIntoView({ block: 'nearest' });
+}
+document.querySelectorAll('.file-btn').forEach(btn => {
+  btn.addEventListener('click', () => setActive(Number(btn.dataset.index || '0')));
+});
+prevBtn.addEventListener('click', () => setActive(activeIndex - 1));
+nextBtn.addEventListener('click', () => setActive(activeIndex + 1));
+nativeBtn.addEventListener('click', () => {
+  const item = items[activeIndex];
+  vscode.postMessage({
+    type: 'openReadonlyDiff',
+    title: 'MiMo Diff - ' + item.filePath,
+    filePath: item.filePath,
+    before: item.before,
+    after: item.after,
+    language: detectLanguage(item.filePath),
+  });
+});
+window.addEventListener('keydown', (e) => {
+  if(e.key === 'ArrowUp' || e.key === 'ArrowLeft'){ e.preventDefault(); setActive(activeIndex - 1); }
+  if(e.key === 'ArrowDown' || e.key === 'ArrowRight'){ e.preventDefault(); setActive(activeIndex + 1); }
+  if(e.key.toLowerCase() === 'o'){ e.preventDefault(); nativeBtn.click(); }
+});
+setActive(0);
+</script>
 </body>
 </html>`;
     }

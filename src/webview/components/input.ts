@@ -1,14 +1,14 @@
 /**
  * Input component - textarea, send button, mode selector, model select.
  */
-import { store } from '../core/store';
+import { store, ImageData, InputHistoryItem } from '../core/store';
 import { bus } from '../core/bus';
 import { vscode } from '../core/vscode';
 import { t } from '../core/i18n';
 
 function sendButtonIcon(kind: 'send' | 'stop'): string {
     if (kind === 'stop') {
-        return '<svg class="send-icon send-icon-stop" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>';
+        return '<svg class="send-icon send-icon-stop" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="5" y="5" width="14" height="14" rx="3"/></svg>';
     }
     return '<svg class="send-icon send-icon-plane" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4.5 12 19.5 5.5 13 20 10.6 13.4 4.5 12Z"/><path d="M10.6 13.4 19.5 5.5"/></svg>';
 }
@@ -51,6 +51,7 @@ export const InputArea = {
         });
 
         let draftText = '';
+        let draftImages: ImageData[] = [];
 
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
@@ -72,19 +73,16 @@ export const InputArea = {
                     if (!atFirstLine || !atLineStart) return;
                     e.preventDefault();
                     draftText = input.value;
+                    draftImages = store.get('images').slice();
                     idx = 0;
                     store.set('historyIdx', idx);
-                    input.value = history[idx];
-                    this.autoResize(input);
-                    input.setSelectionRange(input.value.length, input.value.length);
+                    this.applyHistoryEntry(input, history[idx]);
                 } else if (idx >= 0 && idx < history.length - 1) {
                     if (!atFirstLine || !atLineStart) return;
                     e.preventDefault();
                     idx++;
                     store.set('historyIdx', idx);
-                    input.value = history[idx];
-                    this.autoResize(input);
-                    input.setSelectionRange(input.value.length, input.value.length);
+                    this.applyHistoryEntry(input, history[idx]);
                 }
                 return;
             }
@@ -103,10 +101,13 @@ export const InputArea = {
                     idx--;
                     store.set('historyIdx', idx);
                     if (idx >= 0) {
-                        input.value = history[idx];
+                        this.applyHistoryEntry(input, history[idx]);
                     } else {
                         input.value = draftText;
                         draftText = '';
+                        store.set('images', draftImages.slice());
+                        draftImages = [];
+                        bus.emit('imagesChanged');
                     }
                     this.autoResize(input);
                     input.setSelectionRange(input.value.length, input.value.length);
@@ -475,8 +476,8 @@ export const InputArea = {
         const images = store.get('images');
         if (!text && images.length === 0) return;
 
-        this.saveToHistory(text);
         const imgs = images.slice();
+        this.saveToHistory(text, imgs);
         input.value = '';
         input.style.height = 'auto';
         store.set('historyIdx', -1);
@@ -507,11 +508,35 @@ export const InputArea = {
         vscode.send(text, imgs.length > 0 ? imgs : null);
     },
 
-    saveToHistory(text: string): void {
-        if (!text) return;
+    applyHistoryEntry(input: HTMLTextAreaElement, entry: InputHistoryItem): void {
+        input.value = entry.text || '';
+        store.set('images', (entry.images || []).slice());
+        bus.emit('imagesChanged');
+        this.autoResize(input);
+        input.setSelectionRange(input.value.length, input.value.length);
+    },
+
+    sameHistoryImages(a: ImageData[] | null | undefined, b: ImageData[] | null | undefined): boolean {
+        const left = a || [];
+        const right = b || [];
+        if (left.length !== right.length) return false;
+        return left.every((img, index) =>
+            img?.dataUrl === right[index]?.dataUrl &&
+            img?.name === right[index]?.name &&
+            img?.size === right[index]?.size
+        );
+    },
+
+    saveToHistory(text: string, images: ImageData[] = []): void {
+        if (!text && images.length === 0) return;
         const history = store.get('inputHistory');
-        if (text === history[0]) return;
-        history.unshift(text);
+        const nextEntry: InputHistoryItem = {
+            text,
+            images: images.length > 0 ? images.slice() : null,
+        };
+        const first = history[0];
+        if (first && first.text === nextEntry.text && this.sameHistoryImages(first.images, nextEntry.images)) return;
+        history.unshift(nextEntry);
         if (history.length > 50) history.pop();
         store.set('inputHistory', history);
         store.set('historyIdx', -1);
@@ -596,14 +621,14 @@ export const InputArea = {
         const hasText = input && input.value.trim().length > 0;
         const hasQueued = store.get('queuedMsgs').length > 0;
 
-        if (busy && !hasText) {
-            sendBtn.innerHTML = sendButtonIcon('stop');
-            sendBtn.className = 'stop-btn';
-            sendBtn.title = t('stop');
-        } else if (busy && !hasText && hasQueued) {
+        if (busy && !hasText && hasQueued) {
             sendBtn.innerHTML = sendButtonIcon('send');
             sendBtn.className = 'run-queued-btn';
             sendBtn.title = t('queue.run.next.title');
+        } else if (busy && !hasText) {
+            sendBtn.innerHTML = sendButtonIcon('stop');
+            sendBtn.className = 'stop-btn';
+            sendBtn.title = t('stop');
         } else {
             sendBtn.innerHTML = sendButtonIcon('send');
             sendBtn.className = '';

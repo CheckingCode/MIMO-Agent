@@ -6,6 +6,9 @@ tsconfig.json
 **/*.map
 out/test/**
 *.vsix
+*.log
+*.tmp
+*.bak
 *_ANALYSIS*.md
 *_REPORT*.md
 MIMO_VS_*.md
@@ -18,6 +21,12 @@ MODES_ANALYSIS.md
 build-webview.mjs
 releases/
 docs/reports/**
+docs/images/**
+docs/USER_FEEDBACK_PLAN.md
+docs/MIMO_PLATFORM_GUIDE.md
+docs/fix-first-response-interruption.md
+mimo-banner.txt
+全部-*.md
 assets/readme-*.svg
 html_output/**
 pptx_extracted/**

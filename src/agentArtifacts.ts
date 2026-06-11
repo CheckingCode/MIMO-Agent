@@ -127,8 +127,7 @@ export class AgentArtifactManager {
         if (!raw) return [];
         const ext = ARTIFACT_EXTENSIONS.join('|');
         const evidencePatterns = [
-            new RegExp(String.raw`(?:artifacts?|generated file|updated file|saved(?: to)?|written to|exported(?: to)?|output(?: file)?|outputs?)\s*[:?-]?\s*['"]?([^'"\r\n]+\.(?:${ext}))`, 'giu'),
-            new RegExp(String.raw`(?:from)\s+['"]([^'"\r\n]+\.(?:${ext}))['"](?::)?`, 'giu'),
+            new RegExp(String.raw`(?:artifacts?|generated file|updated file|saved(?: to)?|written to|exported(?: to)?|(?:^|[\s(])output file|(?:^|[\s(])outputs?)\s*[:?-]?\s*['"]?([^'"\r\n]+\.(?:${ext}))`, 'giu'),
             new RegExp(String.raw`(?:^|\n)\s*[-*]\s+([^\r\n]+\.(?:${ext}))\s*$`, 'gimu'),
         ];
 

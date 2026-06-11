@@ -37,8 +37,10 @@ export function createDiffCard(args: any): HTMLElement | null {
 
     const body = card.querySelector('.diff-card-body') as HTMLElement;
     const maxShow = Math.min(diff.length, 15);
-    let oldLineNum = 0;
-    let newLineNum = 0;
+    const startLine = Number(args.line_start);
+    const initialLine = Number.isFinite(startLine) && startLine > 0 ? Math.floor(startLine) - 1 : 0;
+    let oldLineNum = initialLine;
+    let newLineNum = initialLine;
     for (let i = 0; i < maxShow; i++) {
         const d = diff[i];
         const div = createElement('div', `diff-card-line ${d.type === 'add' ? 'add' : d.type === 'del' ? 'del' : 'ctx'}`);
@@ -185,7 +187,8 @@ export function renderGitDiff(res: HTMLElement, txt: string): void {
             if (hunkLine) {
                 const m = (hunkLine.text || '').match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/);
                 if (m) {
-                    html += `<div class="diff-hunk"><span class="diff-hunk-marker">@@</span><span class="diff-hunk-loc">${escapeHtml(m[0].replace(/@@.*@@/, '').trim())}</span>${hunkLine.label ? `<span class="diff-hunk-fn">${escapeHtml(hunkLine.label)}</span>` : ''}</div>`;
+                    const loc = hunkLine.text.replace(/^@@\s*/, '').replace(/\s*@@.*$/, '').trim();
+                    html += `<div class="diff-hunk"><span class="diff-hunk-marker">@@</span><span class="diff-hunk-loc">${escapeHtml(loc)}</span>${hunkLine.label ? `<span class="diff-hunk-fn">${escapeHtml(hunkLine.label)}</span>` : ''}</div>`;
                 } else {
                     html += `<div class="diff-hunk"><span class="diff-hunk-marker">@@</span>${escapeHtml(hunkLine.text)}</div>`;
                 }

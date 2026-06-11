@@ -7,10 +7,12 @@ import { ChatViewProvider } from './webview/chatProvider';
 import { SettingsProvider } from './webview/settingsProvider';
 import { loadConfig, saveSetting } from './config';
 import { createWindowSessionId } from './workspaceData';
+import { ReadonlyPreviewProvider } from './readonlyPreview';
 
 let agent: MiMoAgent;
 let chatProvider: ChatViewProvider;
 let settingsProvider: SettingsProvider;
+let readonlyPreviewProvider: ReadonlyPreviewProvider;
 
 function ensureDefaultUserRules(extensionPath: string, mimoHome: string): void {
     const target = path.join(mimoHome, 'MIMO.md');
@@ -47,8 +49,18 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Create agent synchronously (it's needed for commands)
     agent = new MiMoAgent(config, context.extensionPath, context, windowSessionId);
-    chatProvider = new ChatViewProvider(context.extensionUri, agent, windowSessionId);
+    readonlyPreviewProvider = new ReadonlyPreviewProvider();
+    chatProvider = new ChatViewProvider(context.extensionUri, agent, readonlyPreviewProvider, windowSessionId);
     settingsProvider = new SettingsProvider(context.extensionUri, agent, () => chatProvider.handleSettingsApplied());
+
+    context.subscriptions.push(
+        vscode.workspace.registerTextDocumentContentProvider(ReadonlyPreviewProvider.scheme, readonlyPreviewProvider),
+        vscode.workspace.onDidCloseTextDocument((doc) => {
+            if (doc.uri.scheme === ReadonlyPreviewProvider.scheme) {
+                readonlyPreviewProvider.delete(doc.uri);
+            }
+        }),
+    );
 
     context.subscriptions.push(
         vscode.window.registerWebviewPanelSerializer('mimo-agent.chat', {

@@ -340,6 +340,7 @@ function sanitizeSettings(input: unknown): Record<string, unknown> {
                     id,
                     name,
                     provider,
+                    show_in_picker: raw.show_in_picker !== false,
                     base_url: baseUrl.replace(/\/+$/, ''),
                     api_endpoint: apiEndpoint === 'responses' ? 'responses' : 'chat_completions',
                     model: profileModel,
@@ -600,21 +601,38 @@ button:hover{filter:brightness(1.08)}
 .endpoint-note code{font-family:var(--vscode-editor-font-family);font-size:11px;color:var(--vscode-foreground)}
 .models-toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}
 .models-toolbar .hint{margin:0;max-width:650px}
+.model-summary-bar{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;margin:0 0 14px;padding:10px 12px;border:1px solid var(--vscode-editorWidget-border);border-radius:8px;background:color-mix(in srgb,var(--vscode-input-background) 78%,transparent)}
+.model-summary-main{display:grid;gap:4px;min-width:0}
+.model-summary-title{font-size:13px;font-weight:650;color:var(--vscode-foreground)}
+.model-summary-sub{font-size:12px;color:var(--vscode-descriptionForeground);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.model-summary-side{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.summary-pill{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--vscode-editorWidget-border);border-radius:999px;padding:4px 10px;font-size:12px;color:var(--vscode-descriptionForeground);background:color-mix(in srgb,var(--vscode-input-background) 86%,transparent)}
 .model-add-controls{display:grid;grid-template-columns:170px auto auto;gap:8px;align-items:center}
 .profile-cards{display:grid;gap:10px}
 .profile-card{border:1px solid var(--vscode-editorWidget-border);border-radius:6px;background:var(--vscode-input-background);padding:0;overflow:hidden}
 .profile-card.active{border-color:var(--vscode-focusBorder);box-shadow:0 0 0 1px color-mix(in srgb,var(--vscode-focusBorder) 45%,transparent)}
-.profile-card-head{display:grid;grid-template-columns:24px minmax(180px,1.05fr) minmax(76px,max-content) minmax(150px,.9fr) minmax(220px,1.3fr) minmax(132px,max-content);align-items:center;gap:12px;padding:8px 12px;min-height:44px;user-select:none}
+.profile-card-head{display:grid;grid-template-columns:24px minmax(0,1fr) max-content;align-items:start;gap:12px;padding:10px 12px;min-height:56px;user-select:none}
 .profile-drag-handle{display:inline-flex;align-items:center;justify-content:center;width:22px;height:28px;border:1px solid transparent;border-radius:5px;color:var(--vscode-descriptionForeground);cursor:grab;font-size:16px;line-height:1}
 .profile-drag-handle:hover{border-color:var(--vscode-editorWidget-border);background:color-mix(in srgb,var(--vscode-input-background) 70%,var(--vscode-foreground) 8%);color:var(--vscode-foreground)}
 .profile-drag-handle:active{cursor:grabbing}
 .profile-card.dragging{opacity:.35;border-style:dashed}
 .profile-card.drag-over-top{border-top:2px solid var(--vscode-focusBorder)}
 .profile-card.drag-over-bottom{border-bottom:2px solid var(--vscode-focusBorder)}
-.profile-card-title{display:flex;align-items:center;gap:8px;font-weight:650;min-width:0}
+.profile-card-main{display:grid;gap:8px;min-width:0}
+.profile-card-top{display:flex;align-items:center;gap:10px;min-width:0;flex-wrap:wrap}
+.profile-card-title{display:flex;align-items:center;gap:8px;font-weight:650;min-width:0;max-width:100%}
 .profile-card-title span,.profile-card-summary{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.profile-card-badges{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
 .profile-card-summary{color:var(--vscode-descriptionForeground);font-size:12px}
-.provider-pill{display:inline-flex;align-items:center;width:max-content;max-width:100%;border:1px solid var(--vscode-editorWidget-border);border-radius:999px;padding:2px 8px;color:var(--vscode-descriptionForeground);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.profile-card-summary.code{font-family:var(--vscode-editor-font-family);color:var(--vscode-foreground)}
+.profile-card-summary.url{font-family:var(--vscode-editor-font-family);opacity:.9}
+.profile-card-meta{display:grid;grid-template-columns:minmax(180px,max-content) minmax(0,1fr);gap:8px 12px;align-items:center;min-width:0}
+.provider-pill,.profile-badge{display:inline-flex;align-items:center;width:max-content;max-width:100%;border:1px solid var(--vscode-editorWidget-border);border-radius:999px;padding:2px 8px;color:var(--vscode-descriptionForeground);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.profile-visibility-toggle{width:14px;height:14px;border-radius:999px;border:2px solid var(--vscode-descriptionForeground);background:transparent;display:inline-block;box-sizing:border-box;cursor:pointer;flex:0 0 auto}
+.profile-visibility-toggle.on{border-color:var(--vscode-focusBorder);background:var(--vscode-focusBorder);box-shadow:0 0 0 2px color-mix(in srgb,var(--vscode-focusBorder) 20%,transparent)}
+.profile-badge.hidden{opacity:.72}
+.profile-badge.kind{background:color-mix(in srgb,var(--vscode-input-background) 60%,var(--vscode-descriptionForeground) 8%)}
+.profile-badge.endpoint{font-family:var(--vscode-editor-font-family)}
 .profile-card-actions{display:flex;gap:8px;white-space:nowrap;justify-content:flex-end;min-width:0}
 .profile-card-actions button{background:transparent;color:var(--vscode-textLink-foreground);padding:3px 5px}
 .profile-card-grid{display:none;grid-template-columns:1fr 1fr;gap:10px 12px;border-top:1px solid var(--vscode-editorWidget-border);padding:12px}
@@ -645,10 +663,12 @@ textarea{min-height:96px;resize:vertical}
 @media (max-width:980px){
   .models-toolbar{flex-direction:column;align-items:stretch}
   .models-toolbar .hint{max-width:none}
+  .model-summary-bar{grid-template-columns:1fr}
+  .model-summary-side{justify-content:flex-start}
   .model-add-controls{grid-template-columns:minmax(160px,1fr) auto auto}
-  .profile-card-head{grid-template-columns:24px minmax(0,1.1fr) max-content minmax(0,1fr);grid-auto-flow:row}
-  .profile-card-actions{grid-column:1 / -1;justify-content:flex-end;flex-wrap:wrap}
-  .profile-card-summary:last-of-type{grid-column:1 / -1}
+  .profile-card-head{grid-template-columns:24px minmax(0,1fr);grid-auto-flow:row}
+  .profile-card-actions{grid-column:2;justify-content:flex-start;flex-wrap:wrap}
+  .profile-card-meta{grid-template-columns:1fr}
 }
 @media (max-width:760px){
   .grid,.row,.param-grid,.preset-row,.profile-bar,.model-row,.profile-card-head,.profile-card-grid,.model-add-controls,.endpoint-note,.preference-strip{grid-template-columns:1fr}
@@ -658,6 +678,7 @@ textarea{min-height:96px;resize:vertical}
   .profile-card-actions{justify-content:flex-start}
   .profile-drag-handle{align-self:start}
   .preference-strip .check{white-space:normal}
+  .profile-card-top{align-items:flex-start}
 }
 </style>
 </head>
@@ -697,6 +718,13 @@ textarea{min-height:96px;resize:vertical}
           <button class="secondary" id="profile_add" type="button">${t('model.add.card')}</button>
           <button class="secondary" id="toggle_raw_profiles" type="button">${t('profile.json')}</button>
         </div>
+      </div>
+      <div class="model-summary-bar">
+        <div class="model-summary-main">
+          <div class="model-summary-title" id="model_summary_primary"></div>
+          <div class="model-summary-sub" id="model_summary_secondary"></div>
+        </div>
+        <div class="model-summary-side" id="model_summary_stats"></div>
       </div>
       <div class="profile-cards" id="profile_cards"></div>
       <div class="field raw-profiles" id="raw_profiles_wrap"><label for="provider_profiles">${t('provider.profiles')}</label><textarea id="provider_profiles" spellcheck="false" placeholder='[{"id":"deepseek-chat","name":"Deepseek Chat","base_url":"https://api.deepseek.com/v1","model":"deepseek-chat","api_key":"","models":["deepseek-chat"]}]'></textarea></div>
@@ -813,6 +841,7 @@ textarea{min-height:96px;resize:vertical}
 <script nonce="${nonce}">
 const vscode = acquireVsCodeApi();
 const $ = id => document.getElementById(id);
+const uiLang = ${JSON.stringify(settingsLang)};
 const translations = ${pageTranslationsJson};
 const initialSettings = ${initialSettingsJson};
 const providerDefaults = {
@@ -871,6 +900,7 @@ function normalizeProfile(profile){
     id,
     name: String(profile?.name || id).trim() || id,
     provider: normalizeProvider(profile),
+    show_in_picker: profile?.show_in_picker !== false,
     base_url: trimTrailingSlashes(profile?.base_url),
     api_endpoint: String(profile?.api_endpoint || 'chat_completions') === 'responses' ? 'responses' : 'chat_completions',
     model,
@@ -880,6 +910,57 @@ function normalizeProfile(profile){
 }
 function profileCardTitle(profile){
   return profile.name || profile.model || profile.id || 'Model';
+}
+function uiText(zh, en){
+  return uiLang === 'zh' ? zh : en;
+}
+function summarizeProvider(provider){
+  const label = providerLabel(provider);
+  return label || uiText('自定义', 'Custom');
+}
+function getEndpointBadge(profile){
+  return String(profile?.api_endpoint || 'chat_completions') === 'responses' ? 'RESPONSES' : 'CHAT';
+}
+function getModelKind(profile){
+  const raw = String(profile?.model || '').toLowerCase();
+  if (/asr|transcrib|speech[-_]?to[-_]?text/.test(raw)) return uiText('转写', 'ASR');
+  if (/tts|voice|speech/.test(raw)) return uiText('语音', 'TTS');
+  if (/vision|vl|image/.test(raw)) return uiText('视觉', 'Vision');
+  if (/reason|r1|thinking/.test(raw)) return uiText('推理', 'Reasoning');
+  if (/code|coder|codestral/.test(raw)) return uiText('代码', 'Code');
+  return uiText('对话', 'Chat');
+}
+function sortProfilesForDisplay(list){
+  return [...list];
+}
+function updateModelSummary(){
+  const active = getActiveProfile();
+  const visibleCount = profiles.filter(p => p.show_in_picker !== false).length;
+  const providerCount = new Set(profiles.map(p => p.provider || 'custom')).size;
+  const primary = active
+    ? uiText('输入框可见模型：', 'Visible in picker: ') + String(visibleCount)
+    : uiText('当前还没有可用模型', 'No model configured yet');
+  const secondary = active
+    ? uiText('拖动可排序；点左侧圆点可控制是否出现在输入框模型列表。', 'Drag to reorder; use the dot on the left to control whether the model appears in the input picker.')
+    : uiText('添加一个模型卡片后，这里会显示模型管理摘要。', 'Add a model card and the management summary will appear here.');
+  const stats = [
+    '<span class="summary-pill">' + escapeHtml(uiText('模型', 'Models')) + ' ' + escapeHtml(String(profiles.length)) + '</span>',
+    '<span class="summary-pill">' + escapeHtml(uiText('可见', 'Visible')) + ' ' + escapeHtml(String(visibleCount)) + '</span>',
+    '<span class="summary-pill">' + escapeHtml(uiText('服务商', 'Providers')) + ' ' + escapeHtml(String(providerCount)) + '</span>',
+  ];
+  $('model_summary_primary').textContent = primary;
+  $('model_summary_secondary').textContent = secondary;
+  $('model_summary_stats').innerHTML = stats.join('');
+}
+function renderProfileBadges(profile){
+  const badges = [];
+  if (profile.show_in_picker === false) {
+    badges.push('<span class="profile-badge hidden">' + escapeHtml(uiText('已隐藏', 'Hidden')) + '</span>');
+  }
+  badges.push('<span class="provider-pill">' + escapeHtml(providerLabel(profile.provider || detectProvider(profile))) + '</span>');
+  badges.push('<span class="profile-badge kind">' + escapeHtml(getModelKind(profile)) + '</span>');
+  badges.push('<span class="profile-badge endpoint">' + escapeHtml(getEndpointBadge(profile)) + '</span>');
+  return badges.join('');
 }
 function makeProfileId(name){
   const base = String(name || 'profile').toLowerCase().replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,'') || 'profile';
@@ -966,6 +1047,7 @@ function syncProfilesFromCards(){
     const apiKey = card.querySelector('[data-field="api_key"]')?.value;
     p.name = name || model || p.id;
     p.provider = provider;
+    p.show_in_picker = p.show_in_picker !== false;
     p.model = model || p.model || p.id;
     p.base_url = trimTrailingSlashes(baseUrl);
     p.api_endpoint = apiEndpoint === 'responses' ? 'responses' : 'chat_completions';
@@ -1008,18 +1090,26 @@ function renderProfiles(){
   if (!profiles.some(p => p.id === activeProfileId)) activeProfileId = profiles[0]?.id || '';
   $('active_provider_profile').value = activeProfileId || '';
   $('provider_profiles').value = JSON.stringify(profiles, null, 2);
+  updateModelSummary();
   const cards = $('profile_cards');
-  cards.innerHTML = profiles.map(p => {
+  cards.innerHTML = sortProfilesForDisplay(profiles).map(p => {
     const active = p.id === activeProfileId ? ' active open' : '';
     const checked = p.id === activeProfileId ? ' checked' : '';
     return '<div class="profile-card'+active+'" data-profile-id="'+escapeAttr(p.id)+'">'
       + '<div class="profile-card-head">'
       + '<div class="profile-drag-handle" draggable="true" title="Drag to reorder" aria-label="Drag to reorder">⋮⋮</div>'
-      + '<label class="profile-card-title"><input class="default-radio" type="radio" name="default_profile" data-action="default"'+checked+'>'
-      + '<span>'+escapeHtml(profileCardTitle(p))+'</span></label>'
-      + '<div class="provider-pill">'+escapeHtml(providerLabel(p.provider || detectProvider(p)))+'</div>'
-      + '<div class="profile-card-summary">'+escapeHtml(p.model || '')+'</div>'
-      + '<div class="profile-card-summary">'+escapeHtml(p.base_url || '')+'</div>'
+      + '<div class="profile-visibility-toggle'+(p.show_in_picker === false ? '' : ' on')+'" data-action="toggle-visibility" role="button" aria-label="'+escapeAttr(uiText('切换是否显示在输入框模型列表', 'Toggle input picker visibility'))+'" title="'+escapeAttr(uiText('切换是否显示在输入框模型列表', 'Toggle input picker visibility'))+'"></div>'
+      + '<div class="profile-card-main">'
+      + '<div class="profile-card-top">'
+      + '<div class="profile-card-title">'
+      + '<span title="'+escapeAttr(profileCardTitle(p))+'">'+escapeHtml(profileCardTitle(p))+'</span></div>'
+      + '<div class="profile-card-badges">'+renderProfileBadges(p)+'</div>'
+      + '</div>'
+      + '<div class="profile-card-meta">'
+      + '<div class="profile-card-summary code" title="'+escapeAttr(p.model || '')+'">'+escapeHtml(p.model || '')+'</div>'
+      + '<div class="profile-card-summary url" title="'+escapeAttr(p.base_url || '')+'">'+escapeHtml(p.base_url || '')+'</div>'
+      + '</div>'
+      + '</div>'
       + '<div class="profile-card-actions">'
       + '<button class="secondary" type="button" data-action="toggle-details">'+escapeHtml(p.id === activeProfileId ? (translations['model.card.collapse'] || 'Collapse') : (translations['model.card.details'] || 'Details'))+'</button>'
       + '<button class="secondary" type="button" data-action="copy">'+escapeHtml(translations['model.card.copy'] || 'Copy')+'</button>'
@@ -1246,10 +1336,11 @@ $('profile_cards').addEventListener('click', e => {
   const id = card?.getAttribute?.('data-profile-id');
   const p = profiles.find(item => item.id === id);
   if (!p) return;
-  if (action === 'default') {
-    activeProfileId = p.id;
-    renderModels();
+  if (action === 'toggle-visibility') {
+    syncProfilesFromCards();
+    p.show_in_picker = p.show_in_picker === false;
     renderProfiles();
+    renderModels();
     return;
   }
   if (action === 'copy') {

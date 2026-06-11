@@ -6,7 +6,7 @@ import { vscode } from '../../core/vscode';
 import { t } from '../../core/i18n';
 import { escapeHtml, createElement } from '../../utils/dom';
 
-const TOOL_CARD_INPUT_CHARS = 900;
+const TOOL_CARD_INPUT_CHARS = 260;
 
 function compactToolInput(text: string, maxChars = TOOL_CARD_INPUT_CHARS): string {
     if (!text || text.length <= maxChars) return text || '';
@@ -189,7 +189,7 @@ export function getFileLink(_name: string, args: any): string {
 }
 
 export function createExecuteCommandCard(name: string, args: any): HTMLElement {
-    const card = createElement('div', 'tool-card');
+    const card = createElement('div', 'tool-card tool-card-compact tool-card-command collapsed');
     card.setAttribute('data-status', 'running');
     card.setAttribute('data-tool', name);
     (card as any)._toolName = name;
@@ -198,14 +198,16 @@ export function createExecuteCommandCard(name: string, args: any): HTMLElement {
     const command = args.command || '';
     const commandSummary = summarizeCommand(command);
     const commandPreview = compactToolInput(command);
+    const lineCount = String(command || '').split(/\r?\n/).length;
     card.innerHTML =
-        `<div class="tool-card-header">` +
+        `<div class="tool-card-header collapsible-card-header">` +
             `<span class="tool-card-dot"></span>` +
             `<span class="tool-card-title">Bash</span>` +
             `<span class="tool-card-desc">${escapeHtml(commandSummary)}</span>` +
+            `<span class="tool-card-meta">${escapeHtml(lineCount > 1 ? `${lineCount} lines` : '1 line')}</span>` +
             `<span class="tool-card-time"></span>` +
         `</div>` +
-        `<div class="tool-card-body">` +
+        `<div class="tool-card-body tool-body">` +
             `<div class="tool-card-section">` +
                 `<span class="tool-card-section-label">IN</span>` +
                 `<span class="tool-card-section-content">${escapeHtml(commandPreview)}</span>` +

@@ -1,4 +1,5 @@
 import { t } from '../../core/i18n';
+import { escapeHtml } from '../../utils/dom';
 
 /**
  * Thinking/reasoning block rendering helpers.
@@ -72,6 +73,42 @@ export function sanitizeReasoningForDisplay(text: string, trimmed = false): stri
     return trimmed ? `${t('thinking.trimmed.prefix')}${clipped}` : clipped;
 }
 
+function renderThinkingMarkdown(text: string): string {
+    if (!text) return '';
+    let html = escapeHtml(text);
+
+    const codeBlocks: string[] = [];
+    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_m, lang, code) => {
+        const idx = codeBlocks.length;
+        codeBlocks.push(
+            `<div class="code-block">` +
+            `<div class="code-header"><span class="code-lang">${escapeHtml(lang || 'text')}</span></div>` +
+            `<pre><code>${code}</code></pre>` +
+            `</div>`
+        );
+        return `\n__THINK_CODE_${idx}__\n`;
+    });
+
+    html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+    html = html.replace(/^#### (.+)$/gm, '<h4>$1</h4>');
+    html = html.replace(/^### (.+)$/gm, '<h4>$1</h4>');
+    html = html.replace(/^## (.+)$/gm, '<h3>$1</h3>');
+    html = html.replace(/^# (.+)$/gm, '<h2>$1</h2>');
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/^\s*[-*] (.+)$/gm, '<li>$1</li>');
+    html = html.replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul>$1</ul>');
+    html = html.replace(/^\s*\d+\. (.+)$/gm, '<li>$1</li>');
+    html = html.replace(/((?:<li>.*<\/li>\n?)+)/g, (match) => match.includes('<ul>') ? match : `<ol>${match}</ol>`);
+    html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+    html = html.replace(/\n{3,}/g, '\n\n');
+    html = html.replace(/\n/g, '<br>');
+
+    codeBlocks.forEach((block, i) => {
+        html = html.replace(`__THINK_CODE_${i}__`, block);
+    });
+    return html;
+}
+
 export function renderThinkingBlock(thinkBlock: HTMLElement, forceFull = false, replayHint = false): void {
     const datasetText = thinkBlock.dataset.reasoningText || '';
     const rawText = (thinkBlock as any)._reasoningText || datasetText;
@@ -126,7 +163,11 @@ export function renderThinkingBlock(thinkBlock: HTMLElement, forceFull = false, 
     }
 
     if ((thinkBlock as any)._lastRenderedText !== displayText) {
-        thinkBlock.textContent = displayText;
+        if (expanded) {
+            thinkBlock.innerHTML = renderThinkingMarkdown(displayText);
+        } else {
+            thinkBlock.textContent = displayText;
+        }
         (thinkBlock as any)._lastRenderedText = displayText;
         if (toggle) toggle.style.display = '';
     }

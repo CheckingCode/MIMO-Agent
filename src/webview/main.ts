@@ -390,7 +390,12 @@ function init(): void {
                 break;
 
             case 'restoreInputHistory':
-                store.set('inputHistory', Array.isArray(msg.items) ? msg.items.slice(0, 50) : []);
+                store.set('inputHistory', Array.isArray(msg.items)
+                    ? msg.items.slice(0, 50).map((item: any) => ({
+                        text: typeof item === 'string' ? item : String(item?.text || ''),
+                        images: Array.isArray(item?.images) ? item.images.slice(0, 12) : null,
+                    }))
+                    : []);
                 store.set('historyIdx', -1);
                 break;
 
@@ -424,11 +429,11 @@ function init(): void {
 
             // 閳光偓閳光偓 Edit Preview 閳光偓閳光偓
             case 'editPreview':
-                bus.emit('editPreview', msg.previewId, msg.path, msg.oldText, msg.newText, msg.matchCount);
+                bus.emit('editPreview', msg.previewId, msg.path, msg.oldText, msg.newText, msg.matchCount, msg.lineStart, msg.lineEnd);
                 break;
 
             case 'writePreview':
-                bus.emit('writePreview', msg.previewId, msg.filePath, msg.content, msg.isCreate);
+                bus.emit('writePreview', msg.previewId, msg.filePath, msg.content, msg.isCreate, msg.oldText);
                 break;
 
             case 'askUser':

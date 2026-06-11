@@ -4,6 +4,17 @@ import { ChatMessage, ContentPart } from './api';
 import { atomicWriteSync } from './utils/fileLock';
 import { workspaceDataPath, workspaceWindowDataPath } from './workspaceData';
 
+export interface SavedInputHistoryImage {
+    dataUrl: string;
+    name: string;
+    size: number;
+}
+
+export interface SavedInputHistoryItem {
+    text: string;
+    images?: SavedInputHistoryImage[] | null;
+}
+
 export interface HistoryEntry {
     id: string;
     title: string;
@@ -18,7 +29,7 @@ export interface HistoryConversation extends HistoryEntry {
     mode?: string;
     personaId?: string;
     activeSkillPrompt?: string;
-    inputHistory?: string[];
+    inputHistory?: SavedInputHistoryItem[];
 }
 
 /**
@@ -265,6 +276,19 @@ export class HistoryManager {
         return '';
     }
 
+    private extractUserImages(content: string | ContentPart[] | null | undefined): SavedInputHistoryImage[] {
+        if (!Array.isArray(content)) return [];
+        return content
+            .filter((part): part is ContentPart & { type: 'image_url'; image_url?: { url?: string } } => part?.type === 'image_url')
+            .map((part, index) => ({
+                dataUrl: String(part.image_url?.url || ''),
+                name: `image-${index + 1}`,
+                size: 0,
+            }))
+            .filter(image => /^data:image\/(?:png|jpe?g|webp|gif);base64,[a-z0-9+/=\s]+$/i.test(image.dataUrl))
+            .slice(0, 12);
+    }
+
     // ── Public API ──
 
     /**
@@ -330,16 +354,22 @@ export class HistoryManager {
      * Save or overwrite a conversation by ID.
      * Also updates the lightweight index.
      */
-    private buildInputHistory(messages: ChatMessage[]): string[] {
+    private buildInputHistory(messages: ChatMessage[]): SavedInputHistoryItem[] {
         const seen = new Set<string>();
-        const result: string[] = [];
+        const result: SavedInputHistoryItem[] = [];
         for (let i = messages.length - 1; i >= 0; i--) {
             const msg = messages[i];
             if (msg.role !== 'user') continue;
             const text = this.extractText(msg.content).trim();
-            if (!text || seen.has(text)) continue;
-            seen.add(text);
-            result.push(text);
+            const images = this.extractUserImages(msg.content);
+            if (!text && images.length === 0) continue;
+            const key = JSON.stringify({ text, images: images.map(image => image.dataUrl) });
+            if (seen.has(key)) continue;
+            seen.add(key);
+            result.push({
+                text,
+                images: images.length > 0 ? images : null,
+            });
             if (result.length >= 50) break;
         }
         return result;

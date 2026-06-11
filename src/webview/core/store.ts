@@ -9,6 +9,11 @@ export interface ImageData {
     size: number;
 }
 
+export interface InputHistoryItem {
+    text: string;
+    images: ImageData[] | null;
+}
+
 export interface Tab {
     id: string;
     title: string;
@@ -58,7 +63,7 @@ export interface StoreState {
     visionEnabled: boolean;
 
     // Input history
-    inputHistory: string[];
+    inputHistory: InputHistoryItem[];
     historyIdx: number;
 
     // Panels

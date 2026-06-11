@@ -17,6 +17,43 @@ function isSafeImageDataUrl(dataUrl: string): boolean {
         && dataUrl.length <= Math.ceil(MAX_IMAGE_BYTES * 1.4);
 }
 
+function extractImagesFromClipboardHtml(html: string): Array<{ dataUrl: string; name: string; size: number }> {
+    const host = document.createElement('div');
+    host.innerHTML = html;
+    const images: Array<{ dataUrl: string; name: string; size: number }> = [];
+
+    host.querySelectorAll('img').forEach((img, index) => {
+        const dataUrl = String(img.getAttribute('src') || '').trim();
+        if (!isSafeImageDataUrl(dataUrl)) return;
+        const base64 = dataUrl.split(',', 2)[1] || '';
+        const estimatedSize = Math.floor((base64.replace(/\s+/g, '').length * 3) / 4);
+        images.push({
+            dataUrl,
+            name: img.getAttribute('alt') || img.getAttribute('title') || `image-${index + 1}`,
+            size: estimatedSize,
+        });
+    });
+
+    return images;
+}
+
+function extractTextFromClipboardHtml(html: string): string {
+    const host = document.createElement('div');
+    host.innerHTML = html;
+    return (host.textContent || '').trim();
+}
+
+function insertTextAtCursor(input: HTMLTextAreaElement, text: string): void {
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? input.value.length;
+    const before = input.value.slice(0, start);
+    const after = input.value.slice(end);
+    input.value = before + text + after;
+    const cursor = before.length + text.length;
+    input.setSelectionRange(cursor, cursor);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
 export const ImageUpload = {
     mount(): void {
         const fileInput = document.getElementById('file-input') as HTMLInputElement;
@@ -60,6 +97,21 @@ export const ImageUpload = {
         // Clipboard paste — always allow images (auto-switch handles model)
         input.addEventListener('paste', (e) => {
             const items = e.clipboardData?.items;
+            const html = e.clipboardData?.getData('text/html') || '';
+            const htmlImages = extractImagesFromClipboardHtml(html);
+
+            if (htmlImages.length > 0) {
+                e.preventDefault();
+                for (const image of htmlImages) {
+                    this.addImage(image.dataUrl, image.name, image.size);
+                }
+                const text = extractTextFromClipboardHtml(html);
+                if (text) {
+                    insertTextAtCursor(input, text);
+                }
+                return;
+            }
+
             if (!items) return;
             for (let i = 0; i < items.length; i++) {
                 if (items[i].type.indexOf('image/') === 0) {

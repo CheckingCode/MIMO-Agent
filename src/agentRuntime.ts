@@ -180,7 +180,7 @@ export class AgentRuntime {
         };
         params.max_tokens = maxOutputTokens;
         if (params.stream_options === null) delete params.stream_options;
-        if (this.shouldSendThinkingControl(model, endpointId) && reasoningProfile.thinking) {
+        if (this.shouldSendThinkingControl(model, endpointId) && reasoningProfile.thinking && !params.extra_body?.thinking) {
             params.extra_body = {
                 ...(params.extra_body || {}),
                 thinking: { type: reasoningProfile.thinking },

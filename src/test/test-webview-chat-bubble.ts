@@ -7,6 +7,7 @@ describe('webview chat bubble image handling', () => {
     it('accepts safe image data URLs for inline previews', () => {
         expect(isRenderableImageDataUrl('data:image/png;base64,iVBORw0KGgo=')).toBe(true);
         expect(isRenderableImageDataUrl('data:image/jpeg;base64,/9j/4AAQSkZJRg==')).toBe(true);
+        expect(isRenderableImageDataUrl('data:image/gif;base64,R0lGODlhAQABAAAAACw=')).toBe(true);
     });
 
     it('rejects persisted image placeholders and unsafe URLs', () => {

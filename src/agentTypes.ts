@@ -14,6 +14,10 @@ export interface TaskChangeFile {
     removed: number;
     binary?: boolean;
     staged?: boolean;
+    source?: 'git' | 'tool';
+    action?: string;
+    hasToolDiff?: boolean;
+    toolDiff?: string;
 }
 
 export interface TaskChangeSummary {
@@ -43,8 +47,16 @@ export interface AgentEvents {
     onStatus: (status: string) => void;
     onModelSwitched?: (model: string, reason?: 'chat' | 'image') => void;
     onTokenUsage?: (usage: TokenUsage) => void;
-    onEditPreview?: (previewId: string, path: string, oldText: string, newText: string, matchCount: number) => void;
-    onWritePreview?: (previewId: string, filePath: string, content: string, isCreate: boolean) => void;
+    onEditPreview?: (
+        previewId: string,
+        path: string,
+        oldText: string,
+        newText: string,
+        matchCount: number,
+        lineStart?: number,
+        lineEnd?: number,
+    ) => void;
+    onWritePreview?: (previewId: string, filePath: string, content: string, isCreate: boolean, oldText?: string) => void;
     onWorkflowStart?: (totalPhases: number, totalTasks: number) => void;
     onWorkflowPhaseStart?: (phaseIndex: number, title: string, mode: string, taskCount: number) => void;
     onWorkflowTaskStart?: (phaseIndex: number, taskIndex: number, label: string) => void;

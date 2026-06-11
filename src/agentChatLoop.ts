@@ -8,6 +8,7 @@ import { detectPersona, buildPersonaPrompt, getPersona } from './personas';
 import { ToolObservation } from './memory';
 import { getFriendlyError } from './agentErrors';
 import { stripInternalHandoffNoise } from './handoff';
+import { PLAN_MODE_ANALYSIS_GUIDANCE, PLAN_MODE_EXECUTION_GUIDANCE } from './planMode';
 
 export async function doChatImpl(
     this: any,
@@ -339,48 +340,10 @@ For explicit git commit/push requests, stop as soon as the commit/push delivery 
                      'web_search', 'fetch_url', 'ask_user'].includes(t.function.name)
                 );
                 toolChoice = 'auto';
-                systemContent += `\n\n[Mode: Plan — 分析阶段]
-你正在"规划模式"下工作。当前是第一阶段：分析需求并制定计划。
-
-你的任务：
-1. 使用只读工具（读取文件、搜索、查看目录）了解代码库现状
-2. 仔细分析用户的需求（表面需求 vs 真实目标）
-3. 制定详细的执行计划
-4. 以结构化的 markdown 格式输出你的计划
-
-计划格式：
-## 需求分析
-（用户想要什么，关键约束，验收标准）
-
-## 实现方案
-（具体怎么做，分步骤列出，每步预估工作量）
-
-## 涉及文件
-（要修改/创建哪些文件，每个文件要做什么改动）
-
-## 风险与对策
-（可能遇到的问题，如何规避）
-
-## 预期结果
-（完成后是什么样子，如何验证）
-
-⚠️ 输出计划后立即停止。不要修改任何文件，不要开始执行。
-系统会自动将你的计划保存到 .mimo/plans/ 目录中。
-
-💡 当你遇到以下情况时，使用 ask_user 工具向用户确认：
-- 需求有多种理解方式
-- 存在多种实现方案需要用户选择
-- 涉及技术选型需要用户决策`;
+                systemContent += PLAN_MODE_ANALYSIS_GUIDANCE;
             } else if (conv.mode === 'plan' && conv.planConfirmed) {
                 // Plan mode, phase 2: Execute the plan
-                systemContent += `\n\n[Mode: Plan — 执行阶段]
-用户已确认计划。现在按照计划执行。
-
-执行原则：
-- 严格按照计划中的步骤逐一完成，不要偏离计划
-- 每完成一步，简要报告进度
-- 如果发现计划中有问题，暂停并说明原因
-- 修改后立即验证（语法检查、测试）`;
+                systemContent += PLAN_MODE_EXECUTION_GUIDANCE;
             } else if (conv.mode === 'polling') {
                 systemContent += `\n\n[Mode: Polling] 轮询模式 — 自主执行，但保持透明。
 

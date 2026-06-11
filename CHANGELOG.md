@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.7.2 (2026-06-12)
+
+### Improvements
+- Optimized heavy webview UI paths, including Bash cards, Edit/Write preview cards, and workflow/history detail rendering, to reduce lag from large command output and diffs.
+- Deferred expensive edit and overwrite diff preview rendering until expansion, while keeping visible summaries lightweight by default.
+- Improved history replay responsiveness by lazily hydrating execution-detail drawers instead of eagerly rendering all process DOM.
+- Refined readonly diff-preview workflows and related preview plumbing so multi-file review remains view-only and more stable.
+- Rewrote the README into clean UTF-8 bilingual release documentation and synced version metadata for the new release.
+
+### Fixes
+- Fixed overwrite write-preview actions using the wrong confirm/reject path, so overwrite approval now correctly uses the write confirmation flow.
+- Removed an invalid collapsible-card call from system messages that could create avoidable runtime instability.
+- Kept manual stop, friendly error rendering, task change review, and recent UI polish aligned with the 1.7.x interaction model after the latest changes.
+
 ## 1.7.1 (2026-06-11)
 
 ### Fixes

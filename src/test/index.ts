@@ -19,6 +19,7 @@ require('./test-agent-errors');
 require('./test-agent-convergence');
 require('./test-router');
 require('./test-webview-chat-bubble');
+require('./test-plan-mode');
 
 console.log('\n  All tests completed.');
 finalSummary();

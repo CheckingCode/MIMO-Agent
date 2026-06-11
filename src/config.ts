@@ -22,6 +22,7 @@ export type ProviderProfileSetting = {
     id: string;
     name: string;
     provider?: string;
+    show_in_picker?: boolean;
     base_url: string;
     api_endpoint: ApiEndpointMode;
     model: string;
@@ -89,6 +90,13 @@ export interface MiMoConfig {
     settings: Record<string, any>;
 }
 
+type ResolvedProviderSelection = {
+    activeProfile?: ProviderProfileSetting;
+    activeProviderProfile: string;
+    activeRoute?: ModelRouteSetting;
+    model?: string;
+};
+
 export function loadConfig(): MiMoConfig {
     const cfg = vscode.workspace.getConfiguration('mimo');
     const workspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
@@ -110,12 +118,19 @@ export function loadConfig(): MiMoConfig {
         || cfg.get<string>('baseUrl')
         || 'https://token-plan-cn.xiaomimimo.com/v1';
     const requestedRoute = sanitizeModelRoute(settings?.api?.active_route);
-    const activeProviderProfile = requestedRoute?.endpoint_id
-        || sanitizeString(settings?.api?.active_provider_profile, 80)
-        || inferActiveProviderProfile(baseUrlBeforeProfile, providerProfiles);
-    const activeProfile = activeProviderProfile
-        ? providerProfiles.find(profile => profile.id === activeProviderProfile)
-        : undefined;
+    const resolvedSelection = resolveActiveProviderSelection(providerProfiles, {
+        requestedRoute,
+        savedActiveProviderProfile: sanitizeString(settings?.api?.active_provider_profile, 80),
+        baseUrl: baseUrlBeforeProfile,
+        apiEndpoint: settings?.api?.api_endpoint,
+        savedModel: settings?.api?.model
+            || process.env.MIMO_MODEL
+            || process.env.OPENAI_MODEL
+            || cfg.get<string>('model')
+            || 'mimo-v2.5-pro',
+    });
+    const activeProviderProfile = resolvedSelection.activeProviderProfile;
+    const activeProfile = resolvedSelection.activeProfile;
 
     // Priority for model-call settings: active profile > ~/.mimo/settings.json > env > VS Code settings > defaults.
     const apiKey = activeProfile?.api_key
@@ -130,7 +145,7 @@ export function loadConfig(): MiMoConfig {
     const baseUrl = activeProfile?.base_url || baseUrlBeforeProfile;
     const apiEndpoint = normalizeApiEndpointMode(activeProfile?.api_endpoint || settings?.api?.api_endpoint);
 
-    const model = requestedRoute?.model
+    const model = resolvedSelection.model
         || activeProfile?.model
         || settings?.api?.model
         || process.env.MIMO_MODEL
@@ -155,10 +170,7 @@ export function loadConfig(): MiMoConfig {
         model,
         models,
         activeProviderProfile: activeProviderProfile || '',
-        activeRoute: {
-            endpoint_id: activeProviderProfile || '',
-            model,
-        },
+        activeRoute: resolvedSelection.activeRoute || { endpoint_id: activeProviderProfile || '', model },
         providerProfiles,
         maxTokens: Math.min(
             MAX_MODEL_TOKENS,
@@ -279,6 +291,7 @@ function sanitizeProviderProfiles(input: unknown): ProviderProfileSetting[] {
                 id,
                 name,
                 provider: provider || inferProviderFromBaseUrl(baseUrl),
+                show_in_picker: raw.show_in_picker !== false,
                 base_url: baseUrl.replace(/\/+$/, ''),
                 api_endpoint: apiEndpoint,
                 model: model || '',
@@ -319,8 +332,92 @@ function sanitizeModelRoute(input: unknown): ModelRouteSetting | undefined {
     return { endpoint_id: endpointId, model };
 }
 
+function normalizeBaseUrl(value: unknown): string {
+    return String(value || '').trim().replace(/\/+$/, '').toLowerCase();
+}
+
+function getPrimaryProfileModel(profile?: ProviderProfileSetting): string {
+    return sanitizeString(profile?.model, 128)
+        || profile?.models?.find(model => typeof model === 'string' && model.trim())?.trim()
+        || '';
+}
+
+function profileMatchesModel(profile: ProviderProfileSetting | undefined, model: string | undefined): boolean {
+    const target = sanitizeString(model, 128);
+    if (!profile || !target) return false;
+    return getPrimaryProfileModel(profile) === target || profile.models.includes(target);
+}
+
+function profileMatchesConnection(profile: ProviderProfileSetting | undefined, baseUrl: string, apiEndpoint: unknown): boolean {
+    if (!profile) return false;
+    const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+    if (normalizedBaseUrl && normalizeBaseUrl(profile.base_url) !== normalizedBaseUrl) {
+        return false;
+    }
+    return normalizeApiEndpointMode(profile.api_endpoint) === normalizeApiEndpointMode(apiEndpoint);
+}
+
+function resolveActiveProviderSelection(
+    profiles: ProviderProfileSetting[],
+    options: {
+        requestedRoute?: ModelRouteSetting;
+        savedActiveProviderProfile?: string;
+        baseUrl: string;
+        apiEndpoint?: unknown;
+        savedModel?: string;
+    },
+): ResolvedProviderSelection {
+    const requestedModel = sanitizeString(options.requestedRoute?.model, 128);
+    const savedModel = sanitizeString(options.savedModel, 128);
+    const desiredModel = requestedModel || savedModel;
+    const requestedProfile = options.requestedRoute?.endpoint_id
+        ? profiles.find(profile => profile.id === options.requestedRoute?.endpoint_id)
+        : undefined;
+    const savedProfile = options.savedActiveProviderProfile
+        ? profiles.find(profile => profile.id === options.savedActiveProviderProfile)
+        : undefined;
+    const sameConnectionProfiles = profiles.filter(profile =>
+        profileMatchesConnection(profile, options.baseUrl, options.apiEndpoint),
+    );
+
+    const candidates: Array<ProviderProfileSetting | undefined> = [
+        requestedProfile && requestedModel && profileMatchesModel(requestedProfile, requestedModel) ? requestedProfile : undefined,
+        desiredModel
+            ? sameConnectionProfiles.find(profile => profileMatchesModel(profile, desiredModel))
+            : undefined,
+        savedProfile && desiredModel && profileMatchesModel(savedProfile, desiredModel) ? savedProfile : undefined,
+        desiredModel
+            ? profiles.find(profile => profileMatchesModel(profile, desiredModel))
+            : undefined,
+        requestedProfile,
+        savedProfile,
+        sameConnectionProfiles[0],
+    ];
+
+    const activeProfile = candidates.find((profile): profile is ProviderProfileSetting => !!profile);
+    const activeProviderProfile = activeProfile?.id
+        || options.savedActiveProviderProfile
+        || inferActiveProviderProfile(options.baseUrl, profiles)
+        || '';
+    const resolvedModel = requestedModel && profileMatchesModel(activeProfile, requestedModel)
+        ? requestedModel
+        : getPrimaryProfileModel(activeProfile) || savedModel || requestedModel;
+
+    return {
+        activeProfile,
+        activeProviderProfile,
+        activeRoute: resolvedModel
+            ? {
+                endpoint_id: activeProviderProfile,
+                model: resolvedModel,
+            }
+            : undefined,
+        model: resolvedModel,
+    };
+}
+
 function inferActiveProviderProfile(baseUrl: string, profiles: ProviderProfileSetting[]): string {
-    const normalized = (baseUrl || '').replace(/\/+$/, '').toLowerCase();
+    const normalized = normalizeBaseUrl(baseUrl);
     const found = profiles.find(p => String(p.base_url || '').replace(/\/+$/, '').toLowerCase() === normalized);
     return found?.id || '';
 }
@@ -394,23 +491,26 @@ export function saveSetting(dotPath: string, value: any): boolean {
 export function getSettingsPanel(): Record<string, any> {
     const s = readSettings();
     const providerProfiles = sanitizeProviderProfiles(s?.api?.provider_profiles);
-    const activeRoute = sanitizeModelRoute(s?.api?.active_route);
-    const activeProviderProfile = activeRoute?.endpoint_id
-        || sanitizeString(s?.api?.active_provider_profile, 80)
-        || inferActiveProviderProfile(s?.api?.base_url || '', providerProfiles);
-    const activeProfile = activeProviderProfile
-        ? providerProfiles.find(profile => profile.id === activeProviderProfile)
-        : undefined;
+    const resolvedSelection = resolveActiveProviderSelection(providerProfiles, {
+        requestedRoute: sanitizeModelRoute(s?.api?.active_route),
+        savedActiveProviderProfile: sanitizeString(s?.api?.active_provider_profile, 80),
+        baseUrl: s?.api?.base_url || 'https://token-plan-cn.xiaomimimo.com/v1',
+        apiEndpoint: s?.api?.api_endpoint,
+        savedModel: s?.api?.model || 'mimo-v2.5-pro',
+    });
+    const activeProviderProfile = resolvedSelection.activeProviderProfile;
+    const activeProfile = resolvedSelection.activeProfile;
+    const activeRoute = resolvedSelection.activeRoute;
     return {
         api_key: activeProfile?.api_key || s?.api?.api_key || s?.api?.apiKey || '',
         base_url: activeProfile?.base_url || s?.api?.base_url || 'https://token-plan-cn.xiaomimimo.com/v1',
         api_endpoint: normalizeApiEndpointMode(activeProfile?.api_endpoint || s?.api?.api_endpoint),
-        model: activeRoute?.model || activeProfile?.model || s?.api?.model || 'mimo-v2.5-pro',
+        model: activeRoute?.model || getPrimaryProfileModel(activeProfile) || s?.api?.model || 'mimo-v2.5-pro',
         models: activeProfile?.models?.length ? activeProfile.models : (s?.api?.models || []),
         active_provider_profile: activeProviderProfile,
         active_route: activeRoute || {
             endpoint_id: activeProviderProfile,
-            model: activeProfile?.model || s?.api?.model || 'mimo-v2.5-pro',
+            model: getPrimaryProfileModel(activeProfile) || s?.api?.model || 'mimo-v2.5-pro',
         },
         provider_profiles: providerProfiles,
         max_tokens: Math.min(MAX_MODEL_TOKENS, Math.max(256, s?.agent?.max_tokens ?? 8192)),

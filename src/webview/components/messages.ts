@@ -23,6 +23,7 @@ import {
     getLineInfo as getMessageLineInfo,
     getToolColor as getMessageToolColor,
     getToolLabel as getMessageToolLabel,
+    buildRichMessageClipboardPayload,
     installUserBubbleCollapse,
     reasoningStoreLimit,
     renderEditDiff as renderMessageEditDiff,
@@ -37,6 +38,7 @@ import {
     dedupReasoning as dedupMessageReasoning,
     toolIcon as messageToolIcon,
     toolSummary as messageToolSummary,
+    writeClipboardPayload,
 } from './messages/index';
 
 // ── Helpers ──
@@ -79,6 +81,19 @@ function copyTextToClipboard(text: string): Promise<void> {
     return Promise.resolve();
 }
 
+function extractBubbleClipboardPayload(bubble: HTMLElement): { text: string; html?: string; primaryImageDataUrl?: string } {
+    const text = Array.from(bubble.querySelectorAll<HTMLElement>('.text-content'))
+        .map(el => el.textContent || '')
+        .filter(Boolean)
+        .join('\n');
+    const images = Array.from(bubble.querySelectorAll<HTMLImageElement>('.msg-img'))
+        .map((img, index) => ({
+            dataUrl: img.getAttribute('src') || '',
+            name: img.getAttribute('title') || img.getAttribute('alt') || `image-${index + 1}`,
+        }));
+    return buildRichMessageClipboardPayload(text, images);
+}
+
 function assistantActionIcon(action: string): string {
     const attrs = 'class="assistant-action-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"';
     if (action === 'retry') {
@@ -102,6 +117,8 @@ const REASONING_DEDUP_INTERVAL_MS = 3000;
 const WORKFLOW_UPDATE_INTERVAL_MS = 400;
 const HISTORY_SNAPSHOT_MAX_HTML = 700_000;
 const HISTORY_PATCH_MAX_CHARS = 500_000;
+const QUEUE_VISIBLE_ITEMS = 3;
+const TASK_CHANGES_VISIBLE_FILES = 3;
 
 interface EditedFileInfo {
     path: string;
@@ -119,6 +136,7 @@ interface TaskChangeFile {
     source?: 'git' | 'tool';
     action?: string;
     hasToolDiff?: boolean;
+    toolDiff?: string;
 }
 
 interface TaskChangeSummary {
@@ -130,6 +148,247 @@ interface TaskChangeSummary {
     createdAt: number;
     canUndo?: boolean;
     warning?: string;
+}
+
+interface TaskChangePatchEntry {
+    filePath: string;
+    patch: string;
+}
+
+interface HistoryTaskChangeSnapshot {
+    gitPatch: string;
+    toolPatches: TaskChangePatchEntry[];
+}
+
+interface ParsedTaskChangeContent {
+    before: string;
+    after: string;
+}
+
+function countUnifiedDiffChanges(patch: string): { added: number; removed: number } {
+    const text = String(patch || '').trim();
+    if (!text) return { added: 0, removed: 0 };
+
+    let added = 0;
+    let removed = 0;
+    for (const line of text.split('\n')) {
+        if (
+            line.startsWith('diff --git') ||
+            line.startsWith('index ') ||
+            line.startsWith('--- ') ||
+            line.startsWith('+++ ') ||
+            line.startsWith('@@ ')
+        ) {
+            continue;
+        }
+        if (line.startsWith('+')) {
+            added++;
+        } else if (line.startsWith('-')) {
+            removed++;
+        }
+    }
+    return { added, removed };
+}
+
+function splitUnifiedDiffByFile(patch: string): TaskChangePatchEntry[] {
+    const text = String(patch || '').replace(/\r\n/g, '\n').trim();
+    if (!text) return [];
+
+    const entries: TaskChangePatchEntry[] = [];
+    const lines = text.split('\n');
+    let current: string[] = [];
+    let currentFile = '';
+
+    const flush = () => {
+        const body = current.join('\n').trim();
+        if (!body) return;
+        entries.push({
+            filePath: currentFile || `changes-${entries.length + 1}`,
+            patch: body,
+        });
+    };
+
+    for (const line of lines) {
+        if (line.startsWith('diff --git ')) {
+            flush();
+            current = [line];
+            const match = line.match(/ b\/(.+)$/);
+            currentFile = match?.[1] || '';
+            continue;
+        }
+        current.push(line);
+        if (!currentFile && line.startsWith('+++ ')) {
+            currentFile = line.replace(/^\+\+\+\s+(?:b\/)?/, '').trim();
+        }
+    }
+    flush();
+
+    if (entries.length > 0) return entries;
+    return [{ filePath: 'changes', patch: text }];
+}
+
+function buildTaskChangePreviewDocument(_title: string, entries: TaskChangePatchEntry[]): string {
+    const content = entries
+        .map(entry => String(entry.patch || '').trim())
+        .filter(Boolean)
+        .join('\n\n')
+        .trim();
+    return content ? `${content}\n` : '';
+}
+
+function parseUnifiedDiffToContent(patch: string): ParsedTaskChangeContent | null {
+    const text = String(patch || '').replace(/\r\n/g, '\n').trim();
+    if (!text) return null;
+
+    const lines = text.split('\n');
+    const before: string[] = [];
+    const after: string[] = [];
+    let sawHunk = false;
+
+    for (const line of lines) {
+        if (line.startsWith('@@ ')) {
+            sawHunk = true;
+            continue;
+        }
+        if (!sawHunk) continue;
+        if (line === '\\ No newline at end of file') continue;
+        if (line.startsWith('+') && !line.startsWith('+++')) {
+            after.push(line.slice(1));
+            continue;
+        }
+        if (line.startsWith('-') && !line.startsWith('---')) {
+            before.push(line.slice(1));
+            continue;
+        }
+        if (line.startsWith(' ')) {
+            const content = line.slice(1);
+            before.push(content);
+            after.push(content);
+        }
+    }
+
+    if (!sawHunk) return null;
+    return {
+        before: before.join('\n'),
+        after: after.join('\n'),
+    };
+}
+
+function escapeHtmlPreservingBreaks(text: string): string {
+    return escapeHtml(text).replace(/\n/g, '<br>');
+}
+
+function extractErrorCode(text: string): string {
+    const match = String(text || '').match(/\b(400|401|402|403|404|421|429|500|503)\b/);
+    return match?.[1] || '';
+}
+
+function looksLikeConfigOrApiError(text: string): boolean {
+    const value = String(text || '');
+    const hasProviderSignal = /MiMo API|Authentication failed|API Key|Base URL|task interrupted by API or runtime error|invalid api key|unauthorized|forbidden|rate limit|service unavailable|status code|http(?:\s+error)?/i.test(value);
+    const hasErrorSignal = /\berror\b|\bfailed\b|\bfailure\b|\bexception\b|\binvalid\b|\bunauthorized\b|\bforbidden\b|\bunavailable\b|\brate limit\b|^failed:/i.test(value) || !!extractErrorCode(value);
+    return hasProviderSignal && hasErrorSignal;
+}
+
+function extractPlainTextFromHtml(html: string): string {
+    const host = document.createElement('div');
+    host.innerHTML = html;
+    return (host.textContent || '').trim();
+}
+
+function isRichErrorHtmlCandidate(html: string): boolean {
+    return !/<(?:table|ul|ol|pre|code|details|blockquote|img|button|input|svg)\b/i.test(html);
+}
+
+function renderFriendlyErrorHtml(text: string): string {
+    const raw = String(text || '').trim();
+    if (!raw) return '';
+
+    const code = extractErrorCode(raw);
+    const lines = raw.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    const title = lines[0] || 'API / runtime error';
+    const sections: string[] = [];
+
+    const collectSection = (label: string) =>
+        lines
+            .filter(line => line.startsWith(`${label}:`) || line.startsWith(`${label}：`))
+            .map(line => line.replace(new RegExp(`^${label}[:：]\\s*`), '').trim())
+            .filter(Boolean);
+
+    const reasons = [...collectSection('问题归因'), ...collectSection('原因')];
+    const suggestions = collectSection('建议')
+        .flatMap(item => item.split(/[；;]/))
+        .map(item => item.trim())
+        .filter(Boolean);
+    const nextActions = collectSection('Next action');
+    const taskStatus = collectSection('Task status');
+
+    if (taskStatus.length) {
+        sections.push(
+            `<div class="friendly-error-section">` +
+            `<div class="friendly-error-label">Task Status</div>` +
+            `<div class="friendly-error-text">${escapeHtmlPreservingBreaks(taskStatus.join('\n'))}</div>` +
+            `</div>`
+        );
+    }
+    if (reasons.length) {
+        sections.push(
+            `<div class="friendly-error-section">` +
+            `<div class="friendly-error-label">原因</div>` +
+            `<div class="friendly-error-text">${escapeHtmlPreservingBreaks(reasons.join('\n'))}</div>` +
+            `</div>`
+        );
+    }
+    if (suggestions.length) {
+        sections.push(
+            `<div class="friendly-error-section">` +
+            `<div class="friendly-error-label">建议</div>` +
+            `<ul class="friendly-error-list">${suggestions.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` +
+            `</div>`
+        );
+    }
+    if (nextActions.length) {
+        sections.push(
+            `<div class="friendly-error-section">` +
+            `<div class="friendly-error-label">Next Action</div>` +
+            `<div class="friendly-error-text">${escapeHtmlPreservingBreaks(nextActions.join('\n'))}</div>` +
+            `</div>`
+        );
+    }
+
+    const consumed = new Set<string>([
+        ...taskStatus.map(v => `Task status: ${v}`),
+        ...reasons,
+        ...suggestions,
+        ...nextActions.map(v => `Next action: ${v}`),
+    ]);
+    const leftovers = lines.filter(line => {
+        const normalized = line.replace(/^(问题归因|原因|建议|Next action|Task status)[:：]\s*/, '').trim();
+        return normalized && !consumed.has(normalized) && !consumed.has(line);
+    });
+
+    return (
+        `<div class="friendly-error-card">` +
+        `<div class="friendly-error-head">` +
+        `<span class="friendly-error-badge">API / Runtime Error</span>` +
+        (code ? `<span class="friendly-error-code">Error ${escapeHtml(code)}</span>` : '') +
+        `</div>` +
+        `<div class="friendly-error-title">${escapeHtml(title)}</div>` +
+        (sections.length ? sections.join('') : `<div class="friendly-error-text">${escapeHtmlPreservingBreaks(raw)}</div>`) +
+        (leftovers.length
+            ? `<details class="friendly-error-raw"><summary>原始信息</summary><pre>${escapeHtml(leftovers.join('\n'))}</pre></details>`
+            : '') +
+        `</div>`
+    );
+}
+
+function formatAssistantBodyHtml(rawHtml: string): string {
+    const sanitizedHtml = enhanceMessageTaskChecklists(stripMessageRawToolCalls(rawHtml || ''));
+    const plainText = extractPlainTextFromHtml(sanitizedHtml);
+    if (plainText && isRichErrorHtmlCandidate(sanitizedHtml) && looksLikeConfigOrApiError(plainText)) {
+        return renderFriendlyErrorHtml(plainText);
+    }
+    return sanitizedHtml;
 }
 
 interface WorkflowUiState {
@@ -304,22 +563,11 @@ export const Messages = {
                 e.stopPropagation();
                 const bubble = msgCopyBtn.closest('.msg');
                 if (!bubble) return;
-                const text = Array.from(bubble.querySelectorAll<HTMLElement>('.text-content'))
-                    .map(el => el.textContent || '')
-                    .filter(Boolean)
-                    .join('\n');
-                navigator.clipboard.writeText(text).then(() => {
+                const payload = extractBubbleClipboardPayload(bubble);
+                writeClipboardPayload(payload).then(() => {
                     setCopyButtonState(msgCopyBtn, true);
                     setTimeout(() => setCopyButtonState(msgCopyBtn, false), 1600);
-                }).catch(() => {
-                    const ta = document.createElement('textarea');
-                    ta.value = text;
-                    ta.style.cssText = 'position:fixed;opacity:0';
-                    document.body.appendChild(ta);
-                    ta.select();
-                    try { document.execCommand('copy'); } catch { /* ignore */ }
-                    document.body.removeChild(ta);
-                });
+                }).catch(() => {});
                 return;
             }
 
@@ -397,8 +645,16 @@ export const Messages = {
         bus.on('welcomeUpdate', (desc: string, hint: string) => this.updateWelcome(desc, hint));
         bus.on('tokenUsage', (usage: { promptTokens: number; completionTokens: number; totalTokens: number }) => this.handleTokenUsage(usage));
         bus.on('conversationUsage', (usage: { totalTokens: number; callCount: number }) => this.handleConversationUsage(usage));
-        bus.on('editPreview', (previewId: string, path: string, oldText: string, newText: string, matchCount: number) => this.renderEditPreviewCard(previewId, path, oldText, newText, matchCount));
-        bus.on('writePreview', (previewId: string, filePath: string, content: string, isCreate: boolean) => this.renderWritePreviewCard(previewId, filePath, content, isCreate));
+        bus.on('editPreview', (
+            previewId: string,
+            path: string,
+            oldText: string,
+            newText: string,
+            matchCount: number,
+            lineStart?: number,
+            lineEnd?: number,
+        ) => this.renderEditPreviewCard(previewId, path, oldText, newText, matchCount, lineStart, lineEnd));
+        bus.on('writePreview', (previewId: string, filePath: string, content: string, isCreate: boolean, oldText?: string) => this.renderWritePreviewCard(previewId, filePath, content, isCreate, oldText));
         // Workflow events
         bus.on('workflowStart', (totalPhases: number, totalTasks: number) => this.handleWorkflowStart(totalPhases, totalTasks));
         bus.on('workflowPhaseStart', (pi: number, title: string, mode: string, tc: number) => this.handleWorkflowPhaseStart(pi, title, mode, tc));
@@ -417,14 +673,13 @@ export const Messages = {
         bus.on('askUser', (previewId: string, question: string, options: string[]) => this.renderAskUserCard(previewId, question, options));
         bus.on('stopGuard', (info: any) => this.renderStopGuardCard(info));
         bus.on('taskChanges', (summary: TaskChangeSummary) => this.renderTaskChangesCard(summary));
-        bus.on('taskChangesUndoResult', (result: any) => this.handleTaskChangesUndoResult(result));
-        bus.on('taskChangesRefresh', (summary: TaskChangeSummary | null) => this.handleTaskChangesRefresh(summary));
         // Message queue
         bus.on('messageQueued', (text: string, queueLength: number) => this.showQueuedMessage(text, queueLength));
         bus.on('queueProcessed', (remaining: number) => this.updateQueueDisplay(remaining));
         bus.on('clearQueue', () => this.clearQueueDisplay());
         bus.on('langChanged', () => {
             this.localizeQueueDisplay();
+            this.localizeTaskChangesDisplay();
             this.localizeAssistantActions();
         });
         bus.on('renderFlush', () => smartScroll(messagesDiv));
@@ -586,7 +841,7 @@ export const Messages = {
         if ((el as any)._lastStreamHtml === html) return;
         (el as any)._lastStreamHtml = html;
         // Post-process: replace task-checklist blocks with enhanced component
-        el.innerHTML = this.enhanceTaskChecklists(this.stripRawToolCalls(html));
+        el.innerHTML = formatAssistantBodyHtml(html);
         smartScroll(messagesDiv);
     },
 
@@ -605,14 +860,48 @@ export const Messages = {
     },
 
     // ── Enhance task checklists ──
+    upsertVerificationSegment(html: string): void {
+        const messagesDiv = document.getElementById('messages')!;
+        let streamingMsg = store.get('streamingMsg');
+        if (!streamingMsg) {
+            streamingMsg = this.createAssistantMsg();
+            store.set('streamingMsg', streamingMsg);
+            store.set('rawHtml', '');
+        }
+        const nextHtml = formatAssistantBodyHtml(html || '');
+        const existing = streamingMsg.querySelector('.md-content-verification') as HTMLElement | null;
+        if (existing) {
+            if ((existing as any)._lastVerificationHtml === nextHtml) return;
+            (existing as any)._lastVerificationHtml = nextHtml;
+            existing.innerHTML = nextHtml;
+            existing.classList.add('md-content-final');
+            existing.setAttribute('data-stream-finalized', 'true');
+            existing.dataset.label = t('assistant.verification.followup');
+            smartScroll(messagesDiv);
+            return;
+        }
+        this.handleStream(html || '');
+        this.commitStreamSegment();
+        const finalized = streamingMsg.querySelector('.md-content-final:last-of-type') as HTMLElement | null;
+        if (finalized) {
+            finalized.classList.add('md-content-verification');
+            finalized.dataset.label = t('assistant.verification.followup');
+            (finalized as any)._lastVerificationHtml = finalized.innerHTML;
+        }
+        smartScroll(messagesDiv);
+    },
+
     appendFixedAssistantSegment(html: string, kind: 'update' | 'verification' | 'final'): void {
+        if (kind === 'verification') {
+            this.upsertVerificationSegment(html);
+            return;
+        }
         this.handleStream(html || '');
         this.commitStreamSegment();
         const streamingMsg = store.get('streamingMsg');
         const finalized = streamingMsg?.querySelector('.md-content-final:last-of-type') as HTMLElement | null;
         if (finalized) {
             finalized.classList.add(`md-content-${kind}`);
-            if (kind === 'verification') finalized.dataset.label = t('assistant.verification.followup');
         }
         if (kind === 'final') {
             this._markThinkingDone();
@@ -828,6 +1117,9 @@ export const Messages = {
         const delegatedCard = name === 'execute_command'
             ? createExecuteCommandCard(name, args)
             : createToolLine(name, args);
+        if (name === 'execute_command') {
+            this.makeCardCollapsible(delegatedCard, '.tool-card-header', true);
+        }
         targetDiv.appendChild(delegatedCard);
         smartScroll(messagesDiv);
         return;
@@ -1037,6 +1329,11 @@ export const Messages = {
             }
             const timeEl = last.querySelector('.tool-card-time') as HTMLElement | null;
             if (timeEl) timeEl.textContent = elapsed.toFixed(1) + 's';
+            if (!isError && last.classList.contains('collapsed')) {
+                const header = last.querySelector('.tool-card-header');
+                const toggle = header?.querySelector('.inline-collapse-toggle') as HTMLButtonElement | null;
+                toggle?.click();
+            }
             // Show git diff card if command modified files
             if (gitDiff && !isError) {
                 const diffCard = createElement('div', 'diff-card');
@@ -1177,8 +1474,10 @@ export const Messages = {
 
         // Render diff with context (show unchanged lines grayed out)
         const maxShow = Math.min(diff.length, 15);
-        let oldLineNum = 0;
-        let newLineNum = 0;
+        const startLine = Number(args.line_start);
+        const initialLine = Number.isFinite(startLine) && startLine > 0 ? Math.floor(startLine) - 1 : 0;
+        let oldLineNum = initialLine;
+        let newLineNum = initialLine;
         for (let i = 0; i < maxShow; i++) {
             const d = diff[i];
             const div = createElement('div', `diff-card-line ${d.type === 'add' ? 'add' : d.type === 'del' ? 'del' : 'ctx'}`);
@@ -1194,6 +1493,9 @@ export const Messages = {
                 div.innerHTML = `<span class="diff-ln">${newLineNum}</span><span class="diff-text" style="opacity:.4">${escapeHtml(d.text).substring(0, 120)}</span>`;
             }
             body.appendChild(div);
+        const ctxCount = diff.slice(0, maxShow).filter(d => d.type === 'ctx').length;
+        const hdrStats = card.querySelector('.diff-stats') as HTMLElement | null;
+        if (hdrStats) hdrStats.textContent = `+${added}, -${removed}` + (ctxCount ? ` (${ctxCount} ctx)` : '');
         }
         if (diff.length > maxShow) {
             const more = createElement('div', 'diff-card-line ctx');
@@ -1339,7 +1641,8 @@ export const Messages = {
                 if (hunkLine) {
                     const m = (hunkLine.text || '').match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/);
                     if (m) {
-                        html += `<div class="diff-hunk"><span class="diff-hunk-marker">@@</span><span class="diff-hunk-loc">${escapeHtml(m[0].replace(/@@.*@@/, '').trim())}</span>${hunkLine.label ? `<span class="diff-hunk-fn">${escapeHtml(hunkLine.label)}</span>` : ''}</div>`;
+                        const loc = hunkLine.text.replace(/^@@\s*/, '').replace(/\s*@@.*$/, '').trim();
+                        html += `<div class="diff-hunk"><span class="diff-hunk-marker">@@</span><span class="diff-hunk-loc">${escapeHtml(loc)}</span>${hunkLine.label ? `<span class="diff-hunk-fn">${escapeHtml(hunkLine.label)}</span>` : ''}</div>`;
                     } else {
                         html += `<div class="diff-hunk"><span class="diff-hunk-marker">@@</span>${escapeHtml(hunkLine.text)}</div>`;
                     }
@@ -1562,27 +1865,79 @@ export const Messages = {
         if (!assistant) return null;
         const userMessages = Array.from(messagesDiv.querySelectorAll<HTMLElement>('.msg-user'));
         const user = userMessages[userMessages.length - 1] || null;
-        const snapshotNodes = [assistant, ...this.collectFollowingTaskChangeCards(assistant)];
+        const snapshotNodes = this.collectLatestTurnSnapshotNodes(messagesDiv, assistant, user);
         const html = snapshotNodes.map(node => node.outerHTML).join('\n');
         if (!html || html.length > HISTORY_SNAPSHOT_MAX_HTML) return null;
         const userHtml = user?.outerHTML || '';
+        const taskChanges = this.buildHistoryTaskChangeSnapshots(snapshotNodes);
         return {
-            version: 1,
+            version: 2,
             capturedAt: Date.now(),
             elapsedSec: typeof elapsedSec === 'number' ? Number(elapsedSec.toFixed(1)) : undefined,
             assistantHtml: html,
             userHtml: userHtml.length < 200_000 ? userHtml : '',
+            taskChanges,
         };
     },
 
-    collectFollowingTaskChangeCards(assistant: HTMLElement): HTMLElement[] {
-        const cards: HTMLElement[] = [];
-        let next = assistant.nextElementSibling as HTMLElement | null;
-        while (next?.classList.contains('task-changes-card')) {
-            cards.push(next);
+    collectLatestTurnSnapshotNodes(messagesDiv: HTMLElement, assistant: HTMLElement, user: HTMLElement | null): HTMLElement[] {
+        const nodes: HTMLElement[] = [];
+        let next = (user?.nextElementSibling as HTMLElement | null) || assistant;
+        while (next) {
+            if (this.isLatestTurnSnapshotNode(next)) {
+                nodes.push(next);
+            }
             next = next.nextElementSibling as HTMLElement | null;
         }
-        return cards;
+        if (!nodes.includes(assistant)) nodes.unshift(assistant);
+        return nodes.filter((node, index) => nodes.indexOf(node) === index);
+    },
+
+    isLatestTurnSnapshotNode(node: HTMLElement): boolean {
+        if (node.classList.contains('sticky-user-preview')) return false;
+        if (node.classList.contains('msg-user')) return false;
+        if (node.classList.contains('msg-queue-container')) return false;
+        return node.classList.contains('msg-assistant') ||
+            node.classList.contains('task-changes-card') ||
+            node.classList.contains('diff-card') ||
+            node.classList.contains('completion-summary') ||
+            node.classList.contains('msg-error');
+    },
+
+    buildHistoryTaskChangeSnapshots(nodes: HTMLElement[]): HistoryTaskChangeSnapshot[] {
+        return nodes
+            .filter(node => node.classList.contains('task-changes-card'))
+            .map(card => {
+                const gitTpl = card.querySelector<HTMLTemplateElement>('template.task-changes-patch[data-kind="git-patch"]');
+                const gitPatch = String((card as any)._patch || gitTpl?.content?.textContent || gitTpl?.textContent || '').trim();
+                const toolPatchMap = new Map<string, string>();
+
+                Array.from(card.querySelectorAll<HTMLTemplateElement>('template.task-changes-patch[data-kind="tool-patch"]')).forEach(node => {
+                    const filePath = node.getAttribute('data-file') || '';
+                    const patch = String(node.content?.textContent || node.textContent || '').trim();
+                    if (filePath && patch) toolPatchMap.set(this.normalizeFileKey(filePath), patch);
+                });
+
+                const runtimeToolDiffs = (card as any)._fileToolDiffs as Record<string, string> | undefined;
+                if (runtimeToolDiffs) {
+                    card.querySelectorAll<HTMLElement>('.task-change-entry[data-file]').forEach(entry => {
+                        const filePath = entry.getAttribute('data-file') || '';
+                        const patch = runtimeToolDiffs[this.normalizeFileKey(filePath)] || '';
+                        if (filePath && patch) toolPatchMap.set(this.normalizeFileKey(filePath), String(patch).trim());
+                    });
+                }
+
+                return {
+                    gitPatch,
+                    toolPatches: Array.from(toolPatchMap.entries()).map(([fileKey, patch]) => {
+                        const matchedPath = Array.from(card.querySelectorAll<HTMLElement>('.task-change-entry[data-file]'))
+                            .map(entry => entry.getAttribute('data-file') || '')
+                            .find(filePath => this.normalizeFileKey(filePath) === fileKey) || fileKey;
+                        return { filePath: matchedPath, patch };
+                    }),
+                };
+            })
+            .filter(snapshot => !!snapshot.gitPatch || snapshot.toolPatches.length > 0);
     },
 
     compactExecutionDetails(elapsedSec?: number): void {
@@ -1602,6 +1957,7 @@ export const Messages = {
             return el.classList.contains('thinking-toggle') ||
                 el.classList.contains('thinking-block') ||
                 el.classList.contains('md-content-update') ||
+                el.classList.contains('md-content-verification') ||
                 el.classList.contains('tool-line') ||
                 el.classList.contains('tool-card') ||
                 el.classList.contains('todo-tool-result') ||
@@ -1718,6 +2074,209 @@ export const Messages = {
         });
     },
 
+    getTaskChangePreviewEntries(summary: TaskChangeSummary | null | undefined, targetFile?: string): TaskChangePatchEntry[] {
+        const entries: TaskChangePatchEntry[] = [];
+        const seen = new Set<string>();
+        const addEntry = (filePath: string, patch: string) => {
+            const key = this.normalizeFileKey(filePath);
+            if (!patch || !key || seen.has(key)) return;
+            if (targetFile && !this.fileKeysMatch(filePath, targetFile)) return;
+            seen.add(key);
+            entries.push({ filePath, patch: String(patch).trim() });
+        };
+
+        for (const entry of splitUnifiedDiffByFile(summary?.patch || '')) {
+            addEntry(entry.filePath, entry.patch);
+        }
+        for (const file of summary?.files || []) {
+            addEntry(file.path, file.toolDiff || '');
+        }
+        return entries;
+    },
+
+    getHistoryTaskChangePreviewEntries(card: HTMLElement | null | undefined, details: any[] = [], targetFile?: string): TaskChangePatchEntry[] {
+        const entries: TaskChangePatchEntry[] = [];
+        const seen = new Set<string>();
+        const addEntry = (filePath: string, patch: string) => {
+            const key = this.normalizeFileKey(filePath);
+            if (!patch || !key || seen.has(key)) return;
+            if (targetFile && !this.fileKeysMatch(filePath, targetFile)) return;
+            seen.add(key);
+            entries.push({ filePath, patch: String(patch).trim() });
+        };
+
+        for (const entry of splitUnifiedDiffByFile(this.getHistoryTaskChangesPatch(card, details))) {
+            addEntry(entry.filePath, entry.patch);
+        }
+        const files = Array.from(card?.querySelectorAll<HTMLTemplateElement>('template.task-changes-patch[data-kind="tool-patch"]') || []);
+        for (const node of files) {
+            addEntry(node.getAttribute('data-file') || '', node.content?.textContent || node.textContent || '');
+        }
+        return entries;
+    },
+
+    getTaskChangeUndoPatch(summary: TaskChangeSummary | null | undefined, targetFile: string): string {
+        return this.getTaskChangePreviewEntries(summary, targetFile)
+            .map(entry => entry.patch.trim())
+            .filter(Boolean)
+            .join('\n\n')
+            .trim();
+    },
+
+    openTaskChangePreview(title: string, entries: TaskChangePatchEntry[], statusEl?: HTMLElement | null, emptyMessage?: string): void {
+        if (!entries.length) {
+            if (statusEl) statusEl.textContent = emptyMessage || '没有可展示的文本 diff。';
+            return;
+        }
+        if (statusEl) statusEl.textContent = '';
+        const content = buildTaskChangePreviewDocument(title, entries);
+        vscode.openScratchDocument(title, content, 'diff', true);
+    },
+
+    openTaskChangeFileDiff(title: string, filePath: string, patch: string, statusEl?: HTMLElement | null, emptyMessage?: string): void {
+        const parsed = parseUnifiedDiffToContent(patch);
+        if (!parsed) {
+            if (statusEl) statusEl.textContent = emptyMessage || t('task.changes.preview.empty');
+            return;
+        }
+        if (statusEl) statusEl.textContent = '';
+        const extension = (String(filePath || '').match(/\.([A-Za-z0-9_-]+)$/)?.[1] || '').toLowerCase();
+        const language = extension === 'svg'
+            ? 'xml'
+            : extension === 'md'
+            ? 'markdown'
+            : ['ts', 'tsx', 'js', 'jsx', 'json', 'css', 'html', 'svg', 'py'].includes(extension)
+                ? extension
+                : 'plaintext';
+        vscode.openReadonlyDiff(title, filePath, parsed.before, parsed.after, language, true);
+    },
+
+    openTaskChangeReview(title: string, entries: TaskChangePatchEntry[], statusEl?: HTMLElement | null, emptyMessage?: string): void {
+        if (!entries.length) {
+            if (statusEl) statusEl.textContent = emptyMessage || t('task.changes.preview.empty');
+            return;
+        }
+        const items = entries
+            .map(entry => {
+                const parsed = parseUnifiedDiffToContent(entry.patch);
+                if (!parsed) return null;
+                return {
+                    filePath: entry.filePath,
+                    patch: entry.patch,
+                    before: parsed.before,
+                    after: parsed.after,
+                };
+            })
+            .filter((item): item is { filePath: string; patch: string; before: string; after: string } => !!item);
+        if (!items.length) {
+            if (statusEl) statusEl.textContent = emptyMessage || t('task.changes.preview.empty');
+            return;
+        }
+        if (statusEl) statusEl.textContent = '';
+        vscode.openDiffReview(title, items);
+    },
+
+    formatTaskChangeFileCount(count: number): string {
+        return count === 1 ? '1 file' : `${count} files`;
+    },
+
+    setTaskChangeCardState(card: HTMLElement, text = '', tone: 'info' | 'success' | 'error' | 'pending' = 'info'): void {
+        const badge = card.querySelector<HTMLElement>('.task-changes-card-state');
+        if (!badge) return;
+        badge.textContent = text;
+        badge.dataset.tone = text ? tone : '';
+    },
+
+    setTaskChangeStatus(card: HTMLElement, message = '', tone: 'info' | 'success' | 'error' | 'pending' = 'info'): void {
+        const statusEl = card.querySelector<HTMLElement>('.task-changes-status');
+        if (!statusEl) return;
+        statusEl.textContent = message;
+        statusEl.dataset.tone = message ? tone : '';
+    },
+
+    refreshTaskChangeCardOverview(card: HTMLElement): void {
+        const entries = Array.from(card.querySelectorAll<HTMLElement>('.task-change-entry'));
+        const totalCount = entries.length;
+        const activeEntries = entries.filter(entry => !entry.classList.contains('task-change-entry-undone'));
+        const remainingCount = activeEntries.length;
+        const added = activeEntries.reduce((sum, entry) => sum + (Number(entry.dataset.added || '0') || 0), 0);
+        const removed = activeEntries.reduce((sum, entry) => sum + (Number(entry.dataset.removed || '0') || 0), 0);
+
+        const titleMain = card.querySelector<HTMLElement>('.task-changes-title-main');
+        if (titleMain) {
+            if (remainingCount === totalCount) {
+                titleMain.textContent = `Edited ${this.formatTaskChangeFileCount(totalCount)}`;
+            } else if (remainingCount > 0) {
+                titleMain.textContent = `Remaining ${this.formatTaskChangeFileCount(remainingCount)} of ${this.formatTaskChangeFileCount(totalCount)}`;
+            } else {
+                titleMain.textContent = 'All changes in this card were undone';
+            }
+        }
+
+        const stats = card.querySelector<HTMLElement>('.task-changes-stats');
+        if (stats) {
+            stats.innerHTML = `<span class="diff-stats-add">+${added} lines</span> <span class="diff-stats-del">-${removed} lines</span>`;
+        }
+
+        card.classList.toggle('task-changes-undone', remainingCount === 0);
+    },
+
+    startTaskChangeUndo(card: HTMLElement, targetFile?: string): void {
+        card.dataset.undoPending = 'true';
+        card.dataset.pendingFile = targetFile || '';
+        card.dataset.awaitingRefresh = 'false';
+
+        const undoBtn = card.querySelector<HTMLButtonElement>('.task-changes-undo');
+        const reviewBtn = card.querySelector<HTMLButtonElement>('.task-changes-review');
+        if (undoBtn) {
+            undoBtn.dataset.defaultText = undoBtn.dataset.defaultText || undoBtn.textContent || 'Undo';
+            undoBtn.disabled = true;
+            undoBtn.textContent = 'Undoing...';
+        }
+        if (reviewBtn) reviewBtn.disabled = true;
+
+        if (targetFile) {
+            const entry = Array.from(card.querySelectorAll<HTMLElement>('.task-change-entry'))
+                .find(node => this.fileKeysMatch(node.dataset.file || '', targetFile));
+            const fileUndoBtn = entry?.querySelector<HTMLButtonElement>('.task-change-file-undo') || null;
+            entry?.classList.add('task-change-entry-pending');
+            if (fileUndoBtn) {
+                fileUndoBtn.dataset.defaultText = fileUndoBtn.dataset.defaultText || fileUndoBtn.textContent || '↶';
+                fileUndoBtn.disabled = true;
+                fileUndoBtn.textContent = '...';
+            }
+            this.setTaskChangeCardState(card, 'Undoing', 'pending');
+            this.setTaskChangeStatus(card, `Undoing ${targetFile}...`, 'pending');
+            return;
+        }
+
+        card.classList.add('task-changes-pending');
+        this.setTaskChangeCardState(card, 'Undoing', 'pending');
+        this.setTaskChangeStatus(card, 'Undoing changes from this card...', 'pending');
+    },
+
+    finishTaskChangeUndo(card: HTMLElement, targetFile?: string): void {
+        delete card.dataset.undoPending;
+        card.classList.remove('task-changes-pending');
+
+        const undoBtn = card.querySelector<HTMLButtonElement>('.task-changes-undo');
+        const reviewBtn = card.querySelector<HTMLButtonElement>('.task-changes-review');
+        if (undoBtn) {
+            undoBtn.textContent = undoBtn.dataset.defaultText || 'Undo';
+        }
+        if (reviewBtn) reviewBtn.disabled = false;
+
+        if (targetFile) {
+            const entry = Array.from(card.querySelectorAll<HTMLElement>('.task-change-entry'))
+                .find(node => this.fileKeysMatch(node.dataset.file || '', targetFile));
+            const fileUndoBtn = entry?.querySelector<HTMLButtonElement>('.task-change-file-undo') || null;
+            entry?.classList.remove('task-change-entry-pending');
+            if (fileUndoBtn && !entry?.classList.contains('task-change-entry-undone')) {
+                fileUndoBtn.textContent = fileUndoBtn.dataset.defaultText || '↶';
+            }
+        }
+    },
+
     findTaskChangeFile(map: Map<string, TaskChangeFile>, filePath: string): TaskChangeFile | undefined {
         return Array.from(map.values()).find(file => this.fileKeysMatch(file.path, filePath));
     },
@@ -1754,29 +2313,31 @@ export const Messages = {
     mergeToolEditedFilesIntoTaskSummary(summary: TaskChangeSummary): TaskChangeSummary {
         const map = new Map<string, TaskChangeFile>();
         for (const file of summary.files || []) {
-            map.set(file.path, { ...file, source: file.source || 'git' });
+            map.set(file.path, {
+                ...file,
+                source: file.source || 'git',
+                hasToolDiff: !!(file.hasToolDiff || (typeof file.toolDiff === 'string' && file.toolDiff.trim())),
+            });
         }
 
-        const latest = this.getLatestAssistantWithToolDiffs();
-        if (latest) {
-            for (const edited of this.collectEditedFiles(latest)) {
-                const existing = map.get(edited.path) || this.findTaskChangeFile(map, edited.path);
-                if (existing) {
-                    existing.added = Math.max(existing.added || 0, edited.added || 0);
-                    existing.removed = Math.max(existing.removed || 0, edited.removed || 0);
-                    existing.action = existing.action || edited.action;
-                    existing.hasToolDiff = existing.hasToolDiff || !!this.findToolDiffCard(edited.path);
-                    continue;
+        for (const entry of splitUnifiedDiffByFile(summary.patch || '')) {
+            const existing = map.get(entry.filePath) || this.findTaskChangeFile(map, entry.filePath);
+            const counts = countUnifiedDiffChanges(entry.patch);
+
+            if (existing) {
+                if ((!existing.added && counts.added) || (!existing.removed && counts.removed)) {
+                    existing.added = existing.added || counts.added || 0;
+                    existing.removed = existing.removed || counts.removed || 0;
                 }
-                map.set(edited.path, {
-                    path: edited.path,
-                    added: edited.added,
-                    removed: edited.removed,
-                    source: 'tool',
-                    action: edited.action,
-                    hasToolDiff: !!this.findToolDiffCard(edited.path),
-                });
+                continue;
             }
+
+            map.set(entry.filePath, {
+                path: entry.filePath,
+                added: counts.added || 0,
+                removed: counts.removed || 0,
+                source: 'git',
+            });
         }
 
         const files = Array.from(map.values()).sort((a, b) => a.path.localeCompare(b.path));
@@ -1799,25 +2360,77 @@ export const Messages = {
         card.setAttribute('data-task-change-id', summary.id);
         if (isToolFallback) card.setAttribute('data-tool-fallback', 'true');
         (card as any)._patch = summary.patch;
+        (card as any)._fileToolDiffs = Object.fromEntries(
+            (summary.files || [])
+                .filter(file => typeof file.toolDiff === 'string' && file.toolDiff.trim())
+                .map(file => [this.normalizeFileKey(file.path), String(file.toolDiff || '')]),
+        );
         if (summary.patch && summary.patch.length <= HISTORY_PATCH_MAX_CHARS) {
             const patchTemplate = createElement('template', 'task-changes-patch');
             patchTemplate.setAttribute('data-kind', 'git-patch');
             patchTemplate.textContent = summary.patch;
             card.appendChild(patchTemplate);
         }
+        for (const file of summary.files || []) {
+            if (!file.toolDiff || file.toolDiff.length > HISTORY_PATCH_MAX_CHARS) continue;
+            const patchTemplate = createElement('template', 'task-changes-patch');
+            patchTemplate.setAttribute('data-kind', 'tool-patch');
+            patchTemplate.setAttribute('data-file', file.path);
+            patchTemplate.textContent = file.toolDiff;
+            card.appendChild(patchTemplate);
+        }
+        for (const [fileKey, patch] of Object.entries((card as any)._fileToolDiffs || {})) {
+            if (!patch || String(patch).length > HISTORY_PATCH_MAX_CHARS) continue;
+            const hasTemplate = Array.from(card.querySelectorAll<HTMLTemplateElement>('template.task-changes-patch[data-kind="tool-patch"]'))
+                .some(node => this.normalizeFileKey(node.getAttribute('data-file') || '') === fileKey);
+            if (hasTemplate) continue;
+            const matchedFile = (summary.files || []).find(file => this.normalizeFileKey(file.path) === fileKey);
+            if (!matchedFile) continue;
+            const patchTemplate = createElement('template', 'task-changes-patch');
+            patchTemplate.setAttribute('data-kind', 'tool-patch');
+            patchTemplate.setAttribute('data-file', matchedFile.path);
+            patchTemplate.textContent = String(patch);
+            card.appendChild(patchTemplate);
+        }
 
         const fileCount = summary.files.length;
-        const fileText = fileCount === 1 ? '1 个文件' : `${fileCount} 个文件`;
-        const rows = summary.files.map(file => {
+        const fileText = this.formatTaskChangeFileCount(fileCount);
+        const hiddenFileCount = Math.max(0, fileCount - TASK_CHANGES_VISIBLE_FILES);
+        const patchCountMap = new Map<string, { added: number; removed: number }>();
+        for (const entry of splitUnifiedDiffByFile(summary.patch || '')) {
+            patchCountMap.set(this.normalizeFileKey(entry.filePath), countUnifiedDiffChanges(entry.patch));
+        }
+        for (const file of summary.files || []) {
+            if (!file.toolDiff) continue;
+            patchCountMap.set(this.normalizeFileKey(file.path), countUnifiedDiffChanges(file.toolDiff));
+        }
+        const normalizedFiles = (summary.files || []).map(file => {
+            const patchCounts = patchCountMap.get(this.normalizeFileKey(file.path));
+            return patchCounts
+                ? { ...file, added: patchCounts.added, removed: patchCounts.removed }
+                : file;
+        });
+        summary = {
+            ...summary,
+            files: normalizedFiles,
+            totalAdded: normalizedFiles.reduce((sum, file) => sum + (file.added || 0), 0),
+            totalRemoved: normalizedFiles.reduce((sum, file) => sum + (file.removed || 0), 0),
+        };
+        const rows = summary.files.map((file, index) => {
             const binary = file.binary ? '<span class="task-change-binary">binary</span>' : '';
             const staged = file.staged ? '<span class="task-change-binary">staged</span>' : '';
             const external = file.source === 'tool' ? '<span class="task-change-binary">tool</span>' : '';
             const action = file.action ? `<span class="task-change-binary">${escapeHtml(file.action)}</span>` : '';
-            return `<button class="task-change-row" type="button" data-file="${escapeHtml(file.path)}">` +
+            const collapsedClass = index >= TASK_CHANGES_VISIBLE_FILES ? ' task-change-row-collapsed' : '';
+            return `<div class="task-change-entry${collapsedClass}" data-file="${escapeHtml(file.path)}" data-added="${file.added || 0}" data-removed="${file.removed || 0}">` +
+                `<button class="task-change-row" type="button" data-file="${escapeHtml(file.path)}">` +
                 `<span class="task-change-path">${escapeHtml(file.path)}</span>` +
                 `<span class="task-change-row-stats">${binary}${staged}${external}${action}<span class="diff-stats-add">+${file.added} lines</span> <span class="diff-stats-del">-${file.removed} lines</span></span>` +
-                `</button>`;
+                `</div>`;
         }).join('\n');
+        const fileToggle = hiddenFileCount > 0
+            ? `<button class="task-changes-files-toggle" type="button" data-expanded="false" data-hidden-count="${hiddenFileCount}"></button>`
+            : '';
 
         card.insertAdjacentHTML('beforeend', `
             <div class="task-changes-head">
@@ -1827,129 +2440,113 @@ export const Messages = {
                     <div class="task-changes-stats"><span class="diff-stats-add">+${summary.totalAdded} lines</span> <span class="diff-stats-del">-${summary.totalRemoved} lines</span></div>
                 </div>
                 <div class="task-changes-actions">
-                    <button class="task-changes-undo" type="button">撤销</button>
                     <button class="task-changes-review" type="button">审核</button>
                 </div>
             </div>
             ${summary.warning ? `<div class="task-changes-warning">${escapeHtml(summary.warning)}</div>` : ''}
             <div class="task-changes-list">${rows}</div>
-            <div class="task-changes-diff" hidden></div>
-            <div class="task-changes-status"></div>
+            ${fileToggle}
+            <div class="task-changes-status" aria-live="polite"></div>
         `);
 
         messagesDiv.appendChild(card);
+        this.bindTaskChangeListToggle(card);
         smartScroll(messagesDiv);
 
         const reviewBtn = card.querySelector<HTMLButtonElement>('.task-changes-review');
-        const undoBtn = card.querySelector<HTMLButtonElement>('.task-changes-undo');
-        const diffEl = card.querySelector<HTMLElement>('.task-changes-diff');
         const statusEl = card.querySelector<HTMLElement>('.task-changes-status');
-        if (undoBtn && (summary.canUndo === false || !summary.patch)) {
-            undoBtn.disabled = true;
-            undoBtn.title = summary.warning || (!summary.patch ? '没有可安全反向应用的 Git patch。' : 'Cannot safely undo this diff.');
+        const titleWrap = card.querySelector<HTMLElement>('.task-changes-title');
+        if (titleWrap && !titleWrap.querySelector('.task-changes-title-main')) {
+            titleWrap.firstElementChild?.classList.add('task-changes-title-main');
         }
-        if (reviewBtn && !summary.patch && !summary.files.some(file => file.hasToolDiff)) {
+        if (reviewBtn) reviewBtn.textContent = t('task.changes.review');
+        card.dataset.canUndo = 'false';
+        if (reviewBtn && !summary.patch && !summary.files.some(file => file.hasToolDiff || !!file.toolDiff)) {
             reviewBtn.disabled = true;
-            reviewBtn.title = '没有可展示的文本 diff。';
+            reviewBtn.title = t('task.changes.preview.empty');
         }
-
-        const ensureDefaultDiff = () => {
-            if (!diffEl) return;
-            if (summary.patch) {
-                diffEl.innerHTML = '';
-                renderMessageGitDiff(diffEl, summary.patch);
-                return;
-            }
-            diffEl.innerHTML = '';
-            for (const toolDiff of this.cloneAllToolDiffs()) diffEl.appendChild(toolDiff);
-        };
 
         const toggleReview = (targetFile?: string) => {
-            if (!diffEl) return;
-            const opening = diffEl.hidden;
-            if (opening && !diffEl.hasChildNodes()) {
-                ensureDefaultDiff();
-            }
-            if (targetFile) {
-                diffEl.hidden = false;
-            } else {
-                diffEl.hidden = !opening;
-            }
-            if (reviewBtn) reviewBtn.textContent = diffEl.hidden ? '审核' : '收起';
-            if (targetFile && !diffEl.hidden) {
-                let header = Array.from(diffEl.querySelectorAll<HTMLElement>('.diff-file-header'))
-                    .find(el => this.fileKeysMatch(el.dataset.file || '', targetFile));
-                if (!header && summary.patch) {
-                    ensureDefaultDiff();
-                    header = Array.from(diffEl.querySelectorAll<HTMLElement>('.diff-file-header'))
-                        .find(el => this.fileKeysMatch(el.dataset.file || '', targetFile));
-                }
-                if (header) {
-                    header.scrollIntoView({ block: 'nearest' });
-                    if (statusEl) statusEl.textContent = '';
-                } else if (statusEl) {
-                    const toolDiff = this.cloneToolDiffForFile(targetFile);
-                    if (toolDiff) {
-                        diffEl.innerHTML = '';
-                        diffEl.appendChild(toolDiff);
-                        statusEl.textContent = `${targetFile} 来自本轮工具记录；该 diff 可查看，但不属于当前 Git patch 撤销范围。`;
-                    } else {
-                        statusEl.textContent = `${targetFile} 来自本轮工具记录，但没有可回放的文本 diff。`;
-                    }
-                }
-            }
-            smartScroll(messagesDiv);
+            const entries = this.getTaskChangePreviewEntries(summary, targetFile);
+            const title = targetFile
+                ? `MiMo Diff - ${targetFile}`
+                : t('task.changes.preview.title').replace('{count}', String(summary.files.length));
+            const emptyMessage = targetFile
+                ? t('task.changes.preview.empty.file').replace('{file}', targetFile)
+                : t('task.changes.preview.empty');
+            this.openTaskChangeReview(title, entries, statusEl, emptyMessage);
         };
 
         reviewBtn?.addEventListener('click', () => toggleReview());
         card.querySelectorAll('.task-change-row').forEach(row => {
             row.addEventListener('click', () => {
                 const targetFile = (row as HTMLElement).dataset.file || '';
-                toggleReview(targetFile);
+                const entries = this.getTaskChangePreviewEntries(summary, targetFile);
+                this.openTaskChangeFileDiff(
+                    `MiMo Diff - ${targetFile}`,
+                    targetFile,
+                    entries[0]?.patch || '',
+                    statusEl,
+                    t('task.changes.preview.empty.file').replace('{file}', targetFile),
+                );
             });
-        });
-        undoBtn?.addEventListener('click', () => {
-            if (summary.canUndo === false) return;
-            if (!confirm('撤销本次卡片中的所有未提交改动？')) return;
-            undoBtn.disabled = true;
-            if (reviewBtn) reviewBtn.disabled = true;
-            if (statusEl) statusEl.textContent = '正在撤销...';
-            vscode.taskChangesUndo(summary.id, summary.patch);
         });
         this.scheduleHistorySnapshot();
     },
 
-    handleTaskChangesUndoResult(result: { id?: string; ok?: boolean; error?: string }): void {
-        const id = String(result?.id || '');
-        const card = document.querySelector<HTMLElement>(`.task-changes-card[data-task-change-id="${CSS.escape(id)}"]`);
-        if (!card) return;
-        const statusEl = card.querySelector<HTMLElement>('.task-changes-status');
-        const undoBtn = card.querySelector<HTMLButtonElement>('.task-changes-undo');
-        const reviewBtn = card.querySelector<HTMLButtonElement>('.task-changes-review');
-        if (result.ok) {
-            card.classList.add('task-changes-undone');
-            if (statusEl) statusEl.textContent = '已撤销本次改动。';
-        } else {
-            if (undoBtn) undoBtn.disabled = false;
-            if (reviewBtn) reviewBtn.disabled = false;
-            if (statusEl) statusEl.textContent = `撤销失败：${result.error || 'patch 无法反向应用'}`;
-        }
+    buildToolDiffCardFromPatch(summary: TaskChangeSummary | null | undefined, filePath: string): HTMLElement | null {
+        const file = (summary?.files || []).find(item => this.fileKeysMatch(item.path, filePath));
+        const patch = file?.toolDiff || '';
+        if (!patch) return null;
+        const card = createElement('div', 'diff-card task-tool-diff expanded');
+        card.setAttribute('data-file', file.path || filePath);
+        this.renderGitDiff(card, patch);
+        return card;
+    },
+
+    handleTaskChangesUndoResult(_result: { id?: string; ok?: boolean; error?: string; filePath?: string }): void {
+        // Undo is intentionally disabled for task change cards; keep handler as a no-op for compatibility.
     },
 
     handleTaskChangesRefresh(_summary: TaskChangeSummary | null): void {
-        // The active card already reflects the undo result. This hook is reserved
-        // for a future live refresh if staged/untracked changes are added.
+        // Undo is intentionally disabled for task change cards; keep handler as a no-op for compatibility.
     },
 
+    getLiveTaskChangeCards(): HTMLElement[] {
+        return Array.from(document.querySelectorAll<HTMLElement>('.task-changes-card'))
+            .filter(card => !card.classList.contains('history-message'));
+    },
+
+    refreshLatestTaskChangeUndoState(): void {
+        const cards = this.getLiveTaskChangeCards();
+        cards.forEach(card => {
+            card.dataset.canUndo = 'false';
+            card.classList.remove('task-changes-undone', 'task-changes-pending', 'task-changes-archived');
+        });
+    },
     handleError(error: string): void {
+        const normalizedError = String(error || '').trim();
+        if (normalizedError === '(stopped by user)' || /^aborted$/i.test(normalizedError)) {
+            this.addSystemMessage('Stopped this task manually.', 'manual-stop');
+            store.set('streamingMsg', null);
+            store.set('rawHtml', '');
+            document.querySelectorAll<HTMLElement>('.live-progress-card[data-active="true"]').forEach(card => card.setAttribute('data-active', 'false'));
+            store.set('planExecutionActive', false);
+            return;
+        }
         // Mark thinking as done on error too
         this._markThinkingDone();
 
         const messagesDiv = document.getElementById('messages')!;
         const err = createElement('div', 'msg-error');
-        const errText = createElement('span', 'error-text');
-        errText.textContent = error;
-        err.appendChild(errText);
+        if (looksLikeConfigOrApiError(error)) {
+            err.classList.add('msg-error-rich');
+            err.innerHTML = renderFriendlyErrorHtml(error);
+        } else {
+            const errText = createElement('span', 'error-text');
+            errText.textContent = error;
+            err.appendChild(errText);
+        }
 
         const lastUserMsg = store.get('lastUserMsg');
         if (lastUserMsg) {
@@ -2017,17 +2614,23 @@ export const Messages = {
                 ].filter(Boolean).join('\n');
                 drawer.appendChild(header);
                 const body = createElement('div', 'execution-drawer-body');
-                body.appendChild(this.renderHistoryProcessOverview(meta.details || []));
-                body.appendChild(this.renderHistoryExecutionDetails(meta.details || []));
                 drawer.appendChild(body);
+                (drawer as any)._detailsHydrated = false;
+                const ensureDrawerDetails = () => {
+                    if ((drawer as any)._detailsHydrated) return;
+                    body.appendChild(this.renderHistoryProcessOverview(meta.details || []));
+                    body.appendChild(this.renderHistoryExecutionDetails(meta.details || []));
+                    (drawer as any)._detailsHydrated = true;
+                };
                 header.addEventListener('click', () => {
                     drawer.classList.toggle('open');
+                    if (drawer.classList.contains('open')) ensureDrawerDetails();
                 });
                 msg.appendChild(drawer);
             }
 
             const content = createElement('div', 'md-content');
-            content.innerHTML = this.enhanceTaskChecklists(this.stripRawToolCalls(turn.assistantHtml || ''));
+            content.innerHTML = formatAssistantBodyHtml(turn.assistantHtml || '');
             msg.appendChild(content);
             this.rebindHistoryCopyButtons(msg);
             this.attachAssistantActions(
@@ -2048,7 +2651,7 @@ export const Messages = {
             this.sanitizeHistorySnapshot(userWrap);
             const userEl = userWrap.firstElementChild as HTMLElement | null;
             if (userEl) {
-                userEl.classList.add('history-message');
+                this.rehydrateHistorySnapshotUserBubble(userEl);
                 messagesDiv.appendChild(userEl);
             } else {
                 const user = turn.user || {};
@@ -2071,7 +2674,7 @@ export const Messages = {
         wrap.querySelectorAll<HTMLElement>('.tool-line[data-status="running"], .tool-card[data-status="running"]').forEach(el => {
             el.setAttribute('data-status', 'success');
         });
-        this.rebindHistorySnapshotInteractions(wrap, turn.meta?.details || []);
+        this.rebindHistorySnapshotInteractions(wrap, turn.meta?.details || [], turn.snapshot?.taskChanges || []);
         this.rebindHistoryCopyButtons(wrap);
         for (const node of nodes) {
             if (node.classList.contains('msg-assistant')) {
@@ -2087,6 +2690,13 @@ export const Messages = {
             messagesDiv.appendChild(node);
         }
         this.renderHistoryDiffFallback(turn, messagesDiv);
+    },
+
+    rehydrateHistorySnapshotUserBubble(bubble: HTMLElement): void {
+        if (!bubble.classList.contains('msg-user')) return;
+        bubble.classList.add('history-message');
+        this.rebindHistoryCopyButtons(bubble);
+        installUserBubbleCollapse(bubble);
     },
 
     renderHistoryDiffFallback(turn: any, messagesDiv: HTMLElement): void {
@@ -2131,11 +2741,8 @@ export const Messages = {
                 e.stopPropagation();
                 const bubble = btn.closest('.msg');
                 if (!bubble) return;
-                const text = Array.from(bubble.querySelectorAll<HTMLElement>('.text-content'))
-                    .map(el => el.textContent || '')
-                    .filter(Boolean)
-                    .join('\n');
-                navigator.clipboard.writeText(text).then(() => {
+                const payload = extractBubbleClipboardPayload(bubble);
+                writeClipboardPayload(payload).then(() => {
                     setCopyButtonState(btn, true);
                     setTimeout(() => setCopyButtonState(btn, false), 1600);
                 }).catch(() => {});
@@ -2156,6 +2763,14 @@ export const Messages = {
                 }).catch(() => {});
             });
         });
+
+        root.querySelectorAll<HTMLImageElement>('.msg-img').forEach(img => {
+            img.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const src = img.getAttribute('src') || '';
+                if (src) bus.emit('showOverlay', src);
+            });
+        });
     },
 
     sanitizeHistorySnapshot(root: HTMLElement): void {
@@ -2170,12 +2785,13 @@ export const Messages = {
             for (const attr of Array.from(el.attributes)) {
                 const name = attr.name.toLowerCase();
                 const value = (attr.value || '').trim();
+                const safeImageDataUrl = /^data:image\/(?:png|jpe?g|webp|gif);base64,[a-z0-9+/=\s]+$/i.test(value);
                 if (
                     name.startsWith('on') ||
                     name === 'srcdoc' ||
                     name === 'data-reasoning-text' ||
-                    urlAttrs.has(name) && !this.isSafeHistorySnapshotUrl(value) ||
-                    /^\s*(?:javascript|data|vbscript|file|blob):/i.test(value)
+                    urlAttrs.has(name) && !this.isSafeHistorySnapshotUrl(value) && !safeImageDataUrl ||
+                    (/^\s*(?:javascript|data|vbscript|file|blob):/i.test(value) && !safeImageDataUrl)
                 ) {
                     el.removeAttribute(attr.name);
                 }
@@ -2199,15 +2815,52 @@ export const Messages = {
         return /(?:chars?\s+captured|Click to expand|已捕获|点击展开)/i.test(String(text || ''));
     },
 
-    rebindHistorySnapshotInteractions(root: HTMLElement, details: any[] = []): void {
+    hydrateHistoryTaskChangeSnapshotCard(card: HTMLElement, snapshot?: HistoryTaskChangeSnapshot): void {
+        if (!snapshot) return;
+        if (snapshot.gitPatch) {
+            (card as any)._patch = snapshot.gitPatch;
+            if (!card.querySelector('template.task-changes-patch[data-kind="git-patch"]')) {
+                const patchTemplate = createElement('template', 'task-changes-patch');
+                patchTemplate.setAttribute('data-kind', 'git-patch');
+                patchTemplate.textContent = snapshot.gitPatch;
+                card.prepend(patchTemplate);
+            }
+        }
+        const toolDiffs = { ...((card as any)._fileToolDiffs || {}) } as Record<string, string>;
+        for (const entry of snapshot.toolPatches || []) {
+            const key = this.normalizeFileKey(entry.filePath);
+            if (!key || !entry.patch) continue;
+            toolDiffs[key] = entry.patch;
+            const hasTemplate = Array.from(card.querySelectorAll<HTMLTemplateElement>('template.task-changes-patch[data-kind="tool-patch"]'))
+                .some(node => this.fileKeysMatch(node.getAttribute('data-file') || '', entry.filePath));
+            if (!hasTemplate) {
+                const patchTemplate = createElement('template', 'task-changes-patch');
+                patchTemplate.setAttribute('data-kind', 'tool-patch');
+                patchTemplate.setAttribute('data-file', entry.filePath);
+                patchTemplate.textContent = entry.patch;
+                card.appendChild(patchTemplate);
+            }
+        }
+        if (Object.keys(toolDiffs).length > 0) {
+            (card as any)._fileToolDiffs = toolDiffs;
+        }
+    },
+
+    rebindHistorySnapshotInteractions(root: HTMLElement, details: any[] = [], snapshotTaskChanges: HistoryTaskChangeSnapshot[] = []): void {
         const savedThoughts = (Array.isArray(details) ? details : [])
             .filter(d => d?.type === 'reasoning' && String(d.body || '').trim());
         let thoughtIndex = 0;
+
+        root.querySelectorAll<HTMLElement>('.msg-user').forEach(bubble => {
+            this.rehydrateHistorySnapshotUserBubble(bubble);
+        });
+
         root.querySelectorAll<HTMLButtonElement>('.execution-drawer-header').forEach(header => {
             header.addEventListener('click', () => {
                 header.closest('.execution-drawer')?.classList.toggle('open');
             });
         });
+
         root.querySelectorAll<HTMLElement>('.thinking-block').forEach(block => {
             const visibleText = String(block.textContent || '').trim();
             let reasoningText = (block as any)._reasoningText || block.dataset.reasoningText || '';
@@ -2234,6 +2887,7 @@ export const Messages = {
                 this.renderThinkingBlock(block, true, false);
             });
         });
+
         root.querySelectorAll<HTMLElement>('.thinking-toggle').forEach(toggle => {
             const dot = toggle.querySelector('.thinking-dot');
             const lbl = toggle.querySelector('span:nth-child(2)') as HTMLElement | null;
@@ -2247,76 +2901,54 @@ export const Messages = {
                 this.renderThinkingBlock(block, open, false);
             });
         });
+
         root.querySelectorAll<HTMLElement>('.diff-card-header').forEach(header => {
             header.addEventListener('click', () => {
                 header.closest('.diff-card')?.classList.toggle('expanded');
             });
         });
-        root.querySelectorAll<HTMLButtonElement>('.task-changes-undo').forEach(btn => {
-            btn.disabled = true;
-            btn.title = '历史记录中的改动卡片仅用于回放查看，不能执行撤销。';
+
+        const taskChangeCards = Array.from(root.querySelectorAll<HTMLElement>('.task-changes-card'));
+        taskChangeCards.forEach((card, index) => {
+            this.hydrateHistoryTaskChangeSnapshotCard(card, snapshotTaskChanges[index]);
+            this.bindTaskChangeListToggle(card);
         });
+
         root.querySelectorAll<HTMLButtonElement>('.task-changes-review').forEach(btn => {
             const card = btn.closest('.task-changes-card') as HTMLElement | null;
             const diffEl = card?.querySelector<HTMLElement>('.task-changes-diff');
-            if (!this.getHistoryTaskChangesPatch(card, details) && diffEl && !diffEl.hasChildNodes()) {
+            const hasToolPatch = !!card?.querySelector('template.task-changes-patch[data-kind="tool-patch"]');
+            if (!this.getHistoryTaskChangesPatch(card, details) && !hasToolPatch && diffEl && !diffEl.hasChildNodes()) {
                 btn.disabled = true;
-                btn.title = 'No replayable text diff was saved in this history record.';
+                btn.title = t('task.changes.preview.empty.history');
             }
             btn.addEventListener('click', () => {
-                if (!diffEl) return;
-                this.ensureHistoryTaskChangesDiff(card, diffEl, details);
-                diffEl.hidden = !diffEl.hidden;
-                btn.textContent = diffEl.hidden ? '审核' : '收起';
+                const entries = this.getHistoryTaskChangePreviewEntries(card, details);
+                const fileCount = entries.length || card?.querySelectorAll('.task-change-row').length || 0;
+                this.openTaskChangeReview(
+                    t('task.changes.preview.title').replace('{count}', String(fileCount)),
+                    entries,
+                    card?.querySelector<HTMLElement>('.task-changes-status'),
+                    t('task.changes.preview.empty.history'),
+                );
             });
         });
-        root.querySelectorAll<HTMLButtonElement>('.task-changes-review-legacy-disabled').forEach(btn => {
-            const card = btn.closest('.task-changes-card') as HTMLElement | null;
-            const diffEl = card?.querySelector<HTMLElement>('.task-changes-diff');
-            btn.addEventListener('click', () => {
-                if (!diffEl) return;
-                diffEl.hidden = !diffEl.hidden;
-                btn.textContent = diffEl.hidden ? '审核' : '收起';
-            });
-        });
+
         root.querySelectorAll<HTMLButtonElement>('.task-change-row').forEach(row => {
             row.addEventListener('click', () => {
                 const card = row.closest('.task-changes-card') as HTMLElement | null;
-                const diffEl = card?.querySelector<HTMLElement>('.task-changes-diff');
-                if (!diffEl) return;
-                this.ensureHistoryTaskChangesDiff(card, diffEl, details);
-                diffEl.hidden = false;
                 const targetFile = row.dataset.file || '';
-                const header = Array.from(diffEl.querySelectorAll<HTMLElement>('.diff-file-header'))
-                    .find(el => this.fileKeysMatch(el.dataset.file || el.textContent || '', targetFile));
-                const statusEl = card?.querySelector<HTMLElement>('.task-changes-status');
-                if (header) {
-                    header.scrollIntoView({ block: 'nearest' });
-                    if (statusEl) statusEl.textContent = '';
-                } else if (statusEl) {
-                    statusEl.textContent = `${targetFile} 没有保存可回放的文本 diff。`;
-                }
-                const reviewBtn = card?.querySelector<HTMLButtonElement>('.task-changes-review');
-                if (reviewBtn) reviewBtn.textContent = '收起';
-            });
-        });
-        root.querySelectorAll<HTMLButtonElement>('.task-change-row-legacy-disabled').forEach(row => {
-            row.addEventListener('click', () => {
-                const card = row.closest('.task-changes-card') as HTMLElement | null;
-                const diffEl = card?.querySelector<HTMLElement>('.task-changes-diff');
-                if (!diffEl) return;
-                this.ensureHistoryTaskChangesDiff(card, diffEl, details);
-                diffEl.hidden = false;
-                const targetFile = row.dataset.file || '';
-                const header = Array.from(diffEl.querySelectorAll<HTMLElement>('.diff-file-header'))
-                    .find(el => this.fileKeysMatch(el.dataset.file || el.textContent || '', targetFile));
-                header?.scrollIntoView({ block: 'nearest' });
-                const reviewBtn = card?.querySelector<HTMLButtonElement>('.task-changes-review');
-                if (reviewBtn) reviewBtn.textContent = '收起';
+                const entries = this.getHistoryTaskChangePreviewEntries(card, details, targetFile);
+                this.openTaskChangeFileDiff(
+                    `MiMo Diff - ${targetFile}`,
+                    targetFile,
+                    entries[0]?.patch || '',
+                    card?.querySelector<HTMLElement>('.task-changes-status'),
+                    t('task.changes.preview.empty.file.history').replace('{file}', targetFile),
+                );
             });
         });
     },
-
     getHistoryTaskChangesPatch(card: HTMLElement | null | undefined, details: any[] = []): string {
         if (!card) return '';
         const runtimePatch = (card as any)._patch;
@@ -2330,6 +2962,37 @@ export const Messages = {
         const detailPatch = this.findHistoryDiffFromDetails(details);
         if (detailPatch) (card as any)._patch = detailPatch;
         return detailPatch;
+    },
+
+    getHistoryTaskChangesToolPatch(card: HTMLElement | null | undefined, filePath: string): string {
+        if (!card) return '';
+        const key = this.normalizeFileKey(filePath);
+        const cache = (card as any)._fileToolDiffs;
+        if (cache && typeof cache[key] === 'string' && cache[key]) return cache[key];
+        const tpl = Array.from(card.querySelectorAll<HTMLTemplateElement>('template.task-changes-patch[data-kind="tool-patch"]'))
+            .find(node => this.fileKeysMatch(node.getAttribute('data-file') || '', filePath));
+        const patch = tpl?.content?.textContent || tpl?.textContent || '';
+        if (patch) {
+            (card as any)._fileToolDiffs = { ...(cache || {}), [key]: patch };
+        }
+        return patch;
+    },
+
+    ensureHistoryTaskChangesToolPatchTemplate(card: HTMLElement | null | undefined, filePath: string): string {
+        if (!card) return '';
+        const existing = Array.from(card.querySelectorAll<HTMLTemplateElement>('template.task-changes-patch[data-kind="tool-patch"]'))
+            .find(node => this.fileKeysMatch(node.getAttribute('data-file') || '', filePath));
+        if (existing) {
+            return existing.content?.textContent || existing.textContent || '';
+        }
+        const patch = this.getHistoryTaskChangesToolPatch(card, filePath);
+        if (!patch) return '';
+        const tpl = createElement('template', 'task-changes-patch');
+        tpl.setAttribute('data-kind', 'tool-patch');
+        tpl.setAttribute('data-file', filePath);
+        tpl.textContent = patch;
+        card.appendChild(tpl);
+        return patch;
     },
 
     findHistoryDiffFromDetails(details: any[] = []): string {
@@ -2441,11 +3104,17 @@ export const Messages = {
                 `<span class="history-detail-title">${title}</span>` +
                 (preview ? `<span class="history-detail-preview">${escapeHtml(preview)}</span>` : '') +
                 (elapsed > 0 ? `<span class="history-detail-time">${this.formatDuration(elapsed)}</span>` : '');
-            const body = createElement('pre', 'history-detail-body');
             const bodyText = detail.type === 'reasoning'
                 ? sanitizeMessageReasoningForDisplay(String(detail.body || ''), false)
                 : String(detail.body || '').trim() || '(empty)';
+            const isFriendlyError = !!detail.isError && looksLikeConfigOrApiError(bodyText);
+            const body = isFriendlyError
+                ? createElement('div', 'history-detail-body history-detail-body-rich')
+                : createElement('pre', 'history-detail-body');
             body.textContent = bodyText;
+            if (isFriendlyError) {
+                body.innerHTML = renderFriendlyErrorHtml(bodyText);
+            }
             if (detail.isError) item.classList.add('history-detail-error');
             item.appendChild(summary);
             item.appendChild(body);
@@ -2590,6 +3259,11 @@ export const Messages = {
     renderWorkflowDetails(state: WorkflowUiState): void {
         const phasesDiv = state.card.querySelector('.workflow-phases') as HTMLElement | null;
         if (!phasesDiv || (phasesDiv as any)._renderedDetails) return;
+        if (!state.ended && state.totalTasks > 18) {
+            phasesDiv.innerHTML = `<div class="workflow-detail-placeholder">Live workflow details are deferred until the workflow finishes to keep the UI responsive.</div>`;
+            (phasesDiv as any)._renderedDetails = true;
+            return;
+        }
         phasesDiv.replaceChildren();
         state.phases.forEach((phase, phaseIndex) => {
             const phaseDiv = createElement('div', 'workflow-phase');
@@ -2699,30 +3373,194 @@ export const Messages = {
         smartScroll(document.getElementById('messages')!);
     },
 
+    bindDeferredToolResult(card: HTMLElement, render: () => void): void {
+        if ((card as any)._deferredToolBound) return;
+
+        const ensureRendered = () => {
+            if ((card as any)._deferredToolRendered || (card as any)._deferredToolRendering) return;
+            (card as any)._deferredToolRendering = true;
+            const result = card.querySelector<HTMLElement>('.tool-result');
+            result?.classList.add('is-loading');
+            requestAnimationFrame(() => {
+                try {
+                    render();
+                    (card as any)._deferredToolRendered = true;
+                } finally {
+                    (card as any)._deferredToolRendering = false;
+                    result?.classList.remove('is-loading');
+                }
+            });
+        };
+
+        card.addEventListener('cardCollapseChange', ((event: Event) => {
+            const detail = (event as CustomEvent<{ collapsed?: boolean }>).detail;
+            if (!detail?.collapsed) ensureRendered();
+        }) as EventListener);
+
+        if (!card.classList.contains('collapsed')) ensureRendered();
+        (card as any)._deferredToolBound = true;
+    },
+
     // Edit preview with Accept/Reject
-    renderEditPreviewCard(previewId: string, filePath: string, oldText: string, newText: string, matchCount: number): void {
+    renderEditPreviewCard(
+        previewId: string,
+        filePath: string,
+        oldText: string,
+        newText: string,
+        matchCount: number,
+        lineStart?: number,
+        _lineEnd?: number,
+    ): void {
         const messagesDiv = document.getElementById('messages')!;
-        const card = createElement('div', 'tool-card edit-preview-card expanded');
+        const card = createElement('div', 'tool-card edit-preview-card');
         card.setAttribute('data-status', 'running');
         card.setAttribute('data-tool', 'edit_file');
         card.setAttribute('data-file', filePath);
         card.setAttribute('data-action', 'edit');
+        {
+            const oldLinesLite = oldText.split('\n');
+            const newLinesLite = newText.split('\n');
+            const canPrecomputeCounts = oldLinesLite.length * newLinesLite.length <= 4000
+                && (oldText.length + newText.length) <= 24_000;
+            const tinyDiff = canPrecomputeCounts ? this.computeDiff(oldLinesLite, newLinesLite) : [];
+            const textChanged = oldText !== newText;
+            const addedLite = tinyDiff.length > 0
+                ? tinyDiff.filter(d => d.type === 'add').length
+                : textChanged
+                    ? Math.max(1, newLinesLite.length - oldLinesLite.length, 0)
+                    : 0;
+            const removedLite = tinyDiff.length > 0
+                ? tinyDiff.filter(d => d.type === 'del').length
+                : textChanged
+                    ? Math.max(1, oldLinesLite.length - newLinesLite.length, 0)
+                    : 0;
+            card.setAttribute('data-added', String(addedLite));
+            card.setAttribute('data-removed', String(removedLite));
 
-        // Build diff HTML
+            card.innerHTML = `<div class="tool-header">` +
+                `<div class="tool-icon-wrapper"><div class="tool-icon">E</div><div class="tool-status-dot"></div></div>` +
+                `<div class="tool-info"><span class="tool-name">edit_file</span><span class="tool-args">${escapeHtml(filePath)}</span></div>` +
+                `<div class="tool-meta"><span class="tool-elapsed">Preview</span><span class="tool-chevron">▾</span></div>` +
+                `</div><div class="tool-body"><div class="tool-result"><div class="diff-line"><span class="diff-info">Expand to render the edit preview.</span></div></div>` +
+                `<div class="edit-preview-actions"><button class="edit-accept-btn">Accept</button><button class="edit-reject-btn">Reject</button></div></div>`;
+
+            const renderDiff = () => {
+                const result = card.querySelector<HTMLElement>('.tool-result');
+                if (!result) return;
+
+                const shouldRenderDetailedDiff = oldLinesLite.length * newLinesLite.length <= 20000
+                    && (oldText.length + newText.length) <= 120000;
+                const diffLite = shouldRenderDetailedDiff ? (tinyDiff.length > 0 ? tinyDiff : this.computeDiff(oldLinesLite, newLinesLite)) : [];
+                const exactAdded = diffLite.length > 0
+                    ? diffLite.filter(d => d.type === 'add').length
+                    : addedLite;
+                const exactRemoved = diffLite.length > 0
+                    ? diffLite.filter(d => d.type === 'del').length
+                    : removedLite;
+                card.setAttribute('data-added', String(exactAdded));
+                card.setAttribute('data-removed', String(exactRemoved));
+
+                const startBaseLite = Number.isFinite(Number(lineStart)) && Number(lineStart) > 0 ? Math.floor(Number(lineStart)) - 1 : 0;
+                let oldLineNumLite = startBaseLite;
+                let newLineNumLite = startBaseLite;
+                const maxShowLite = Math.min(diffLite.length, 12);
+                let diffHtmlLite = `<div class="diff-header-line"><span class="diff-stats">+${exactAdded} -${exactRemoved}</span><span class="diff-match">${matchCount} match(es)</span></div>`;
+                if (diffLite.length === 0) {
+                    diffHtmlLite += `<div class="diff-line"><span class="diff-info">Large edit preview kept collapsed for performance.</span></div>`;
+                } else {
+                    for (const part of diffLite.slice(0, maxShowLite)) {
+                        if (part.type === 'del') {
+                            oldLineNumLite++;
+                            diffHtmlLite += `<div class="diff-line"><span class="diff-ln">${oldLineNumLite}</span><span class="diff-del">- ${escapeHtml(part.text).substring(0, 140)}</span></div>`;
+                        } else if (part.type === 'add') {
+                            newLineNumLite++;
+                            diffHtmlLite += `<div class="diff-line"><span class="diff-ln">${newLineNumLite}</span><span class="diff-add">+ ${escapeHtml(part.text).substring(0, 140)}</span></div>`;
+                        } else {
+                            oldLineNumLite++;
+                            newLineNumLite++;
+                            diffHtmlLite += `<div class="diff-line"><span class="diff-ln">${newLineNumLite}</span><span class="diff-ctx">${escapeHtml(part.text).substring(0, 140)}</span></div>`;
+                        }
+                    }
+                    if (diffLite.length > maxShowLite) {
+                        diffHtmlLite += `<div class="diff-line"><span class="diff-ln">...</span><span class="diff-info">... ${diffLite.length - maxShowLite} more lines</span></div>`;
+                    }
+                }
+                result.innerHTML = diffHtmlLite;
+            };
+
+            const acceptBtnLite = card.querySelector('.edit-accept-btn');
+            if (acceptBtnLite) acceptBtnLite.addEventListener('click', () => {
+                vscode.editConfirm(previewId);
+                card.setAttribute('data-status', 'success');
+                const dot = card.querySelector('.tool-status-dot') as HTMLElement | null;
+                if (dot) dot.style.background = 'var(--vscode-testing-iconPassed, #4ec9b0)';
+                const elapsed = card.querySelector('.tool-elapsed') as HTMLElement | null;
+                if (elapsed) elapsed.textContent = 'Applied';
+                const actions = card.querySelector('.edit-preview-actions') as HTMLElement | null;
+                actions?.remove();
+                card.classList.add('collapsed');
+            });
+
+            const rejectBtnLite = card.querySelector('.edit-reject-btn');
+            if (rejectBtnLite) rejectBtnLite.addEventListener('click', () => {
+                vscode.editReject(previewId);
+                card.setAttribute('data-status', 'error');
+                card.classList.add('tool-error');
+                const dot = card.querySelector('.tool-status-dot') as HTMLElement | null;
+                if (dot) dot.style.background = 'var(--vscode-testing-iconFailed, #f44747)';
+                const elapsed = card.querySelector('.tool-elapsed') as HTMLElement | null;
+                if (elapsed) elapsed.textContent = 'Rejected';
+                const actions = card.querySelector('.edit-preview-actions') as HTMLElement | null;
+                actions?.remove();
+                card.classList.add('collapsed');
+            });
+
+            messagesDiv.appendChild(card);
+            this.makeCardCollapsible(card, '.tool-header', true);
+            this.bindDeferredToolResult(card, renderDiff);
+            smartScroll(messagesDiv);
+            return;
+        }
+
         const oldLines = oldText.split('\n');
         const newLines = newText.split('\n');
-        card.setAttribute('data-added', String(newLines.length));
-        card.setAttribute('data-removed', String(oldLines.length));
-        let diffHtml = `<div class="diff-header-line"><span class="diff-stats">-${oldLines.length} +${newLines.length}</span><span class="diff-match">${matchCount} match(es)</span></div>`;
-        const maxShow = Math.max(oldLines.length, newLines.length, 8);
-        for (const line of oldLines.slice(0, maxShow)) {
-            diffHtml += `<div class="diff-line"><span class="diff-ln">-</span><span class="diff-del">- ${escapeHtml(line).substring(0, 120)}</span></div>`;
+        const shouldRenderDetailedDiff = oldLines.length * newLines.length <= 20000
+            && (oldText.length + newText.length) <= 120000;
+        const diff = shouldRenderDetailedDiff ? this.computeDiff(oldLines, newLines) : [];
+        const added = diff.length > 0
+            ? diff.filter(d => d.type === 'add').length
+            : Math.max(0, newLines.length - oldLines.length);
+        const removed = diff.length > 0
+            ? diff.filter(d => d.type === 'del').length
+            : Math.max(0, oldLines.length - newLines.length);
+        card.setAttribute('data-added', String(added));
+        card.setAttribute('data-removed', String(removed));
+
+        const startBase = Number.isFinite(Number(lineStart)) && Number(lineStart) > 0 ? Math.floor(Number(lineStart)) - 1 : 0;
+        let oldLineNum = startBase;
+        let newLineNum = startBase;
+        const maxShow = Math.min(diff.length, 12);
+        let diffHtml = `<div class="diff-header-line"><span class="diff-stats">+${added} -${removed}</span><span class="diff-match">${matchCount} match(es)</span></div>`;
+        if (diff.length === 0) {
+            diffHtml += `<div class="diff-line"><span class="diff-ln">…</span><span class="diff-info">Large edit preview collapsed for performance. Apply or expand only when needed.</span></div>`;
+        } else {
+            for (const part of diff.slice(0, maxShow)) {
+                if (part.type === 'del') {
+                    oldLineNum++;
+                    diffHtml += `<div class="diff-line"><span class="diff-ln">${oldLineNum}</span><span class="diff-del">- ${escapeHtml(part.text).substring(0, 140)}</span></div>`;
+                } else if (part.type === 'add') {
+                    newLineNum++;
+                    diffHtml += `<div class="diff-line"><span class="diff-ln">${newLineNum}</span><span class="diff-add">+ ${escapeHtml(part.text).substring(0, 140)}</span></div>`;
+                } else {
+                    oldLineNum++;
+                    newLineNum++;
+                    diffHtml += `<div class="diff-line"><span class="diff-ln">${newLineNum}</span><span class="diff-ctx">${escapeHtml(part.text).substring(0, 140)}</span></div>`;
+                }
+            }
+            if (diff.length > maxShow) {
+                diffHtml += `<div class="diff-line"><span class="diff-ln">...</span><span class="diff-info">... ${diff.length - maxShow} more lines</span></div>`;
+            }
         }
-        if (oldLines.length > maxShow) diffHtml += `<div class="diff-line"><span class="diff-ln">...</span><span class="diff-info">+${oldLines.length - maxShow} more lines</span></div>`;
-        for (const line of newLines.slice(0, maxShow)) {
-            diffHtml += `<div class="diff-line"><span class="diff-ln">+</span><span class="diff-add">+ ${escapeHtml(line).substring(0, 120)}</span></div>`;
-        }
-        if (newLines.length > maxShow) diffHtml += `<div class="diff-line"><span class="diff-ln">...</span><span class="diff-info">+${newLines.length - maxShow} more lines</span></div>`;
 
         card.innerHTML = `<div class="tool-header">` +
             `<div class="tool-icon-wrapper"><div class="tool-icon">E</div><div class="tool-status-dot"></div></div>` +
@@ -2760,23 +3598,195 @@ export const Messages = {
         });
 
         messagesDiv.appendChild(card);
-        this.makeCardCollapsible(card, '.tool-header', false);
+        this.makeCardCollapsible(card, '.tool-header', true);
         smartScroll(messagesDiv);
     },
 
-    renderWritePreviewCard(previewId: string, filePath: string, content: string, isCreate: boolean): void {
+    renderWritePreviewCard(previewId: string, filePath: string, content: string, isCreate: boolean, oldText?: string): void {
         const messagesDiv = document.getElementById('messages')!;
         const card = createElement('div', 'tool-card write-preview-card expanded');
         card.setAttribute('data-status', 'running');
         card.setAttribute('data-tool', 'write_file');
         card.setAttribute('data-file', filePath);
         card.setAttribute('data-action', isCreate ? 'create' : 'write');
+        {
+            const finishWriteCardLite = (status: 'success' | 'error', label: string) => {
+                card.setAttribute('data-status', status);
+                if (status === 'error') card.classList.add('tool-error');
+                const dot = card.querySelector('.tool-status-dot') as HTMLElement | null;
+                if (dot) {
+                    dot.style.background = status === 'success'
+                        ? 'var(--vscode-testing-iconPassed, #4ec9b0)'
+                        : 'var(--vscode-testing-iconFailed, #f44747)';
+                }
+                const elapsed = card.querySelector('.tool-elapsed') as HTMLElement | null;
+                if (elapsed) elapsed.textContent = label;
+                const actions = card.querySelector('.edit-preview-actions') as HTMLElement | null;
+                actions?.remove();
+                card.classList.add('collapsed');
+            };
 
-        // Build content preview
+            if (!isCreate && oldText) {
+                const oldLinesLite = oldText.split('\n');
+                const newLinesLite = content.split('\n');
+                const canPrecomputeCounts = oldLinesLite.length * newLinesLite.length <= 4000
+                    && (oldText.length + content.length) <= 24_000;
+                const tinyDiff = canPrecomputeCounts ? this.computeDiff(oldLinesLite, newLinesLite) : [];
+                const textChanged = oldText !== content;
+                const addedLite = tinyDiff.length > 0
+                    ? tinyDiff.filter(d => d.type === 'add').length
+                    : textChanged
+                        ? Math.max(1, newLinesLite.length - oldLinesLite.length, 0)
+                        : 0;
+                const removedLite = tinyDiff.length > 0
+                    ? tinyDiff.filter(d => d.type === 'del').length
+                    : textChanged
+                        ? Math.max(1, oldLinesLite.length - newLinesLite.length, 0)
+                        : 0;
+                card.setAttribute('data-added', String(addedLite));
+                card.setAttribute('data-removed', String(removedLite));
+                card.classList.remove('expanded');
+                card.innerHTML = `<div class="tool-header">` +
+                    `<div class="tool-icon-wrapper"><div class="tool-icon">W</div><div class="tool-status-dot"></div></div>` +
+                    `<div class="tool-info"><span class="tool-name">write_file</span><span class="tool-args">${escapeHtml(filePath)}</span></div>` +
+                    `<div class="tool-meta"><span class="tool-elapsed">Preview</span><span class="tool-chevron">▾</span></div>` +
+                    `</div><div class="tool-body"><div class="tool-result"><div class="diff-line"><span class="diff-info">Expand to render the overwrite preview.</span></div></div>` +
+                    `<div class="edit-preview-actions"><button class="edit-accept-btn">Confirm</button><button class="edit-reject-btn">Reject</button></div></div>`;
+
+                const renderDiff = () => {
+                    const result = card.querySelector<HTMLElement>('.tool-result');
+                    if (!result) return;
+                    const shouldRenderDetailedDiff = oldLinesLite.length * newLinesLite.length <= 20000
+                        && (oldText.length + content.length) <= 120000;
+                    const diffLite = shouldRenderDetailedDiff ? (tinyDiff.length > 0 ? tinyDiff : this.computeDiff(oldLinesLite, newLinesLite)) : [];
+                    const exactAdded = diffLite.length > 0
+                        ? diffLite.filter(d => d.type === 'add').length
+                        : addedLite;
+                    const exactRemoved = diffLite.length > 0
+                        ? diffLite.filter(d => d.type === 'del').length
+                        : removedLite;
+                    card.setAttribute('data-added', String(exactAdded));
+                    card.setAttribute('data-removed', String(exactRemoved));
+
+                    const maxShowLite = Math.min(diffLite.length, 10);
+                    let htmlLite = `<div class="diff-header-line"><span class="diff-stats">+${exactAdded} -${exactRemoved}</span></div>`;
+                    if (diffLite.length === 0) {
+                        htmlLite += `<div class="diff-line"><span class="diff-info">Large overwrite preview kept collapsed for performance.</span></div>`;
+                    } else {
+                        for (const d of diffLite.slice(0, maxShowLite)) {
+                            const cls = d.type === 'add' ? 'diff-add' : d.type === 'del' ? 'diff-del' : 'diff-ctx';
+                            const prefix = d.type === 'add' ? '+' : d.type === 'del' ? '-' : ' ';
+                            htmlLite += `<div class="diff-line"><span class="${cls}">${prefix} ${escapeHtml(d.text).substring(0, 118)}</span></div>`;
+                        }
+                        if (diffLite.length > maxShowLite) {
+                            htmlLite += `<div class="diff-line"><span class="diff-info">... ${diffLite.length - maxShowLite} more lines</span></div>`;
+                        }
+                    }
+                    result.innerHTML = htmlLite;
+                };
+
+                card.querySelector('.edit-accept-btn')?.addEventListener('click', () => {
+                    vscode.writeConfirm(previewId);
+                    finishWriteCardLite('success', 'Applied');
+                });
+                card.querySelector('.edit-reject-btn')?.addEventListener('click', () => {
+                    vscode.writeReject(previewId);
+                    finishWriteCardLite('error', 'Rejected');
+                });
+
+                messagesDiv.appendChild(card);
+                this.makeCardCollapsible(card, '.tool-header', true);
+                this.bindDeferredToolResult(card, renderDiff);
+                smartScroll(messagesDiv);
+                return;
+            }
+
+            const linesLite = content.split('\n');
+            card.setAttribute('data-added', String(linesLite.length));
+            card.setAttribute('data-removed', '0');
+            const maxShowLite = Math.min(linesLite.length, 10);
+            let contentHtmlLite = '';
+            for (const line of linesLite.slice(0, maxShowLite)) {
+                contentHtmlLite += `<div class="diff-line"><span class="diff-add">${escapeHtml(line).substring(0, 120)}</span></div>`;
+            }
+            if (linesLite.length > maxShowLite) {
+                contentHtmlLite += `<div class="diff-line"><span class="diff-info">... +${linesLite.length - maxShowLite} more lines</span></div>`;
+            }
+
+            card.classList.remove('expanded');
+            card.innerHTML = `<div class="tool-header">` +
+                `<div class="tool-icon-wrapper"><div class="tool-icon">W</div><div class="tool-status-dot"></div></div>` +
+                `<div class="tool-info"><span class="tool-name">write_file</span><span class="tool-args">${escapeHtml(filePath)} (${linesLite.length} lines)</span></div>` +
+                `<div class="tool-meta"><span class="tool-elapsed">Preview</span><span class="tool-chevron">▾</span></div>` +
+                `</div><div class="tool-body"><div class="tool-result">${contentHtmlLite}</div>` +
+                `<div class="edit-preview-actions"><button class="edit-accept-btn">Confirm</button><button class="edit-reject-btn">Reject</button></div></div>`;
+
+            const writeAcceptBtnLite = card.querySelector('.edit-accept-btn');
+            if (writeAcceptBtnLite) writeAcceptBtnLite.addEventListener('click', () => {
+                vscode.writeConfirm(previewId);
+                finishWriteCardLite('success', 'Applied');
+            });
+
+            const writeRejectBtnLite = card.querySelector('.edit-reject-btn');
+            if (writeRejectBtnLite) writeRejectBtnLite.addEventListener('click', () => {
+                vscode.writeReject(previewId);
+                finishWriteCardLite('error', 'Rejected');
+            });
+
+            messagesDiv.appendChild(card);
+            this.makeCardCollapsible(card, '.tool-header', true);
+            smartScroll(messagesDiv);
+            return;
+        }
+
+        // Compute diff when overwriting existing file
+        if (!isCreate && oldText) {
+            const oldLines = oldText.split('\n');
+            const newLines = content.split('\n');
+            const shouldRenderDetailedDiff = oldLines.length * newLines.length <= 20000
+                && (oldText.length + content.length) <= 120000;
+            const diff = shouldRenderDetailedDiff ? this.computeDiff(oldLines, newLines) : [];
+            const added = diff.length > 0
+                ? diff.filter(d => d.type === 'add').length
+                : Math.max(0, newLines.length - oldLines.length);
+            const removed = diff.length > 0
+                ? diff.filter(d => d.type === 'del').length
+                : Math.max(0, oldLines.length - newLines.length);
+            card.setAttribute('data-added', String(added));
+            card.setAttribute('data-removed', String(removed));
+            const maxShow = Math.min(diff.length, 10);
+            let contentHtml = '';
+            if (diff.length === 0) {
+                contentHtml = `<div class="diff-line"><span class="diff-info">Large overwrite preview collapsed for performance.</span></div>`;
+            } else {
+                for (const d of diff.slice(0, maxShow)) {
+                    const cls = d.type === 'add' ? 'diff-add' : d.type === 'del' ? 'diff-del' : 'diff-ctx';
+                    const prefix = d.type === 'add' ? '+' : d.type === 'del' ? '-' : ' ';
+                    contentHtml += `<div class="diff-line"><span class="${cls}">${prefix} ${escapeHtml(d.text).substring(0, 118)}</span></div>`;
+                }
+                if (diff.length > maxShow) {
+                    contentHtml += `<div class="diff-line"><span class="diff-info">... ${diff.length - maxShow} more lines</span></div>`;
+                }
+            }
+            const actionLabel = '覆盖文件';
+            card.innerHTML = `<div class="tool-header">` +
+                `<div class="tool-icon-wrapper"><div class="tool-icon">W</div><div class="tool-status-dot"></div></div>` +
+                `<div class="tool-info"><span class="tool-name">⚠️ write_file → ${escapeHtml(filePath)}</span><span class="tool-desc">${escapeHtml(actionLabel)} · <span class="diff-stats-add">+${added}</span> <span class="diff-stats-del">-${removed}</span></span></div>` +
+                `</div><div class="diff-card expanded"><div class="diff-card-header"><span class="diff-file">${escapeHtml(filePath)}</span><span class="diff-stats">+${added} lines, -${removed} lines</span><span class="diff-chevron">▾</span></div><div class="diff-card-body">${contentHtml}</div></div>` +
+                `<div class="tool-actions"><button class="tool-action-confirm" data-preview="${previewId}">✅ 确认</button><button class="tool-action-reject" data-preview="${previewId}">❌ 拒绝</button></div>`;
+            card.querySelector('.tool-action-confirm')?.addEventListener('click', () => vscode.editConfirm(previewId));
+            card.querySelector('.tool-action-reject')?.addEventListener('click', () => vscode.editReject(previewId));
+            messagesDiv.appendChild(card);
+            this.makeCardCollapsible(card, '.tool-header', true);
+            smartScroll(messagesDiv);
+            return;
+        }
+
+        // Build content preview (new file or no old content)
         const lines = content.split('\n');
         card.setAttribute('data-added', String(lines.length));
         card.setAttribute('data-removed', '0');
-        const maxShow = Math.min(lines.length, 15);
+        const maxShow = Math.min(lines.length, 10);
         let contentHtml = '';
         for (const line of lines.slice(0, maxShow)) {
             contentHtml += `<div class="diff-line"><span class="diff-add">${escapeHtml(line).substring(0, 120)}</span></div>`;
@@ -2831,9 +3841,15 @@ export const Messages = {
     },
 
     // ── System message ──
-    addSystemMessage(text: string): void {
+    addSystemMessage(text: string, variant: 'default' | 'manual-stop' = 'default'): void {
         const messagesDiv = document.getElementById('messages')!;
         const sys = createElement('div', 'msg msg-system');
+        const normalizedVariant = variant === 'default' && /^(已手动停止当前任务。|Stopped this task manually\.)$/.test(String(text || '').trim())
+            ? 'manual-stop'
+            : variant;
+        if (normalizedVariant !== 'default') {
+            sys.classList.add(`msg-system-${normalizedVariant}`);
+        }
         sys.textContent = text;
         messagesDiv.appendChild(sys);
         smartScroll(messagesDiv);
@@ -2870,6 +3886,7 @@ export const Messages = {
         const setCollapsed = (value: boolean) => {
             card.classList.toggle('collapsed', value);
             toggle.textContent = value ? 'Show' : 'Hide';
+            card.dispatchEvent(new CustomEvent('cardCollapseChange', { detail: { collapsed: value } }));
         };
         setCollapsed(collapsed);
 
@@ -2890,18 +3907,18 @@ export const Messages = {
         const card = createElement('div', 'plan-confirm-card');
 
         card.innerHTML = `
-            <div class="plan-confirm-header">Plan Ready</div>
-            <div class="plan-confirm-desc">The plan has been generated. Review it in the editor before confirming.</div>
+            <div class="plan-confirm-header">${escapeHtml(t('plan.ready'))}</div>
+            <div class="plan-confirm-desc">${escapeHtml(t('plan.ready.desc'))}</div>
             <div class="plan-confirm-actions-row">
-                <button class="plan-confirm-btn plan-open-btn" id="plan-open-btn">Open in editor</button>
+                <button class="plan-confirm-btn plan-open-btn" id="plan-open-btn">${escapeHtml(t('open.editor'))}</button>
             </div>
             <div class="plan-confirm-modify">
-                <input type="text" class="plan-modify-input" id="plan-modify-input" placeholder="Optional feedback, e.g. add tests or simplify the plan" />
+                <input type="text" class="plan-modify-input" id="plan-modify-input" placeholder="${escapeHtml(t('plan.modify.placeholder'))}" />
             </div>
             <div class="plan-confirm-actions">
-                <button class="plan-confirm-btn plan-accept-btn" id="plan-accept-btn">Confirm and run</button>
-                <button class="plan-confirm-btn plan-modify-btn" id="plan-modify-btn">Revise then run</button>
-                <button class="plan-confirm-btn plan-reject-btn" id="plan-reject-btn">Replan</button>
+                <button class="plan-confirm-btn plan-accept-btn" id="plan-accept-btn">${escapeHtml(t('confirm.execute'))}</button>
+                <button class="plan-confirm-btn plan-modify-btn" id="plan-modify-btn">${escapeHtml(t('modify.execute'))}</button>
+                <button class="plan-confirm-btn plan-reject-btn" id="plan-reject-btn">${escapeHtml(t('replan'))}</button>
             </div>
         `;
         messagesDiv.appendChild(card);
@@ -2916,8 +3933,8 @@ export const Messages = {
 
         if (planPath) {
             const openPlan = () => {
-                vscode.openFileBeside(planPath);
-                openBtn.textContent = 'Opening...';
+                vscode.openMarkdownPreviewBeside(planPath);
+                openBtn.textContent = `${t('open.editor')}...`;
                 openBtn.disabled = true;
                 (openBtn as any)._openPath = planPath;
             };
@@ -3101,6 +4118,7 @@ export const Messages = {
 
     handleAdversarialTurn(persona: string, name: string, icon: string, phase: string, content: string, iteration: number): void {
         const messagesDiv = document.getElementById('messages')!;
+        const displayName = persona === 'pm' ? t('adversarial.reviewer.name') : name;
 
         // If persona changed, create a new turn block
         if (this._currentAdversarialPersona !== persona) {
@@ -3128,7 +4146,7 @@ export const Messages = {
                 ? 'background:rgba(255,105,0,.15);color:#FF6900'
                 : 'background:rgba(33,150,243,.15);color:#2196F3';
             const nameEl = createElement('span', 'adversarial-name');
-            nameEl.textContent = name;
+            nameEl.textContent = displayName;
             nameEl.style.color = persona === 'programmer' ? '#FF6900' : '#2196F3';
             const phaseEl = createElement('span', 'adversarial-phase');
             phaseEl.textContent = phase === 'speak' ? '正在编码...' : phase === 'review' ? '正在审查...' : phase === 'verdict' ? '裁决' : '';
@@ -3317,6 +4335,53 @@ export const Messages = {
         return `${t('queue.waiting')} (${count})`;
     },
 
+    syncQueueListState(container: HTMLElement | null): void {
+        const list = container?.querySelector<HTMLElement>('.msg-queue-list');
+        if (!container || !list) return;
+        const scrollable = list.children.length > QUEUE_VISIBLE_ITEMS;
+        container.classList.toggle('msg-queue-scrollable', scrollable);
+        list.classList.toggle('is-scrollable', scrollable);
+    },
+
+    getTaskChangesToggleLabel(hiddenCount: number, expanded: boolean): string {
+        const showLabel = t('show');
+        const hideLabel = t('hide');
+        const isZh = showLabel === '展开' || hideLabel === '收起';
+        if (expanded) {
+            return isZh ? `${hideLabel}额外文件` : `${hideLabel} extra files`;
+        }
+        return isZh
+            ? `${showLabel}其余 ${hiddenCount} 个文件`
+            : `${showLabel} ${hiddenCount} more file${hiddenCount === 1 ? '' : 's'}`;
+    },
+
+    syncTaskChangeListState(card: HTMLElement): void {
+        const list = card.querySelector<HTMLElement>('.task-changes-list');
+        const toggle = card.querySelector<HTMLButtonElement>('.task-changes-files-toggle');
+        if (!list || !toggle) return;
+        const expanded = toggle.dataset.expanded === 'true';
+        list.classList.toggle('task-changes-list-expanded', expanded);
+        toggle.textContent = this.getTaskChangesToggleLabel(Number(toggle.dataset.hiddenCount || '0'), expanded);
+        toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    },
+
+    bindTaskChangeListToggle(card: HTMLElement): void {
+        const toggle = card.querySelector<HTMLButtonElement>('.task-changes-files-toggle');
+        if (!toggle || toggle.dataset.bound === 'true') return;
+        this.syncTaskChangeListState(card);
+        toggle.addEventListener('click', () => {
+            toggle.dataset.expanded = toggle.dataset.expanded === 'true' ? 'false' : 'true';
+            this.syncTaskChangeListState(card);
+        });
+        toggle.dataset.bound = 'true';
+    },
+
+    localizeTaskChangesDisplay(root: ParentNode = document): void {
+        root.querySelectorAll<HTMLElement>('.task-changes-card').forEach(card => {
+            this.syncTaskChangeListState(card);
+        });
+    },
+
     localizeQueueDisplay(): void {
         const inputArea = document.getElementById('input-area');
         const container = inputArea?.querySelector('.msg-queue-container') as HTMLElement | null;
@@ -3340,6 +4405,7 @@ export const Messages = {
             const count = badge.getAttribute('data-count') || '';
             badge.textContent = `+${count} ${t('queue.image.short')}`;
         });
+        this.syncQueueListState(container);
     },
 
     showQueuedMessage(text: string, queueLength: number): void {
@@ -3377,6 +4443,7 @@ export const Messages = {
             }
             const title = container.querySelector('.queue-title');
             if (title) title.textContent = this.formatQueueTitle(items.length);
+            this.syncQueueListState(container);
             if (items.length === 0) container.remove();
         };
         const getCurrentIndex = () => Array.from(list.children).indexOf(item);
@@ -3416,6 +4483,7 @@ export const Messages = {
         list.appendChild(item);
         const title = container.querySelector('.queue-title');
         if (title) title.textContent = this.formatQueueTitle(list.children.length);
+        this.syncQueueListState(container);
     },
 
     updateQueueDisplay(remaining: number): void {
@@ -3438,6 +4506,7 @@ export const Messages = {
                     if (num) num.textContent = `#${i + 1}`;
                 }
             }
+            this.syncQueueListState(container as HTMLElement);
             if (remaining === 0) container.remove();
         }
     },
