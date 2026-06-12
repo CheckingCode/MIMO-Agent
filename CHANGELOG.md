@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.7.3 (2026-06-12)
+
+### Improvements
+- Restored the README to the intended pre-1.7.2 structure instead of embedding 1.7.2 release notes directly in the main product overview.
+- Added the official website link to the README top navigation and repository links section for quicker access.
+
 ## 1.7.2 (2026-06-12)
 
 ### Improvements
