@@ -5,7 +5,7 @@
 <h1 align="center">MiMo Agent</h1>
 
 <p align="center">
-  <strong>OpenAI-compatible coding agent for VS Code, optimized for Xiaomi MiMo models.</strong>
+  <strong>  VS Code coding assistant optimized for Xiaomi MiMo LLM (OpenAI-compatible).</strong>
 </p>
 
 <p align="center">
