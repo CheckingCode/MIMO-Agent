@@ -1,5 +1,5 @@
 import { describe, it, expect, summary } from './test-runner';
-import { MiMoAPI, normalizeApiEndpointMode } from '../api';
+import { MiMoAPI, normalizeApiEndpointMode, resolveProxyForUrl } from '../api';
 
 describe('normalizeApiEndpointMode', () => {
     it('defaults to chat completions', () => {
@@ -23,6 +23,112 @@ describe('MiMoAPI endpoint selection', () => {
         const api = new MiMoAPI('key', 'https://api.example.com/v1', 'responses');
         expect(api.getRequestPath()).toBe('/responses');
         expect(api.getEndpointMode()).toBe('responses');
+    });
+});
+
+describe('proxy resolution', () => {
+    it('uses HTTPS proxy for HTTPS API targets', () => {
+        const proxy = resolveProxyForUrl('https://api.example.com/v1/chat/completions', {
+            HTTPS_PROXY: 'http://proxy.example.test:7890',
+        });
+
+        expect(proxy?.url.href).toBe('http://proxy.example.test:7890/');
+        expect(proxy?.source).toBe('HTTPS_PROXY');
+        expect(proxy?.rewrittenForWsl).toBe(false);
+    });
+
+    it('normalizes PROXY directives from VS Code proxy settings', () => {
+        const proxy = resolveProxyForUrl('https://api.example.com/v1/chat/completions', {
+            HTTPS_PROXY: 'PROXY 127.0.0.1:7890',
+        });
+
+        expect(proxy?.url.href).toBe('http://127.0.0.1:7890/');
+    });
+
+    it('reads VS Code http.proxy when proxy env vars are not set', () => {
+        const proxy = resolveProxyForUrl(
+            'https://api.example.com/v1/chat/completions',
+            {},
+            { value: 'PROXY 127.0.0.1:7890', name: 'vscode.http.proxy' },
+        );
+
+        expect(proxy?.url.href).toBe('http://127.0.0.1:7890/');
+        expect(proxy?.source).toBe('vscode.http.proxy');
+    });
+
+    it('normalizes PAC-style proxy directives with DIRECT fallback', () => {
+        const proxy = resolveProxyForUrl('https://api.example.com/v1/chat/completions', {
+            HTTPS_PROXY: 'PROXY 127.0.0.1:7890; DIRECT',
+        });
+
+        expect(proxy?.url.href).toBe('http://127.0.0.1:7890/');
+    });
+
+    it('rewrites localhost proxy to the WSL host IP by default', () => {
+        const proxy = resolveProxyForUrl('https://api.example.com/v1/chat/completions', {
+            HTTPS_PROXY: 'http://127.0.0.1:7890',
+            WSL_INTEROP: '/run/WSL/123_interop',
+            MIMO_WSL_HOST_IP: '172.28.128.1',
+        });
+
+        expect(proxy?.url.href).toBe('http://172.28.128.1:7890/');
+        expect(proxy?.rewrittenForWsl).toBe(true);
+    });
+
+    it('ignores WSL-injected PROXY loopback directives by default', () => {
+        const proxy = resolveProxyForUrl('https://api.example.com/v1/chat/completions', {
+            HTTPS_PROXY: 'PROXY 127.0.0.1:7890',
+            WSL_INTEROP: '/run/WSL/123_interop',
+            MIMO_WSL_HOST_IP: '172.28.128.1',
+        });
+
+        expect(proxy).toBe(null);
+    });
+
+    it('can force rewrite mode for WSL-injected PROXY directives', () => {
+        const proxy = resolveProxyForUrl('https://api.example.com/v1/chat/completions', {
+            HTTPS_PROXY: 'PROXY 127.0.0.1:7890',
+            WSL_INTEROP: '/run/WSL/123_interop',
+            MIMO_WSL_HOST_IP: '172.28.128.1',
+            MIMO_WSL_PROXY_MODE: 'rewrite',
+        });
+
+        expect(proxy?.url.href).toBe('http://172.28.128.1:7890/');
+        expect(proxy?.rewrittenForWsl).toBe(true);
+    });
+
+    it('ignores VS Code WSL loopback proxy by default', () => {
+        const proxy = resolveProxyForUrl(
+            'https://api.example.com/v1/chat/completions',
+            {
+                WSL_INTEROP: '/run/WSL/123_interop',
+                MIMO_WSL_HOST_IP: '172.28.128.1',
+            },
+            { value: 'PROXY 127.0.0.1:7890', name: 'vscode.http.proxy' },
+        );
+
+        expect(proxy).toBe(null);
+    });
+
+    it('can disable WSL localhost proxy rewriting', () => {
+        const proxy = resolveProxyForUrl('https://api.example.com/v1/chat/completions', {
+            HTTPS_PROXY: 'http://localhost:7890',
+            WSL_INTEROP: '/run/WSL/123_interop',
+            MIMO_WSL_HOST_IP: '172.28.128.1',
+            MIMO_DISABLE_WSL_PROXY_REWRITE: '1',
+        });
+
+        expect(proxy?.url.href).toBe('http://localhost:7890/');
+        expect(proxy?.rewrittenForWsl).toBe(false);
+    });
+
+    it('honors NO_PROXY for matching API targets', () => {
+        const proxy = resolveProxyForUrl('https://api.example.com/v1/chat/completions', {
+            HTTPS_PROXY: 'http://proxy.example.test:7890',
+            NO_PROXY: 'api.example.com',
+        });
+
+        expect(proxy).toBe(null);
     });
 });
 

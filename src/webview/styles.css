@@ -389,8 +389,8 @@ body{font-family:'Inter',var(--vscode-font-family);font-size:var(--vscode-font-s
 /* Model select */
 .model-select-wrap{position:relative;display:inline-flex;align-items:center;color:var(--vscode-descriptionForeground);min-height:24px;pointer-events:auto}
 #model-select{display:none}
-.model-picker-trigger{display:inline-flex;align-items:center;gap:7px;max-width:210px;background:rgba(255,255,255,.035);color:var(--vscode-foreground);border:none;border-radius:8px;padding:3px 8px;min-height:24px;font-size:11px;font-family:var(--vscode-font-family);cursor:pointer;outline:none;white-space:nowrap;pointer-events:auto}
-.model-picker-trigger:hover{color:var(--vscode-foreground);background:rgba(255,255,255,.045)}
+.model-picker-trigger{display:inline-flex;align-items:center;gap:7px;max-width:210px;background:transparent;color:var(--vscode-descriptionForeground);border:none;border-radius:0;padding:3px 4px;min-height:24px;font-size:11px;font-family:var(--vscode-font-family);cursor:pointer;outline:none;white-space:nowrap;pointer-events:auto}
+.model-picker-trigger:hover{color:var(--vscode-foreground)}
 .model-picker-trigger:active{transform:scale(.97)}
 #model-picker-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .model-picker-popup{display:none;position:absolute;right:0;bottom:calc(100% + 8px);width:min(360px,calc(100vw - 28px));max-height:430px;overflow-y:auto;background:var(--vscode-dropdown-background);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:8px;z-index:120;box-shadow:0 18px 44px rgba(0,0,0,.44);left:auto;max-width:calc(100vw - 16px)}

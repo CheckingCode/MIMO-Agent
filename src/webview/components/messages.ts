@@ -1329,11 +1329,6 @@ export const Messages = {
             }
             const timeEl = last.querySelector('.tool-card-time') as HTMLElement | null;
             if (timeEl) timeEl.textContent = elapsed.toFixed(1) + 's';
-            if (!isError && last.classList.contains('collapsed')) {
-                const header = last.querySelector('.tool-card-header');
-                const toggle = header?.querySelector('.inline-collapse-toggle') as HTMLButtonElement | null;
-                toggle?.click();
-            }
             // Show git diff card if command modified files
             if (gitDiff && !isError) {
                 const diffCard = createElement('div', 'diff-card');

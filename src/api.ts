@@ -1,5 +1,11 @@
 import * as http from 'http';
 import * as https from 'https';
+import * as fs from 'fs';
+import * as net from 'net';
+import * as tls from 'tls';
+import { StringDecoder } from 'string_decoder';
+import { HttpProxyAgent } from 'http-proxy-agent';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import { URL } from 'url';
 
 export type ApiEndpointMode = 'chat_completions' | 'responses';
@@ -79,6 +85,173 @@ type ResponseInputItem = {
     output?: string;
 };
 
+type RequestHeaders = Record<string, string | number>;
+
+type ProxyEnv = NodeJS.ProcessEnv;
+
+type ProxyCandidate = {
+    value: string;
+    name: string;
+};
+
+export type ResolvedProxy = {
+    url: URL;
+    source: string;
+    rewrittenForWsl: boolean;
+};
+
+function firstEnv(env: ProxyEnv, names: string[]): ProxyCandidate | null {
+    for (const name of names) {
+        const value = env[name];
+        if (typeof value === 'string' && value.trim()) {
+            return { value: value.trim(), name };
+        }
+    }
+    return null;
+}
+
+function firstPacProxy(value: string): string | null {
+    for (const part of value.split(';')) {
+        const raw = part.trim();
+        if (!raw || /^DIRECT$/i.test(raw)) continue;
+        const proxyDirective = raw.match(/^(?:PROXY|HTTPS?)\s+(.+)$/i);
+        if (proxyDirective) return proxyDirective[1].trim();
+        return raw;
+    }
+    return null;
+}
+
+function normalizeProxyUrl(value: string): URL | null {
+    const firstProxy = firstPacProxy(value);
+    if (!firstProxy) return null;
+    let raw = firstProxy;
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) raw = `http://${raw}`;
+    try {
+        const parsed = new URL(raw);
+        if (!/^https?:$/i.test(parsed.protocol)) return null;
+        return parsed;
+    } catch {
+        return null;
+    }
+}
+
+function isLoopbackHost(hostname: string): boolean {
+    const host = hostname.toLowerCase();
+    return host === 'localhost'
+        || host === '127.0.0.1'
+        || host === '::1'
+        || host === '[::1]';
+}
+
+function isWslEnvironment(env: ProxyEnv = process.env): boolean {
+    if (env.WSL_INTEROP || env.WSL_DISTRO_NAME) return true;
+    if (process.platform !== 'linux') return false;
+    try {
+        return /microsoft|wsl/i.test(fs.readFileSync('/proc/version', 'utf8'));
+    } catch {
+        return false;
+    }
+}
+
+function getWslHostIp(env: ProxyEnv = process.env): string | null {
+    const explicit = env.MIMO_WSL_HOST_IP?.trim();
+    if (explicit) return explicit;
+    try {
+        const resolv = fs.readFileSync('/etc/resolv.conf', 'utf8');
+        const match = resolv.match(/^\s*nameserver\s+([^\s#]+)/m);
+        return match?.[1] || null;
+    } catch {
+        return null;
+    }
+}
+
+function rewriteLocalhostProxyForWsl(proxyUrl: URL, env: ProxyEnv = process.env): boolean {
+    if (env.MIMO_DISABLE_WSL_PROXY_REWRITE === '1') return false;
+    if (!isWslEnvironment(env) || !isLoopbackHost(proxyUrl.hostname)) return false;
+    const hostIp = getWslHostIp(env);
+    if (!hostIp) return false;
+    proxyUrl.hostname = hostIp;
+    return true;
+}
+
+function shouldIgnoreInjectedWslLoopbackProxy(candidate: ProxyCandidate, proxyUrl: URL, env: ProxyEnv = process.env): boolean {
+    if (env.MIMO_WSL_PROXY_MODE === 'rewrite') return false;
+    if (!isWslEnvironment(env) || !isLoopbackHost(proxyUrl.hostname)) return false;
+    return candidate.name === 'vscode.http.proxy' || /^PROXY\s+/i.test(candidate.value);
+}
+
+function hostMatchesNoProxy(hostname: string, entry: string): boolean {
+    const host = hostname.toLowerCase();
+    const rule = entry.trim().toLowerCase();
+    if (!rule) return false;
+    if (rule === '*') return true;
+    if (rule.startsWith('.')) return host.endsWith(rule) || host === rule.slice(1);
+    return host === rule || host.endsWith(`.${rule}`);
+}
+
+function shouldBypassProxy(target: URL, env: ProxyEnv = process.env): boolean {
+    const noProxy = firstEnv(env, ['NO_PROXY', 'no_proxy'])?.value;
+    if (!noProxy) return false;
+    return noProxy.split(',').some((entry) => hostMatchesNoProxy(target.hostname, entry));
+}
+
+function getVsCodeHttpProxy(): ProxyCandidate | null {
+    try {
+        // Optional dependency: only available inside the VS Code extension host.
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const vscode = require('vscode');
+        const proxy = vscode?.workspace?.getConfiguration?.('http')?.get?.('proxy');
+        if (typeof proxy === 'string' && proxy.trim()) {
+            return { value: proxy.trim(), name: 'vscode.http.proxy' };
+        }
+    } catch {
+        // Running outside VS Code, such as unit tests.
+    }
+    return null;
+}
+
+function getProxyCandidate(
+    targetUrl: URL,
+    env: ProxyEnv = process.env,
+    vscodeProxy: ProxyCandidate | null = getVsCodeHttpProxy(),
+): ProxyCandidate | null {
+    const envProxy = targetUrl.protocol === 'https:'
+        ? firstEnv(env, ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy'])
+        : firstEnv(env, ['HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy']);
+    return envProxy || vscodeProxy;
+}
+
+export function resolveProxyForUrl(
+    target: string | URL,
+    env: ProxyEnv = process.env,
+    vscodeProxy: ProxyCandidate | null = getVsCodeHttpProxy(),
+): ResolvedProxy | null {
+    const targetUrl = typeof target === 'string' ? new URL(target) : target;
+    if (shouldBypassProxy(targetUrl, env)) return null;
+    const proxyCandidate = getProxyCandidate(targetUrl, env, vscodeProxy);
+    if (!proxyCandidate) return null;
+
+    const proxyUrl = normalizeProxyUrl(proxyCandidate.value);
+    if (!proxyUrl) return null;
+    if (shouldIgnoreInjectedWslLoopbackProxy(proxyCandidate, proxyUrl, env)) {
+        console.log(`[MiMo API] Ignoring WSL-injected loopback proxy from ${proxyCandidate.name}: ${proxyCandidate.value}`);
+        return null;
+    }
+    const rewrittenForWsl = rewriteLocalhostProxyForWsl(proxyUrl, env);
+    return { url: proxyUrl, source: proxyCandidate.name, rewrittenForWsl };
+}
+
+function createRequestAgent(target: URL): http.Agent | https.Agent | false {
+    const proxy = resolveProxyForUrl(target);
+    if (!proxy) return false;
+    if (proxy.rewrittenForWsl) {
+        console.log(`[MiMo API] Rewrote WSL localhost proxy from ${proxy.source} to ${proxy.url.host}`);
+    }
+    return target.protocol === 'https:'
+        ? new HttpsProxyAgent(proxy.url)
+        : new HttpProxyAgent(proxy.url);
+}
+
 function createAbortError(message = 'Aborted'): Error {
     const error = new Error(message);
     error.name = 'AbortError';
@@ -118,6 +291,108 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
             reject(createAbortError());
         }, { once: true });
     });
+}
+
+function socketRequestRaw(
+    parsed: URL,
+    method: string,
+    headers: RequestHeaders,
+    body: Buffer,
+    timeout: number,
+    signal: AbortSignal | undefined,
+    onData: (chunk: Buffer) => void,
+    onEnd: () => void,
+    onError: (error: Error) => void,
+): { destroy: () => void } {
+    const isHttps = parsed.protocol === 'https:';
+    const port = Number(parsed.port || (isHttps ? 443 : 80));
+    const socket = isHttps
+        ? tls.connect({ host: parsed.hostname, port, servername: parsed.hostname })
+        : net.connect({ host: parsed.hostname, port });
+    let ended = false;
+    const fail = (error: Error) => {
+        if (ended) return;
+        ended = true;
+        socket.destroy();
+        onError(error);
+    };
+    const finish = () => {
+        if (ended) return;
+        ended = true;
+        onEnd();
+    };
+
+    socket.setTimeout(timeout, () => fail(new Error('Request timeout')));
+    socket.once('error', fail);
+    socket.once('end', finish);
+    socket.once('close', () => finish());
+    socket.on('data', onData);
+
+    if (signal) {
+        if (signal.aborted) {
+            fail(createAbortError());
+            return { destroy: () => socket.destroy() };
+        }
+        signal.addEventListener('abort', () => fail(createAbortError()), { once: true });
+    }
+
+    const path = `${parsed.pathname || '/'}${parsed.search || ''}`;
+    const headerLines = [
+        `${method} ${path} HTTP/1.1`,
+        `Host: ${parsed.host}`,
+        'Connection: close',
+        ...Object.entries(headers).map(([key, value]) => `${key}: ${value}`),
+        '',
+        '',
+    ].join('\r\n');
+
+    socket.once(isHttps ? 'secureConnect' : 'connect', () => {
+        socket.write(headerLines);
+        socket.write(body);
+    });
+
+    return {
+        destroy: () => {
+            ended = true;
+            socket.destroy();
+        },
+    };
+}
+
+function splitHttpResponse(buffer: Buffer): { headers: string; body: Buffer } | null {
+    const idx = buffer.indexOf('\r\n\r\n');
+    if (idx < 0) return null;
+    return {
+        headers: buffer.slice(0, idx).toString('utf8'),
+        body: buffer.slice(idx + 4),
+    };
+}
+
+function parseStatusCode(headers: string): number {
+    const match = headers.match(/^HTTP\/\d(?:\.\d)?\s+(\d{3})/i);
+    return match ? Number(match[1]) : 0;
+}
+
+function decodeChunkedBody(body: Buffer): Buffer {
+    let offset = 0;
+    const chunks: Buffer[] = [];
+    while (offset < body.length) {
+        const lineEnd = body.indexOf('\r\n', offset);
+        if (lineEnd < 0) break;
+        const sizeText = body.slice(offset, lineEnd).toString('ascii').split(';')[0].trim();
+        const size = parseInt(sizeText, 16);
+        if (!Number.isFinite(size)) break;
+        offset = lineEnd + 2;
+        if (size === 0) break;
+        if (offset + size > body.length) break;
+        chunks.push(body.slice(offset, offset + size));
+        offset += size + 2;
+    }
+    return Buffer.concat(chunks);
+}
+
+function responseBodyFromHeaders(headers: string, body: Buffer): Buffer {
+    return /transfer-encoding:\s*chunked/i.test(headers) ? decodeChunkedBody(body) : body;
 }
 
 /**
@@ -313,6 +588,48 @@ export class MiMoAPI {
             const parsed = new URL(url);
             const isHttps = parsed.protocol === 'https:';
             const transport = isHttps ? https : http;
+            const agent = createRequestAgent(parsed);
+            if (agent === false) {
+                let raw = Buffer.alloc(0);
+                socketRequestRaw(
+                    parsed,
+                    'POST',
+                    {
+                        'Content-Type': 'application/json',
+                        'Content-Length': body.length,
+                        Authorization: `Bearer ${this.apiKey}`,
+                        Accept: 'application/json',
+                    },
+                    body,
+                    60_000,
+                    signal,
+                    (chunk) => { raw = Buffer.concat([raw, chunk]); },
+                    () => {
+                        const split = splitHttpResponse(raw);
+                        if (!split) {
+                            reject(new Error('Failed to parse response headers'));
+                            return;
+                        }
+                        const statusCode = parseStatusCode(split.headers);
+                        const data = responseBodyFromHeaders(split.headers, split.body).toString('utf8');
+                        if (statusCode !== 200) {
+                            reject(new Error(`API error ${statusCode}: ${data.slice(0, 500)}`));
+                            return;
+                        }
+                        try {
+                            const json = JSON.parse(data);
+                            const content = this.apiEndpoint === 'responses'
+                                ? this.extractTextFromResponseJson(json)
+                                : (json.choices?.[0]?.message?.content || '');
+                            resolve(content);
+                        } catch {
+                            reject(new Error(`Failed to parse response: ${data.slice(0, 200)}`));
+                        }
+                    },
+                    reject,
+                );
+                return;
+            }
 
             const req = transport.request(
                 {
@@ -326,6 +643,7 @@ export class MiMoAPI {
                         Authorization: `Bearer ${this.apiKey}`,
                         Accept: 'application/json',
                     },
+                    agent,
                     timeout: 60_000,
                 },
                 (res) => {
@@ -411,8 +729,196 @@ export class MiMoAPI {
             const parsed = new URL(url);
             const isHttps = parsed.protocol === 'https:';
             const transport = isHttps ? https : http;
+            const agent = createRequestAgent(parsed);
             let settled = false;
             const settle = (err: Error) => { if (!settled) { settled = true; reject(err); } };
+            const finalizeStreamBody = (bodyText: string, toolCallsMap: Map<number, { id: string; name: string; arguments: string }>, collectedUsage: TokenUsage | null, collectedContent: string, collectedReasoning: string) => {
+                const toolCalls: ToolCall[] = [];
+                for (const [, tc] of toolCallsMap) {
+                    if (tc.id && tc.name) {
+                        toolCalls.push({
+                            id: tc.id,
+                            type: 'function',
+                            function: { name: tc.name, arguments: tc.arguments },
+                        });
+                    }
+                }
+                if (toolCalls.length > 0) callbacks.onToolCalls?.(toolCalls);
+                if (collectedUsage) callbacks.onUsage?.(collectedUsage);
+                if (!settled) {
+                    settled = true;
+                    resolve({ content: collectedContent, toolCalls, reasoningContent: collectedReasoning, usage: collectedUsage });
+                }
+            };
+            if (agent === false) {
+                let headerBuffer = Buffer.alloc(0);
+                let bodyBuffer = Buffer.alloc(0);
+                let headersParsed = false;
+                let isChunked = false;
+                let errorStatus = 0;
+                let errorBody = Buffer.alloc(0);
+                let sseBuffer = '';
+                const decoder = new StringDecoder('utf8');
+                let collectedContent = '';
+                let collectedReasoning = '';
+                let collectedUsage: TokenUsage | null = null;
+                const toolCallsMap = new Map<number, { id: string; name: string; arguments: string }>();
+                let socketHandle: { destroy: () => void } | null = null;
+
+                const finishSocketStream = () => {
+                    const toolCalls: ToolCall[] = [];
+                    for (const [, tc] of toolCallsMap) {
+                        if (tc.id && tc.name) {
+                            toolCalls.push({
+                                id: tc.id,
+                                type: 'function',
+                                function: { name: tc.name, arguments: tc.arguments },
+                            });
+                        }
+                    }
+                    if (toolCalls.length > 0) callbacks.onToolCalls?.(toolCalls);
+                    if (collectedUsage) callbacks.onUsage?.(collectedUsage);
+                    if (!settled) {
+                        settled = true;
+                        socketHandle?.destroy();
+                        resolve({ content: collectedContent, toolCalls, reasoningContent: collectedReasoning, usage: collectedUsage });
+                    }
+                };
+
+                const processSseText = (text: string) => {
+                    if (settled) return;
+                    sseBuffer += text;
+                    let nlIdx: number;
+                    while ((nlIdx = sseBuffer.indexOf('\n')) !== -1) {
+                        const line = sseBuffer.slice(0, nlIdx).trim();
+                        sseBuffer = sseBuffer.slice(nlIdx + 1);
+                        if (!line) continue;
+                        if (line === 'data: [DONE]') {
+                            finishSocketStream();
+                            return;
+                        }
+                        if (!line.startsWith('data: ')) continue;
+                        let eventJson: any;
+                        try {
+                            eventJson = JSON.parse(line.slice(6));
+                        } catch {
+                            continue;
+                        }
+                        if (this.apiEndpoint === 'responses') {
+                            const rs = this.handleResponsesStreamEvent(eventJson, toolCallsMap, callbacks);
+                            if (rs.contentDelta) collectedContent += rs.contentDelta;
+                            if (rs.reasoningDelta) collectedReasoning += rs.reasoningDelta;
+                            if (rs.usage) collectedUsage = rs.usage;
+                            continue;
+                        }
+                        const choices = eventJson.choices;
+                        if (!choices?.length) continue;
+                        const delta: StreamDelta = choices[0].delta || {};
+                        if (delta.reasoning_content) {
+                            collectedReasoning += delta.reasoning_content;
+                            callbacks.onReasoning?.(delta.reasoning_content);
+                        }
+                        if (delta.content) {
+                            collectedContent += delta.content;
+                            callbacks.onToken?.(delta.content);
+                        }
+                        if (delta.tool_calls) {
+                            for (const tc of delta.tool_calls) {
+                                const idx = tc.index;
+                                if (!toolCallsMap.has(idx)) toolCallsMap.set(idx, { id: '', name: '', arguments: '' });
+                                const existing = toolCallsMap.get(idx)!;
+                                if (tc.id) existing.id = tc.id;
+                                if (tc.function?.name) existing.name = tc.function.name;
+                                if (tc.function?.arguments) existing.arguments += tc.function.arguments;
+                            }
+                        }
+                        if (eventJson.usage) {
+                            collectedUsage = {
+                                promptTokens: eventJson.usage.prompt_tokens || 0,
+                                completionTokens: eventJson.usage.completion_tokens || 0,
+                                totalTokens: eventJson.usage.total_tokens || 0,
+                            };
+                        }
+                    }
+                };
+
+                const feedBodyBytes = (bytes: Buffer) => {
+                    if (settled || bytes.length === 0) return;
+                    if (!isChunked) {
+                        processSseText(decoder.write(bytes));
+                        return;
+                    }
+                    bodyBuffer = Buffer.concat([bodyBuffer, bytes]);
+                    while (!settled) {
+                        const lineEnd = bodyBuffer.indexOf('\r\n');
+                        if (lineEnd < 0) return;
+                        const sizeText = bodyBuffer.slice(0, lineEnd).toString('ascii').split(';')[0].trim();
+                        const size = parseInt(sizeText, 16);
+                        if (!Number.isFinite(size)) return;
+                        const chunkStart = lineEnd + 2;
+                        const chunkEnd = chunkStart + size;
+                        if (bodyBuffer.length < chunkEnd + 2) return;
+                        if (size === 0) {
+                            finishSocketStream();
+                            return;
+                        }
+                        processSseText(decoder.write(bodyBuffer.slice(chunkStart, chunkEnd)));
+                        bodyBuffer = bodyBuffer.slice(chunkEnd + 2);
+                    }
+                };
+
+                socketHandle = socketRequestRaw(
+                    parsed,
+                    'POST',
+                    {
+                        'Content-Type': 'application/json',
+                        'Content-Length': body.length,
+                        Authorization: `Bearer ${this.apiKey}`,
+                        Accept: 'text/event-stream',
+                    },
+                    body,
+                    120_000,
+                    signal,
+                    (chunk) => {
+                        if (settled) return;
+                        if (errorStatus) {
+                            errorBody = Buffer.concat([errorBody, chunk]);
+                            return;
+                        }
+                        if (!headersParsed) {
+                            headerBuffer = Buffer.concat([headerBuffer, chunk]);
+                            const split = splitHttpResponse(headerBuffer);
+                            if (!split) return;
+                            headersParsed = true;
+                            const statusCode = parseStatusCode(split.headers);
+                            if (statusCode !== 200) {
+                                errorStatus = statusCode;
+                                errorBody = Buffer.concat([errorBody, split.body]);
+                                return;
+                            }
+                            isChunked = /transfer-encoding:\s*chunked/i.test(split.headers);
+                            feedBodyBytes(split.body);
+                            return;
+                        }
+                        feedBodyBytes(chunk);
+                    },
+                    () => {
+                        if (settled) return;
+                        if (!headersParsed) {
+                            settle(new Error('Failed to parse response headers'));
+                            return;
+                        }
+                        if (errorStatus) {
+                            settle(new Error(`API error ${errorStatus}: ${errorBody.toString('utf8').slice(0, 500)}`));
+                            return;
+                        }
+                        processSseText(decoder.end());
+                        finishSocketStream();
+                    },
+                    settle,
+                );
+                return;
+            }
 
             const req = transport.request(
                 {
@@ -426,6 +932,7 @@ export class MiMoAPI {
                         Authorization: `Bearer ${this.apiKey}`,
                         Accept: 'text/event-stream',
                     },
+                    agent,
                     timeout: 120_000,
                 },
                 (res) => {

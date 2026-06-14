@@ -466,7 +466,10 @@ Do not ask the user for clarification or confirmation during this run. If a choi
 
                         // Only emit reasoning in coarse chunks. Fine-grained updates make
                         // the webview main thread hard to use during long thinking streams.
-                        if (reasoningBuffer.length > 1_200) {
+                        // Turbo mode: flush faster since thinking is disabled, content is minimal.
+                        const _effort = this.config.reasoningEffort;
+                        const _flushThreshold = _effort === 'turbo' ? 200 : _effort === 'fast' ? 600 : 1_200;
+                        if (reasoningBuffer.length > _flushThreshold) {
                             events.onReasoning(reasoningBuffer);
                             reasoningBuffer = '';
                         }

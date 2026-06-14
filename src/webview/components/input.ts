@@ -436,8 +436,7 @@ export const InputArea = {
                 html.push(
                     `<button class="model-picker-item${active}" type="button" data-model-value="${this.escapeHtml(option.value)}" data-model-label="${this.escapeHtml(model)}">` +
                     `<span class="model-picker-dot"></span>` +
-                    `<span class="model-picker-main"><span class="model-picker-name">${this.escapeHtml(model)}</span>` +
-                    `<span class="model-picker-meta">${this.escapeHtml(option.endpointName || option.endpointId || '')}</span></span>` +
+                    `<span class="model-picker-main"><span class="model-picker-name">${this.escapeHtml(model)}</span></span>` +
                     `<span class="model-picker-badges">${badges}</span>` +
                     `</button>`,
                 );

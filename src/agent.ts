@@ -340,6 +340,19 @@ export class MiMoAgent extends EventEmitter {
     private isKnownUnsupportedChatModel(model: string): boolean {
         return /^mimo-v2-(?:flash|lite)$/i.test((model || '').trim());
     }
+    /** Check if any message in the history contains image_url content parts */
+    private messagesContainImages(messages: ChatMessage[]): boolean {
+        for (const msg of messages) {
+            if (msg.role !== 'user') continue;
+            if (!Array.isArray(msg.content)) continue;
+            for (const part of msg.content) {
+                if (typeof part === 'object' && (part as any).type === 'image_url') {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
     private findChatModel(currentModel: string, excludeCurrent = false, endpointId = ''): string | null {
         const configuredModels = this.getModelsForEndpoint(endpointId);
         const currentIsMimo = this.isMimoModel(currentModel);
@@ -2776,8 +2789,9 @@ Continue the task now. Treat the previous final draft as already shown to the us
             api = this.getApiForEndpoint(endpointId);
             this.saveConversations();
         }
-        // Auto-fallback: if images are sent with a non-vision model, switch to a configured vision model.
-        if (images && images.length > 0) {
+        // Auto-fallback: if images are present (current message or history) with a non-vision model, switch to a configured vision model.
+        const hasImages = (images && images.length > 0) || this.messagesContainImages(conv.messages);
+        if (hasImages) {
             const caps = this.getModelCapabilities(conv.model);
             if (!caps.vision) {
                 const fallbackModel = this.findVisionModel(conv.model, endpointId);
@@ -3193,7 +3207,10 @@ Do not ask the user for clarification or confirmation during this run. If a choi
                         }
                         // Only emit reasoning in coarse chunks. Fine-grained updates make
                         // the webview main thread hard to use during long thinking streams.
-                        if (reasoningBuffer.length > 1200) {
+                        // Turbo mode: flush faster since thinking is disabled, content is minimal.
+                        const _effort = this.config.reasoningEffort;
+                        const _flushThreshold = _effort === 'turbo' ? 200 : _effort === 'fast' ? 600 : 1_200;
+                        if (reasoningBuffer.length > _flushThreshold) {
                             events.onReasoning(reasoningBuffer);
                             reasoningBuffer = '';
                         }

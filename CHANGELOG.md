@@ -1,325 +1,236 @@
-# Changelog
+# 更新日志
 
-## 1.7.3 (2026-06-12)
+## 1.7.4（2026-06-13）
 
-### Improvements
-- Restored the README to the intended pre-1.7.2 structure instead of embedding 1.7.2 release notes directly in the main product overview.
-- Added the official website link to the README top navigation and repository links section for quicker access.
+### 改进
+- 修复 VS Code Remote WSL 场景下，Windows 系统代理或 VS Code 代理注入 `PROXY 127.0.0.1:7890` 时导致 MiMo API 请求失败的问题。
+- 为 WSL loopback 代理场景加入直接 socket 请求路径，在需要绕开错误代理注入时不再依赖 VS Code/Node 的 HTTP 请求代理层。
+- 保留显式可用代理配置的正常支持，同时对 WSL 中不可达的本地代理注入进行自动忽略或改写处理。
+- Bash/`execute_command` 工具卡片在命令完成后默认保持 Hide/折叠，长命令输入和输出需要用户手动点击 Show 查看。
+- 打包时排除测试生成的 AI 新闻总结文件，避免无关文件进入 VSIX。
+
+### 修复
+- 修复 WSL 中开启 Windows 系统代理后出现 `Failed to establish a socket connection to proxies: PROXY 127.0.0.1:7890` 的问题。
+- 修复早期 WSL 代理绕过实现等待 SSE 连接自然关闭才完成，导致任务耗时异常变长的问题；现在会增量解析 SSE，并在收到 `data: [DONE]` 后立即结束。
+- 修复同版本反复测试时容易安装到旧 VSIX 的混淆问题，将本次最终代理修复统一整理为 1.7.4 发布。
 
-## 1.7.2 (2026-06-12)
+## 1.7.3（2026-06-12）
 
-### Improvements
-- Optimized heavy webview UI paths, including Bash cards, Edit/Write preview cards, and workflow/history detail rendering, to reduce lag from large command output and diffs.
-- Deferred expensive edit and overwrite diff preview rendering until expansion, while keeping visible summaries lightweight by default.
-- Improved history replay responsiveness by lazily hydrating execution-detail drawers instead of eagerly rendering all process DOM.
-- Refined readonly diff-preview workflows and related preview plumbing so multi-file review remains view-only and more stable.
-- Rewrote the README into clean UTF-8 bilingual release documentation and synced version metadata for the new release.
+### 改进
+- 恢复 README 到 1.7.2 之前更清晰的产品介绍结构，避免把发布说明直接嵌入主介绍区域。
+- 在 README 顶部导航和仓库链接区域加入官方网站入口，方便用户访问项目主页。
 
-### Fixes
-- Fixed overwrite write-preview actions using the wrong confirm/reject path, so overwrite approval now correctly uses the write confirmation flow.
-- Removed an invalid collapsible-card call from system messages that could create avoidable runtime instability.
-- Kept manual stop, friendly error rendering, task change review, and recent UI polish aligned with the 1.7.x interaction model after the latest changes.
+## 1.7.2（2026-06-12）
 
-## 1.7.1 (2026-06-11)
+### 改进
+- 优化较重的 Webview UI 路径，包括 Bash 卡片、Edit/Write 预览卡片、workflow 和历史详情渲染，减少大量命令输出或 diff 带来的卡顿。
+- 对大型 edit/overwrite diff 预览采用延迟渲染，默认只展示轻量摘要，展开时再生成详细内容。
+- 优化历史回放性能，执行详情抽屉改为按需渲染，避免一次性创建大量 DOM。
+- 改进只读 diff 预览流程，使多文件审查更稳定，并保持只读。
+- 重写 README 为更干净的双语发布文档，并同步版本元信息。
 
-### Fixes
-- Reduced Auto completion-gate over-continuation so completed Chinese summaries are less likely to be reopened for repeated self-check loops.
-- Preserved already-visible final drafts when extra verification is needed, with follow-up validation rendered as a separate verification card instead of replacing the answer.
-- Localized visible task checklist labels, summaries, and statuses in Chinese UI, and hid priority badges when every todo has the same priority.
-- Clarified task/todo tool guidance so visible todo content follows the user's language and high priority is reserved for truly blocking work.
+### 修复
+- 修复 overwrite 写入预览使用了错误的确认/拒绝流程，覆盖写入现在会正确走 write confirmation。
+- 移除系统消息中无效的 collapsible-card 调用，降低运行时不稳定风险。
+- 保持手动停止、友好错误、任务改动审查和近期 UI 优化在 1.7.x 交互模型下的一致性。
 
-## 1.7.0 (2026-06-11)
+## 1.7.1（2026-06-11）
 
-### Features
-- Added assistant reply footer actions for copy, retry, contextual continue, and feedback, with archived actions hidden until hover to avoid layout jumps.
-- Added a header context-usage badge with staged colors and exact token counts on hover.
-- Added clickable URL and local file-path links in rendered summaries, including Windows paths inside Markdown tables.
-- Saved the MIMO message-handling policy as project documentation and wired routing behavior for common user-message categories.
+### 修复
+- 降低 Auto 模式完成门控的过度继续倾向，中文完成总结不再容易被重复打开做无意义自检。
+- 当需要额外验证时保留已经可见的最终草稿，并把后续验证渲染为独立 verification 卡片，而不是替换答案。
+- 本地化可见任务清单标签、摘要和状态；当所有 todo 优先级相同时隐藏优先级标记。
+- 明确 task/todo 工具提示，使可见 todo 内容跟随用户语言，高优先级仅用于真正阻塞项。
 
-### Improvements
-- Improved MiMo-series model identification, friendly error explanations, and interruption recovery so failures distinguish agent, model, API, local environment, and user-action causes where possible.
-- Refined task, confirmation, feedback, preference, and product-experience routing so complex tasks build a framework before staged execution and verification.
-- Updated built-in skills with clearer output conventions, including richer Git commit summaries with a one-line summary and bullet details.
-- Relaxed Safe Mode networking for explicit public HTTP/HTTPS downloads after URL safety checks while keeping internal/unsafe targets blocked or reviewed.
-- Allowed workspace-outside files to be opened for read-oriented navigation, while external mutations are guarded with backup creation.
-- Improved web search reliability with a DuckDuckGo-first path and Bing fallback.
+## 1.7.0（2026-06-11）
 
-### Fixes
-- Fixed stale `Processed` metadata chips by removing elapsed/token clutter from completed execution drawers and history snapshots.
-- Fixed `mimo-v2.5-pro` context metadata to use the corrected 1M context window.
-- Fixed UI confusion where reply footer source labels always showed `AGENT` and added clearer action placement on the left side.
-- Improved send/stop icon rendering and feedback hover affordance.
+### 新功能
+- 为助手回复底部加入复制、重试、继续和反馈等轻量操作按钮，旧回复的次要操作悬停显示，减少界面跳动。
+- 在头部加入上下文使用量徽章，按使用比例分级显示，并支持悬停查看精确 token 数。
+- Markdown 渲染支持可点击 URL 和本地文件路径，包括表格里的 Windows 路径。
+- 保存 MiMo 消息处理策略文档，并为常见用户消息类型接入路由行为。
 
-## 1.6.9 (2026-06-10)
+### 改进
+- 改进 MiMo 系列模型识别、友好错误解释和中断恢复，使失败原因更容易区分为 agent、模型、API、本地环境或用户操作。
+- 优化任务、确认、反馈、偏好和产品体验类消息路由，复杂任务会先建立执行框架，再分阶段验证。
+- 更新内置 skills 输出约定，包括更清晰的 Git 提交摘要。
+- 安全模式允许明确公开 HTTP/HTTPS 下载，但仍会拦截或审查内部地址和不安全目标。
+- 允许读取工作区外文件用于导航，同时对外部写操作创建备份并保持防护。
+- 提升 web search 可靠性，优先 DuckDuckGo，并提供 Bing fallback。
 
-### Improvements
-- Added the new adversarial, chat-loop, progress-summary, and input-preprocessing agent modules to support richer long-running workflows and recovery handoffs.
-- Expanded internal progress and reasoning orchestration so multi-stage runs share clearer summaries and state handoff logic.
-
-### Fixes
-- Fixed artifact summary extraction so final responses no longer append code-like shell fragments such as canvas or command snippets as fake deliverable files.
-- Kept Chinese final summaries using the localized 交付文件： heading while preserving real generated file paths.
-
-## 1.6.8 (2026-06-09)`r`n`r`n### Improvements
-- Added visible command-purpose narration for shell commands and richer workflow task progress so long runs no longer appear as unexplained Bash-only activity.
-- Expanded interrupted-run handoff summaries with validation status plus changed and inspected file context.
-
-### Fixes
-- Reduced personalized-instruction warning spam by allowing safety-scoped restrictions and documentation examples while still blocking instructions that disable core agent abilities.
-- Added instruction-validation warning de-duplication so unchanged project instructions are not reported every turn.
-
-## 1.6.7 (2026-06-09)
-
-### Fixes
-- Fixed MiMo image messages on `mimo-v2.5-pro` so they can auto-switch to the built-in `mimo-v2.5` vision fallback even when the active model profile only lists the Pro model.
-
-## 1.6.6 (2026-06-09)
-
-### Improvements
-- Added more provider presets to Settings and Add Model, covering Qwen/DashScope, Zhipu GLM, Moonshot/Kimi, Volcengine Ark, SiliconFlow, Baidu Qianfan, Tencent Hunyuan, OpenRouter, Groq, Google Gemini, Mistral AI, and xAI Grok.
-- Extended provider detection for saved profiles so common OpenAI-compatible domestic and international endpoints keep their provider labels instead of falling back to Custom.
-- Updated README version notes for the expanded provider preset list.
-
-## 1.6.5 (2026-06-09)
-
-### Improvements
-- Simplified chat model picker labels so saved model-card routes display as short model names instead of long endpoint/model route strings.
-- Kept one chat model option per Settings model card instead of expanding each card's legacy `models` array into extra dropdown entries.
-- Final summaries now include exact generated or verified artifact paths, such as synthesized audio files, so users can find deliverables immediately.
-- Added provider selection to Settings model cards and Add Model, with MiMo, DeepSeek, OpenAI, and custom OpenAI-compatible presets.
-- Replaced the native chat model dropdown with a grouped modern model picker and made mode/model/reasoning controls lighter without visible borders.
-- Fixed provider parameter failures leaving chat stuck in a busy state, and capped saved/requested Max Tokens at 65536 to avoid invalid `max_tokens` requests.
-
-### Fixes
-- Prevented repeated Settings saves from generating increasingly long model profile IDs.
-
-## 1.6.4 (2026-06-09)
-
-### Improvements
-- Compact Settings model cards into one-line summaries with expandable details for editing API keys, base URLs, and model IDs.
-- Widened the generation settings section so parameter controls use the full settings page width.
-
-### Fixes
-- Fixed the API key eye icon not toggling visibility when the click landed on the SVG icon instead of the button.
-
-## 1.6.3 (2026-06-09)
-
-### Improvements
-- Reworked Settings model management into a direct model-card list where each model has its own API key, base URL, model ID, default selection, copy, and delete controls.
-- Added a show/hide API key toggle in each model card.
-
-## 1.6.2 (2026-06-09)
-
-### Improvements
-- Split Settings into separate API connection and model list cards so provider credentials and per-profile model IDs are easier to manage.
-
-### Fixes
-- Fixed the dedicated Settings page becoming unresponsive because the generated webview script could contain an invalid regular expression.
-- Made Open Config File create `~/.mimo/settings.json` when the file does not exist yet.
-
-## 1.6.1 (2026-06-09)
-
-### Fixes
-- Improved dropdown ergonomics: the History panel and mode selector now close when clicking outside them.
-- Added Escape-key dismissal for the History panel and mode selector popup.
-
-## 1.6.0 (2026-06-09)
-
-### Features
-- Added a built-in `mimo_multimodal` MCP bridge so text/Pro models can indirectly handle screenshots, images, audio, video, transcription, and TTS by delegating media work to MiMo multimodal/TTS models first.
-- Added multimodal MCP tools for image analysis, audio analysis, video analysis, audio transcription, and speech synthesis output files.
-- Added task scheduling support with `schedule_tasks`, allowing MiMo to split multi-task requests, estimate complexity, infer dependencies, and choose a better execution order instead of blindly following user order.
-- Added a real `update_todos` tool with visible checklist rendering so long tasks can show planned, active, and completed steps.
-- Exposed `run_workflow` to the model for planned sequential/parallel workflow execution when tasks can be decomposed safely.
-- Added VS Code window-state restoration support so MiMo chat windows can be remembered and restored more naturally after VS Code restarts.
-
-### Improvements
-- Expanded model/profile routing so API profiles, active routes, and model selection stay aligned across settings, chat, and model switching.
-- Improved settings reliability by embedding initial settings data in the webview and removing a generated JavaScript regex that could break the settings page.
-- Added stronger completion and progress handling for long tasks, including task schedule/todo progress classification.
-- Refined tool cards for schedule, todo, workflow, and large command inputs.
-
-### Fixes
-- Fixed the model settings page becoming empty and unclickable because the webview script could fail during initialization.
-- Fixed `Update Todos` appearing to exist only as text/checklist rendering without a real callable tool.
-- Fixed multi-task execution behavior so dependencies can be represented explicitly before execution.
-
-## 1.5.6 (2026-06-09)
-
-### Improvements
-- Added a built-in `mimo_multimodal` MCP server for indirect multimodal support from Pro/text models: image, audio, video understanding, audio transcription, and TTS file generation.
-- The built-in multimodal MCP uses `mimo-v2.5` and `mimo-v2.5-tts` by default, with environment overrides for testing Omni/TTS model IDs.
-- Added CC-switch-like model switching through `MiMo: Switch Model`, with QuickPick entries grouped by API profile/endpoint and model.
-- Grouped the chat model selector by API profile so the same model ID can be selected independently on different base URLs.
-- Improved model settings so one API profile can hold multiple model IDs, model IDs can be pasted in batches, and `api.active_route` is kept aligned with the selected profile/model.
-- Added local completion detection for explicit git commit/push tasks. When MiMo sees reliable evidence such as `Everything up-to-date`, a clean working tree, an up-to-date tracking branch, or a remote log containing the commit, it now finalizes immediately instead of continuing to inspect.
-- Reclassified read-only git shell checks such as `git status`, `git log`, `git diff`, `git show`, and `git remote -v` so they no longer count as state-changing progress that can keep Auto mode alive indefinitely.
-- Added a targeted git-delivery convergence instruction to discourage repeated `git status/log/diff` checks after push delivery has already been verified.
-- Strengthened reasoning-loop detection with repeated sentence/chunk matching so repeated Thought text is interrupted earlier.
-
-### Fixes
-- Fixed simple "git and push" tasks continuing for many extra rounds after the commit had already been pushed or confirmed up to date.
-- Fixed `Everything up-to-date` output emitted through stderr/PowerShell wrappers being treated as suspicious instead of valid remote-sync evidence.
-- Fixed a stuck Thought recovery path where MiMo could keep reasoning even though git delivery evidence was already sufficient to end the task.
-- Fixed edited-file Diff cards showing stale workspace Git diffs on later no-change messages. Diff cards now require file changes recorded by the current turn's mutating tools, and Git diff is only used as a filtered enhancement for those files.
-- Added a no-Git fallback for edited-file cards: when Git is unavailable, MiMo still shows the files changed by the current turn from tool records, with automatic undo disabled.
-- Added convergence regression tests for completed git push evidence, read-only git command progress classification, and repeated Thought loop detection.
-
-## 1.5.5 (2026-06-08)
-
-### Features
-- Added per-window runtime isolation so active conversations, memory, and token usage are separated across VS Code windows, including multiple windows opened on the same workspace.
-- Added queued-message controls for long-running tasks: queued messages can be edited, removed, or sent immediately with the new `Run` action, interrupting the current run and starting the selected queued item after the conversation becomes idle.
-- Added workspace-level chat history persistence with automatic migration from recent window-scoped history folders, so debug restarts and new windows can still see saved conversations.
-
-### Improvements
-- Improved Webview responsiveness during long reasoning streams by batching reasoning updates, throttling stream rendering, and avoiding expensive full re-renders for already displayed Thought content.
-- Made Thought expansion a lightweight local interaction so completed Thought blocks can open without blocking scrolling or input controls.
-- Kept recovery, handoff, and progress prompts aligned with the user's language so Chinese conversations do not drift into English after recovery paths.
-- Compacted large command inputs in tool cards and nudged the agent to use file tools for large generated artifacts instead of embedding full HTML/CSS/JS bodies in shell commands.
-- Reduced large-project overhead in `list_directory` by making it asynchronous, bounding directory entries, limiting stat calls, and adding a short timeout.
-- Raised the minimum Auto mode round budget and disabled aggressive stop protection before 200 rounds to avoid premature "paused by protection" behavior on real long tasks.
-- Strengthened duplicate read-only tool guards so repeated broad scans are skipped earlier.
-- Moved 1.5.5 release highlights into the README changelog section so the README opens with the MiMo product overview again.
-- Preserved user image data and much larger assistant/tool/reasoning payloads in newly saved history records for closer replay fidelity.
-
-### Fixes
-- Fixed the main send button state: when MiMo is running and the input box is empty, it now always shows Stop even when queued messages exist.
-- Fixed stale queued-message UI after a queued item is sent.
-- Fixed debug sessions losing visible history because history was stored under a fresh per-window session directory.
-- Fixed cross-window contention by moving runtime state paths to window-scoped storage while keeping saved history workspace-scoped.
-- Fixed multi-file change review cards so expanding "edited files" shows every file's diff instead of only the last file's hunks.
-- Added file-row diff targeting in the change review card so selecting a file expands the patch and scrolls to that file.
-- Included untracked new text files in the task change review card, with generated text patches for review and undo when safe.
-- Merged Git diff files with tool-captured edited files in the final change list so external or baseline-modified files are still visible to the user.
-- Removed the duplicate compact Changed Files card so completed turns keep a single edited-files review card.
-- Added tool-diff fallback for per-file review rows and disabled undo when no safe reversible Git patch is available.
-- Fixed history replay image placeholders for newly saved conversations by keeping image URLs instead of replacing them during history normalization.
-- Expanded Processed history replay details so long Thought/tool bodies are restored directly instead of showing a short placeholder.
-- Added high-fidelity history UI snapshots so newly saved conversations can replay workflow DOM, diff cards, and edited-file cards close to the original run.
-- Restored expandable Thought content from history UI snapshots and localized Thought/Thinking labels to Chinese as "思考/思考中" in Chinese mode.
-- Preserved edited-file diff patches in history snapshots and added a read-only history diff fallback when saved tool details contain `git_diff` output.
-- Synced the webview language selection to the agent runtime so bottom status prompts such as round planning follow English/Chinese UI mode.
-- Changed Safe Mode Git auto-snapshot commits to opt-in only; the Git snapshot checkbox is now off by default and no longer creates commits unless explicitly enabled.
-- Densified the Settings generation panel with reasoning profile controls, quick presets, and compact parameter guidance so the second settings card no longer feels empty.
-- Refined chat layout spacing, indentation, and card rhythm for assistant output, Thought blocks, workflow cards, and edited-file summaries without changing interaction behavior.
-- Kept assistant process narration inside the Processed drawer after completion instead of leaving workflow text floating above the final answer.
-- Kept only the last final-answer segment outside Processed so earlier streamed narration is folded into the Processed drawer.
-- Added a frontend tool-diff fallback edited-files card when no safe isolated Git patch summary is available.
-- Included staged Git diffs in task change summaries so files added to the index still appear with a staged badge.
-- Reduced wasteful repeated file reads by tracking read_file line ranges per user turn and skipping heavily overlapping ranges with an uncovered-gap hint.
-- Prevented pending-action prose such as "let me check/run/verify" from being treated as a final answer, including Chinese variants after prior tools ran.
-- Routed local debugging questions about Git, diff cards, VS Code, and MiMo through the tool path instead of direct-answer mode.
-- Added an agent-level retry for transient stream errors such as timeouts, reset connections, and socket interruptions.
-
-## 1.5.4 (2026-06-07)
-
-### Features
-- Added round narration system that shows task complexity, round budget, stall status, and mode hints at the start of each agent round for better task progress visibility.
-- Enhanced tool action descriptions with human-readable labels (e.g. "读取 src/agent.ts", "搜索 pattern", "运行命令 ...").
-- Added structured progress tracking per round: completed count, error count, no-progress count, progress tool count, and read-only success count.
-- Introduced modular webview message components: `ChatBubble`, `CodeBlock`, `DiffView`, `StreamingRenderer`, `ThinkingBlock`, `ToolCard` for cleaner rendering and future extensibility.
-
-### Improvements
-- Improved agent stall detection logic: read-only success now counts individual tool calls instead of boolean, preventing false stall triggers on multi-tool rounds.
-- Refactored webview messages module into separate component files under `src/webview/components/messages/`.
-- Enhanced chat UI styles for thinking blocks, tool cards, and diff views.
-
-## 1.5.2 (2026-06-07)
-
-### Fixes
-- Fixed extension activation failure: removed `node_modules/**` from `.vscodeignore` so runtime dependencies (`highlight.js`, `puppeteer-core`) are included in the published VSIX.
-- Fixed `command 'mimo-agent.chat' not found` error caused by missing dependencies in the packaged extension.
-
-### Improvements
-- Reasoning mode switch no longer shows redundant "设置已保存并生效" confirmation in chat area.
-
-## 1.5.0 (2026-06-07)
-
-### Features
-- Added an Auto completion gate so complex coding tasks do not finalize without workspace evidence or validation status.
-- Added lightweight agent trace logging to `~/.mimo/traces/*.jsonl` for round, tool, context compression, and stop-guard diagnostics.
-- Added provider profile storage for CC-switch style model configuration in `~/.mimo/settings.json`.
-- Added settings UI support for active provider profile and provider profiles JSON, with quick presets for MiMo, Deepseek, and OpenAI-compatible endpoints.
-
-### Improvements
-- Strengthened the system prompt completion contract: inspect before finalizing complex tasks, validate after edits, and report validation status.
-- Kept provider profile support backward-compatible with existing `api.base_url`, `api.model`, `api.api_key`, and `api.models` settings.
-
-## 1.4.9 (2026-06-07)
-
-### Features
-- Added an explicit dependency install policy for project package installs and system software installs.
-- Project dependency install commands can run automatically with an extended timeout; system software installs require confirmation or are blocked by settings.
-- Added dependency install controls to the settings UI and VS Code configuration schema.
-
-### Fixes
-- Passed dependency install policy through main agent, sub-agent, and workflow tool execution paths.
-- Preserved command timeout status so install timeouts are reported clearly.
-- Refreshed default webview language on startup so Chinese UI text is applied before user interaction.
-
-## 1.4.8 (2026-06-06)
-
-### Fixes
-- Hardened connection recovery, removed pre-tool round-timeout stops, filtered leaked tool-call tags, and copied the packaged VSIX to `releases/`.
-- 收紧 Auto 路由、上下文压缩和重试节奏，减少卡顿与假死感
-- 修复 webview 中文模式下的输入框、模式切换与历史/按钮文案跟随问题
-- 优化历史回放收口，减少"思考中"状态残留
-- 重写历史记录展示路径，改为直接渲染最终 transcript，避免点击历史时卡顿、重复 `Processed` 和原始记录不一致
-- 精简 `Processed` 折叠头，仅保留处理时间与 token 使用量，不再显示工具数量或思考轮次
-- 为长任务新增滚动上下文自动压缩记忆，运行时使用 summary + recent messages，保留原始历史记录
-- 修复 Infinite 模式误用 Auto 短流程提示的问题，增强复杂任务持续探索、自检和验证要求
-- 为 Infinite 增加复杂任务完成门，缺少文件探索或验证证据时会继续推进而不是过早结束
-
-## 1.4.7 (2026-06-06)
-
-### Fixes
-- 修复中文模式下模型切换提示未跟随语言的问题
-- 统一模型自动切换与语言按钮的本地化显示
-
-## 1.4.6 (2026-06-06)
-
-### Fixes
-- 修复中文模式下模型切换提示仍显示英文的问题
-- 统一语言切换按钮文本显示
-
-## 1.4.5 (2026-06-06)
-
-### Fixes
-- 修复历史记录回放时思考状态无法收口、一直转圈的问题
-- 优化历史消息回放的 done 事件补齐逻辑
-- 保持回放后的界面状态一致
-
-## 1.4.4 (2026-06-06)
-
-### Fixes
-- 补全模式国际化文案，新增 Infinite 模式中文显示
-- 统一语言切换按钮文本
-- 发布 1.4.4 版本
-
-## 1.4.3 (2026-06-06)
-
-### Fixes
-- 移除冗余的 activationEvents（VS Code 自动生成）
-- 优化扩展激活性能，减少 UI 阻塞
-
-## 1.4.2 (2026-06-06)
-
-### Fixes
-- 修复推理循环检测后的恢复机制
-- 新增三级循环恢复：强引导 -> 新模型调用 -> 退出总结
-- 修复设置页面多语言支持
-
-## 1.4.1 (2026-06-06)
-
-### Fixes
-- 修复图标不显示问题（添加 package.json icon 字段）
-- 更新仓库链接指向 MIMO-Agent
-
-## 1.4.0 (2026-06-06)
-
-### Features
-- 设置界面支持多语言（跟随 VS Code 语言设置）
-- 推理循环检测优化：循环时自动切换新模型继续任务，避免会话中断
-- 新增三级循环恢复机制（强引导 -> 新模型调用 -> 退出总结）
+### 修复
+- 移除完成后执行抽屉和历史快照中陈旧的 Processed 元信息。
+- 修正 `mimo-v2.5-pro` 上下文窗口元数据为 1M。
+- 修复回复底部来源标签总是显示 `AGENT` 的问题，并让操作区位置更清晰。
+- 优化发送/停止图标与反馈悬停交互。
 
+## 1.6.9（2026-06-10）
+
+### 改进
+- 加入新的 adversarial、chat-loop、progress-summary 和 input-preprocessing agent 模块，为长任务和恢复交接提供更丰富的内部能力。
+- 扩展内部进度和推理编排，使多阶段运行拥有更清晰的摘要和状态交接。
+
+### 修复
+- 修复 artifact 摘要提取误把 canvas 或命令片段等代码样文本当作交付文件的问题。
+- 保留中文最终总结中的交付文件标题，同时确保真实生成文件路径不会丢失。
+
+## 1.6.8（2026-06-09）
+
+### 改进
+- 为 shell 命令加入可见的执行目的说明，并增强 workflow 子任务进度，减少只有 Bash 卡片却缺少上下文的情况。
+- 扩展中断运行的 handoff 摘要，包含验证状态、已修改文件和已检查上下文。
+
+### 修复
+- 降低个性化指令警告噪声，允许安全范围内的限制和文档示例，同时继续阻止禁用 agent 核心能力的指令。
+- 增加指令验证警告去重，避免未变化的项目指令每轮重复报告。
+
+## 1.6.7（2026-06-09）
+
+### 修复
+- 修复 `mimo-v2.5-pro` 处理图片消息时，即使当前 profile 只列出 Pro 模型，也能自动切换到内置 `mimo-v2.5` 视觉 fallback。
+
+## 1.6.6（2026-06-09）
+
+### 改进
+- 在 Settings 和 Add Model 中加入更多 provider 预设，包括 Qwen/DashScope、智谱 GLM、Moonshot/Kimi、火山方舟、硅基流动、百度千帆、腾讯混元、OpenRouter、Groq、Google Gemini、Mistral AI 和 xAI Grok。
+- 扩展已保存 profile 的 provider 识别，常见 OpenAI-compatible 国内外端点会保留 provider 标签，不再退回 Custom。
+- 更新 README 版本说明，记录扩展后的 provider 预设列表。
+
+## 1.6.5（2026-06-09）
+
+### 改进
+- 简化聊天模型选择器标签，已保存模型卡片路由显示为短模型名，而不是冗长的 endpoint/model 字符串。
+- 每张 Settings 模型卡只保留一个聊天模型选项，避免把旧 `models` 数组展开成重复下拉项。
+- 最终总结会包含生成或验证过的精确 artifact 路径，方便用户立即定位交付物。
+- Settings 模型卡和 Add Model 支持 provider 选择，提供 MiMo、DeepSeek、OpenAI 和自定义 OpenAI-compatible 预设。
+- 用分组式现代模型选择器替代原生下拉，并让模式、模型和推理控制更轻量。
+- 修复 provider 参数失败后聊天保持 busy 的问题，并将保存/请求的 Max Tokens 限制到 65536 以内，避免非法请求。
+
+### 修复
+- 防止重复保存 Settings 生成越来越长的模型 profile ID。
+
+## 1.6.4（2026-06-09）
+
+### 改进
+- 将 Settings 模型卡压缩为单行摘要，并支持展开编辑 API Key、Base URL 和模型 ID。
+- 加宽 generation settings 区域，使参数控件使用完整设置页宽度。
+
+### 修复
+- 修复点击 API Key 眼睛图标中的 SVG 时无法切换可见性的情况。
+
+## 1.6.3（2026-06-09）
+
+### 改进
+- 将 Settings 模型管理改为直接的模型卡列表，每个模型拥有独立 API Key、Base URL、模型 ID、默认选择、复制和删除控制。
+- 每张模型卡加入 API Key 显示/隐藏切换。
+
+## 1.6.2（2026-06-09）
+
+### 改进
+- 将 Settings 拆分为 API connection 和 model list 两个区域，使 provider 凭据和 profile 模型 ID 更易管理。
+
+### 修复
+- 修复专用 Settings 页面因生成脚本包含非法正则而不可响应的问题。
+- Open Config File 会在配置文件不存在时创建 `~/.mimo/settings.json`。
+
+## 1.6.1（2026-06-09）
+
+### 修复
+- 优化下拉交互：点击外部会关闭 History 面板和模式选择器。
+- History 面板和模式选择器支持 Escape 键关闭。
+
+## 1.6.0（2026-06-09）
+
+### 新功能
+- 加入内置 `mimo_multimodal` MCP bridge，使文本/Pro 模型可间接处理截图、图片、音频、视频、转写和 TTS。
+- 增加图片分析、音频分析、视频分析、音频转写和语音合成输出文件等多模态 MCP 工具。
+- 加入 `schedule_tasks`，可拆分多任务请求、估算复杂度、推断依赖并安排执行顺序。
+- 加入真正的 `update_todos` 工具，在界面中渲染可见任务清单。
+- 暴露 `run_workflow`，用于计划型顺序/并行工作流执行。
+- 支持 VS Code 窗口状态恢复，使 MiMo 聊天窗口重启后更自然地恢复。
+
+### 改进
+- 扩展模型/profile 路由，使 API profiles、active routes 和模型选择在设置、聊天和模型切换中保持一致。
+- 通过嵌入初始 settings 数据和移除有问题的生成正则，提升设置页稳定性。
+- 增强长任务完成和进度处理，包括 task schedule/todo 的进度分类。
+- 优化 schedule、todo、workflow 和大型命令输入的工具卡片。
+
+### 修复
+- 修复模型设置页空白或不可点击的问题。
+- 修复 `Update Todos` 看起来只有文本渲染而没有真实 callable tool 的问题。
+- 修复多任务执行行为，使依赖关系能在执行前显式表达。
+
+## 1.5.6（2026-06-09）
+
+### 改进
+- 加入内置 `mimo_multimodal` MCP server，为 Pro/文本模型提供间接多模态能力。
+- 默认使用 `mimo-v2.5` 和 `mimo-v2.5-tts` 处理多模态与 TTS，并提供环境变量覆盖。
+- 通过 `MiMo: Switch Model` 提供类似模型切换器的快速切换能力，按 API profile/endpoint 分组。
+- 模型选择器按 API profile 分组，同名模型 ID 可在不同 base URL 下安全共存。
+- 设置页支持一个 API profile 保存多个模型 ID、批量粘贴模型 ID，并保持 `api.active_route` 与选择状态一致。
+- 为 git commit/push 任务加入本地完成检测，看到可靠证据后立即收敛，不再反复检查。
+- 将只读 Git shell 检查归类为非状态改变进展，避免 Auto 模式无限继续。
+- 加入针对 Git 交付完成的收敛提示，减少 push 完成后的重复 `git status/log/diff`。
+- 加强重复 Thought 检测，能更早打断重复推理。
+
+### 修复
+- 修复 commit 已推送或已确认同步后仍继续多轮检查的问题。
+- 修复 `Everything up-to-date` 从 stderr/PowerShell 包装输出时被误判为可疑的问题。
+- 修复 Git 交付证据已充分时仍卡在 Thought 恢复路径的问题。
+- 修复后续无改动消息中 edited-file Diff 卡片显示陈旧工作区 diff 的问题。
+- 为无 Git 场景加入 edited-file fallback，仍能显示当前轮工具记录的文件改动。
+- 增加完成 git push 证据、只读 git 命令分类和重复 Thought 循环的回归测试。
+
+## 1.5.5（2026-06-08）
+
+### 新功能
+- 加入窗口级运行时隔离，使不同 VS Code 窗口中的会话、记忆和 token 使用统计互不干扰。
+- 加入长任务消息队列控制：排队消息可编辑、移除或立即运行。
+- 加入工作区级聊天历史持久化，并自动迁移近期窗口级历史。
+
+### 改进
+- 通过批量 reasoning 更新、节流流式渲染和避免重复全量渲染，提高长推理流下的 Webview 响应速度。
+- Thought 展开改为轻量本地交互，完成后的 Thought 可快速打开。
+- 保持恢复、交接和进度提示跟随用户语言。
+- 压缩大型命令输入卡片，并提示 agent 使用文件工具生成大型 artifact，避免在 shell 命令中嵌入完整 HTML/CSS/JS。
+- 优化大项目 `list_directory`，采用异步、限制条目、限制 stat 调用并加入短超时。
+- 提高 Auto 模式最低轮次预算，并在 200 轮前关闭过于激进的停止保护。
+- 加强重复只读工具防护，提前跳过重复大范围扫描。
+- 将 1.5.5 发布亮点移入 README changelog 区域，使 README 开头重新保持产品概览。
+- 保存历史时保留用户图片和更大的 assistant/tool/reasoning 内容，提高回放保真度。
+
+### 修复
+- 修复运行中且输入框为空时主按钮没有稳定显示 Stop 的问题。
+- 修复排队消息发送后 UI 状态陈旧的问题。
+- 修复 debug 会话因窗口 session 目录变化而丢失可见历史的问题。
+- 修复跨窗口状态争用，将运行时状态移到窗口级目录，同时保持历史按工作区持久化。
+- 修复多文件改动审查卡片只显示最后一个文件 diff 的问题。
+- 增加文件行级 diff 定位，选择文件可展开对应 patch 并滚动定位。
+- 将未跟踪新文本文件纳入任务改动审查卡，并在安全时生成可回滚文本 patch。
+- 合并 Git diff 文件和工具捕获的 edited files，使外部或基线已有改动仍可见。
+- 移除重复的 Changed Files 紧凑卡片。
+- 为每个文件审查行增加 tool-diff fallback；没有安全 Git patch 时禁用 undo。
+- 修复历史回放中图片占位符问题，新保存会话保留 image URLs。
+- 扩展 Processed 历史回放详情，长 Thought/tool 内容直接恢复，不再只显示短占位。
+- 加入高保真历史 UI 快照，使新保存会话能更接近原始运行状态地回放 workflow、diff 和 edited-file 卡片。
+- 恢复历史 UI 快照中的可展开 Thought 内容，并本地化 Thought/Thinking 标签。
+- 在历史快照中保留 edited-file diff patch，并在保存内容包含 `git_diff` 时提供只读历史 diff fallback。
+- 同步 Webview 语言选择到 agent runtime，使底部状态提示跟随中英文 UI。
+- Git 自动快照默认改为关闭，只有用户显式启用时才创建快照提交。
+- 压缩 Settings generation 面板，加入推理档位、快速预设和紧凑参数说明。
+- 优化聊天布局间距、缩进和卡片节奏。
+- 任务完成后将执行说明保留在 Processed 抽屉中。
+- 只保留最后一段最终答案在 Processed 外部，早期流式说明折叠进 Processed。
+- 当前轮没有安全隔离 Git patch 时，前端仍提供 tool-diff fallback 的 edited-files 卡片。
+- 将 staged Git diff 纳入 task change summary。
+- 减少浪费性重复 `read_file`，按用户轮次跟踪行范围并跳过高度重叠读取。
+- 防止“让我检查/运行/验证”等待办措辞被误判为最终答案。
+- 将本地调试类问题通过工具路径处理，而不是直接回答。
+- 为超时、连接重置和 socket 中断等 transient stream error 增加 agent 级重试。
+
+## 1.5.4（2026-06-07）
+
+### 新功能
+- 加入轮次说明系统，展示任务复杂度、轮次预算、停滞状态和模式提示。
+- 增强工具动作描述，例如读取文件、搜索 pattern、运行命令等。
+- 加入每轮结构化进度跟踪，包括完成数、错误数、无进展数、推进型工具数和只读成功数。

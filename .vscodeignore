@@ -9,6 +9,7 @@ out/test/**
 *.log
 *.tmp
 *.bak
+AI_News_Summary_*.md
 *_ANALYSIS*.md
 *_REPORT*.md
 MIMO_VS_*.md

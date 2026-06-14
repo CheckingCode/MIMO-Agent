@@ -33,7 +33,7 @@
 
 MiMo Agent 是一个运行在 VS Code 内的本地 AI 编程助手。它可以阅读项目、搜索代码、编辑文件、运行命令、查看 Git diff、管理多轮任务，并通过 OpenAI 兼容 API 调用小米 MiMo、DeepSeek、OpenAI 或自定义模型端点。
 
-当前版本：`v1.7.3`。
+当前版本：`v1.7.4`。
 
 ## ✨ 当前核心能力
 
@@ -361,6 +361,12 @@ npm run compile
 
 详细版本记录见 [CHANGELOG.md](CHANGELOG.md)。
 
+`v1.7.4` 重点：
+
+- 修复 VS Code Remote WSL 中系统代理注入 `PROXY 127.0.0.1:7890` 时 MiMo API 请求失败的问题。
+- 为 WSL loopback 代理场景加入直接 socket 请求路径，并修复 SSE 流式响应等待连接关闭导致耗时过长的问题。
+- Bash 工具卡片在命令完成后默认保持 Hide/折叠，长命令输入和输出需要手动 Show 查看。
+
 `v1.7.0` 重点：
 
 - 回复底部新增复制、重试、继续和反馈等轻量操作按钮，旧回复悬停显示，减少界面跳动。
@@ -390,7 +396,13 @@ npm run compile
 
 MiMo Agent is a local AI coding assistant for VS Code. It can inspect your workspace, search code, edit files, run commands, review Git diffs, manage long-running tasks, and call Xiaomi MiMo, DeepSeek, OpenAI, or custom OpenAI-compatible endpoints.
 
-Current version: `v1.7.3`.
+Current version: `v1.7.4`.
+
+## 1.7.4 Highlights
+
+- Fixed MiMo API requests in VS Code Remote WSL when the system proxy injects `PROXY 127.0.0.1:7890`.
+- Added a direct socket request path for WSL loopback-proxy bypass and fixed slow SSE completion by resolving on `data: [DONE]`.
+- Bash tool cards now remain hidden/collapsed by default after command completion; click Show to inspect command input and output.
 
 ## 1.7.0 Highlights
 
