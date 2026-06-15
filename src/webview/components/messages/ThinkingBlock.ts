@@ -7,6 +7,7 @@ import { escapeHtml } from '../../utils/dom';
 
 const REASONING_PREVIEW_CHARS = 360;
 const REASONING_STORE_CHARS = 4000;
+const REASONING_HISTORY_DISPLAY_CHARS = 6000;
 const REASONING_DEDUP_INTERVAL_MS = 3000;
 
 export function reasoningStoreLimit(): number {
@@ -17,6 +18,7 @@ export function filterReasoningNoise(text: string): string {
     if (!text) return '';
     const noisyPatterns = [
         /\[Context:\s*[^\]]+\]/gi,
+        /^\s*\[(?:Router|Intent|意图)[^\]\n]*\][^\n]*(?:\n|$)/gmi,
         /\[Progress\][^\[]*/gi,
         /\[Soft budget reached\][^\[]*/gi,
         /\[Stop guard\][^\[]*/gi,
@@ -53,9 +55,8 @@ export function sanitizeReasoningForDisplay(text: string, trimmed = false): stri
 
     if (looksLikePrivateDraft) {
         const lines = [
-            '内部推理已隐藏，仅保留执行进度。',
-            '原因：模型返回了较长的 reasoning_content，其中可能包含草稿、代码片段或链式推理，不适合作为用户可见内容。',
-            '请以工具卡片、文件变更和最终答复为准。',
+            '已隐藏详细思考内容。',
+            '执行进度、工具结果和最终答复会继续显示。',
         ];
         if (safeStatusLines.length > 0) {
             lines.push('', ...safeStatusLines);
@@ -70,6 +71,29 @@ export function sanitizeReasoningForDisplay(text: string, trimmed = false): stri
     const clipped = filtered.length > maxChars
         ? `${filtered.slice(0, maxChars)}\n\n[思考内容过长，已截断显示]`
         : filtered;
+    return trimmed ? `${t('thinking.trimmed.prefix')}${clipped}` : clipped;
+}
+
+export function sanitizeReasoningForHistoryDisplay(text: string, trimmed = false): string {
+    const cleaned = String(text || '')
+        .replace(/\[reasoning compacted for context\]/gi, '')
+        .replace(/\[reasoning omitted for context\]/gi, '')
+        .replace(/\[Earlier reasoning trimmed[^\]]*\]/gi, '')
+        .split(/\r?\n/)
+        .map(line => line.trimEnd())
+        .filter(line => {
+            const trimmedLine = line.trim();
+            if (!trimmedLine) return false;
+            return !/^\[(?:Context|Progress|Soft budget reached|Stop guard|Round budget|Complexity|Rate limited|Model fallback|Handoff|Completion gate)[^\]]*\]/i.test(trimmedLine);
+        })
+        .join('\n')
+        .replace(/\n{4,}/g, '\n\n\n')
+        .trim();
+    if (!cleaned) return '';
+    const maxChars = REASONING_HISTORY_DISPLAY_CHARS;
+    const clipped = cleaned.length > maxChars
+        ? `${cleaned.slice(0, Math.floor(maxChars * 0.65)).trimEnd()}\n\n... (${cleaned.length - maxChars} chars omitted from history view) ...\n\n${cleaned.slice(-Math.floor(maxChars * 0.25)).trimStart()}`
+        : cleaned;
     return trimmed ? `${t('thinking.trimmed.prefix')}${clipped}` : clipped;
 }
 
@@ -147,7 +171,10 @@ export function renderThinkingBlock(thinkBlock: HTMLElement, forceFull = false, 
             !(thinkBlock as any)._dedupedText ||
             now - ((thinkBlock as any)._lastDedupAt || 0) > REASONING_DEDUP_INTERVAL_MS
         ) {
-            (thinkBlock as any)._dedupedText = dedupReasoning(sanitizeReasoningForDisplay(rawText, trimmed));
+            const sanitize = thinkBlock.dataset.historyReasoning === 'true'
+                ? sanitizeReasoningForHistoryDisplay
+                : sanitizeReasoningForDisplay;
+            (thinkBlock as any)._dedupedText = dedupReasoning(sanitize(rawText, trimmed));
             (thinkBlock as any)._lastDedupAt = now;
         }
         displayText = (thinkBlock as any)._dedupedText;

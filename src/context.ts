@@ -209,13 +209,12 @@ function compressMessages(messages: ChatMessage[], config: ContextConfig, keepRe
             }
         }
 
-        // Compact old reasoning. For messages with tool calls, keep the field present
-        // because some OpenAI-compatible APIs expect it in the replayed assistant message.
+        // Do not rewrite reasoning_content on assistant tool-call messages.
+        // Some OpenAI-compatible APIs validate the exact reasoning/tool protocol
+        // when continuing after tool results; shortening it can turn into 400s.
         const isRecent = i >= messages.length - keepRecent;
-        if (!isRecent && msg.reasoning_content) {
-            (msg as any).reasoning_content = msg.tool_calls?.length
-                ? compressReasoningContent(msg.reasoning_content, 900)
-                : '[reasoning omitted for context]';
+        if (!isRecent && msg.reasoning_content && !msg.tool_calls?.length) {
+            (msg as any).reasoning_content = '[reasoning omitted for context]';
         }
     }
 }

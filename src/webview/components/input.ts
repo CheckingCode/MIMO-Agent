@@ -6,6 +6,28 @@ import { bus } from '../core/bus';
 import { vscode } from '../core/vscode';
 import { t } from '../core/i18n';
 
+interface AttachedFileRef {
+    name: string;
+    relativePath: string;
+    fullPath: string;
+    marker: string;
+}
+
+interface FilePickerEntry {
+    name: string;
+    relativePath: string;
+    fullPath: string;
+    kind?: 'file' | 'directory';
+    depth?: number;
+    parent?: string;
+}
+
+interface FileTrigger {
+    start: number;
+    end: number;
+    query: string;
+}
+
 function sendButtonIcon(kind: 'send' | 'stop'): string {
     if (kind === 'stop') {
         return '<svg class="send-icon send-icon-stop" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="5" y="5" width="14" height="14" rx="3"/></svg>';
@@ -54,13 +76,13 @@ export const InputArea = {
         let draftImages: ImageData[] = [];
 
         input.addEventListener('keydown', (e) => {
+            if (this._handleFileSearchKeydown(e, input)) return;
             if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
                 if (document.getElementById('cmd-palette')?.classList.contains('show')) return;
                 e.preventDefault();
                 this.doSend();
                 return;
             }
-
             if (e.key === 'ArrowUp' && !e.shiftKey && !e.isComposing) {
                 const history = store.get('inputHistory');
                 let idx = store.get('historyIdx');
@@ -119,10 +141,12 @@ export const InputArea = {
         input.addEventListener('input', () => {
             input.style.height = 'auto';
             input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+            this._syncInputRender(input);
+            this._syncAttachedFilesFromText(input.value);
+            this._updateHashFileSearch(input);
             bus.emit('inputChanged', input.value);
             if (store.get('isBusy')) this.updateSendButton();
         });
-
         const modeTrigger = document.getElementById('mode-trigger')!;
         const modePopup = document.getElementById('mode-popup')!;
         const modeLabel = document.getElementById('mode-label')!;
@@ -165,7 +189,7 @@ export const InputArea = {
                 modeLabel.textContent = getModeLabel(mode);
                 modePopup.classList.remove('show');
                 document.getElementById('input-wrapper')!.className = `mode-${mode}`;
-                document.body.className = `mode-${mode}`;
+                this.syncBodyUiClasses();
                 vscode.setMode(mode);
             });
         }
@@ -214,6 +238,7 @@ export const InputArea = {
                 const next = order[((idx >= 0 ? idx : 2) + 1) % order.length];
                 store.set('reasoningEffort', next);
                 this.updateReasoningButton();
+                this.syncBodyUiClasses();
                 vscode.setReasoningEffort(next);
             });
         }
@@ -311,8 +336,8 @@ export const InputArea = {
             const effort = this.normalizeReasoningEffort(settings.reasoning_effort, settings.enable_thinking);
             store.set('reasoningEffort', effort);
             this.updateReasoningButton();
+            this.syncBodyUiClasses();
         });
-
         bus.on('langChanged', () => {
             this.updateReasoningButton();
             this.renderModelPicker(
@@ -320,6 +345,9 @@ export const InputArea = {
                 store.get('currentModel'),
             );
         });
+
+        // Initialize file reference feature
+        this._initFileSearch();
 
         if (voiceBtn) {
             voiceBtn.style.display = 'none';
@@ -333,7 +361,7 @@ export const InputArea = {
                 label.setAttribute('data-i18n', mode);
             }
             document.getElementById('input-wrapper')!.className = `mode-${mode}`;
-            document.body.className = `mode-${mode}`;
+            this.syncBodyUiClasses();
             const opts = document.querySelectorAll('.mode-option');
             for (let i = 0; i < opts.length; i++) {
                 opts[i].classList.remove('active');
@@ -365,12 +393,20 @@ export const InputArea = {
         bus.on('editQueuedMessage', (text: string, images: any[] | null) => {
             input.value = text || '';
             this.autoResize(input);
+            this._syncInputRender(input);
             store.set('images', images || []);
             bus.emit('imagesChanged');
             input.focus();
             input.setSelectionRange(input.value.length, input.value.length);
             this.updateSendButton();
         });
+        input.addEventListener('mousemove', (e) => this._updateFileReferenceHover(input, e));
+        input.addEventListener('mouseleave', () => this._hideFileReferenceHover());
+        input.addEventListener('scroll', () => {
+            this._syncInputRender(input);
+            this._hideFileReferenceHover();
+        });
+        input.addEventListener('blur', () => this._hideFileReferenceHover());
         this.updateReasoningButton();
         this.updateSendButton();
         vscode.getSettings();
@@ -467,18 +503,37 @@ export const InputArea = {
         btn.textContent = `${t('reasoning.prefix')}: ${labels[effort]}`;
         btn.setAttribute('data-effort', effort);
         btn.title = titles[effort];
+        this.syncBodyUiClasses();
+    },
+
+    syncBodyUiClasses(): void {
+        const mode = store.get('currentMode') || 'auto';
+        const effort = store.get('reasoningEffort');
+        document.body.classList.remove('mode-auto', 'mode-polling', 'mode-plan', 'mode-adversarial', 'ui-minimal');
+        document.body.classList.add(`mode-${mode}`);
+        document.body.classList.toggle('ui-minimal', effort === 'turbo');
     },
 
     doSend(): void {
         const input = document.getElementById('input') as HTMLTextAreaElement;
         const text = input.value.trim();
         const images = store.get('images');
-        if (!text && images.length === 0) return;
+        const hasFiles = this._attachedFiles.length > 0;
+        if (!text && images.length === 0 && !hasFiles) return;
+
+        const resolvedText = this._resolveFileMarkers(text);
+
+        // Close file search if open
+        this._closeFileSearch();
+        // Clear file tags
+        this._attachedFiles = [];
+        this._renderFileTags();
 
         const imgs = images.slice();
         this.saveToHistory(text, imgs);
         input.value = '';
         input.style.height = 'auto';
+        this._syncInputRender(input);
         store.set('historyIdx', -1);
         store.set('images', []);
         bus.emit('clearImages');
@@ -498,17 +553,18 @@ export const InputArea = {
 
         if (store.get('isBusy')) {
             const queued = store.get('queuedMsgs');
-            store.set('queuedMsgs', [...queued, { text, images: imgs.length > 0 ? imgs : null }]);
+            store.set('queuedMsgs', [...queued, { text: resolvedText, images: imgs.length > 0 ? imgs : null }]);
             bus.emit('messageQueued', text, queued.length + 1);
             this.updateSendButton();
             return;
         }
 
-        vscode.send(text, imgs.length > 0 ? imgs : null);
+        vscode.send(resolvedText, imgs.length > 0 ? imgs : null);
     },
 
     applyHistoryEntry(input: HTMLTextAreaElement, entry: InputHistoryItem): void {
         input.value = entry.text || '';
+        this._syncInputRender(input);
         store.set('images', (entry.images || []).slice());
         bus.emit('imagesChanged');
         this.autoResize(input);
@@ -603,6 +659,7 @@ export const InputArea = {
     autoResize(textarea: HTMLTextAreaElement): void {
         textarea.style.height = 'auto';
         textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
+        this._syncInputRender(textarea);
     },
 
     setBusy(busy: boolean): void {
@@ -632,6 +689,472 @@ export const InputArea = {
             sendBtn.innerHTML = sendButtonIcon('send');
             sendBtn.className = '';
             sendBtn.title = busy ? t('send.queued') : t('send');
+            sendBtn.title = busy ? t('send.queued') : t('send');
         }
+    },
+
+    // ── File Reference Feature (button-based) ──
+
+    _attachedFiles: [] as AttachedFileRef[],
+    _searchDebounce: null as ReturnType<typeof setTimeout> | null,
+    _fileSearchMode: 'button' as 'button' | 'hash',
+    _fileTrigger: null as FileTrigger | null,
+    _fileSearchResults: [] as AttachedFileRef[],
+    _activeFileSearchIndex: 0,
+    _fileSearchRequestTimer: null as ReturnType<typeof setTimeout> | null,
+    _hoveredFilePath: '',
+    _hoverFrame: 0,
+    _lastHoverEvent: null as { input: HTMLTextAreaElement; clientX: number; clientY: number } | null,
+
+    _initFileSearch(): void {
+        const addBtn = document.getElementById('add-file-btn') as HTMLButtonElement | null;
+        if (!addBtn) return;
+        if ((addBtn as any)._mimoFileSearchBound) return;
+        (addBtn as any)._mimoFileSearchBound = true;
+
+        // Create popup with search input
+        const inputWrapper = document.getElementById('input-wrapper');
+        if (!inputWrapper) return;
+        let popup = document.getElementById('file-search-popup') as HTMLElement | null;
+        if (!popup) {
+            popup = document.createElement('div');
+            popup.id = 'file-search-popup';
+            popup.className = 'file-search-popup';
+            popup.innerHTML = '<input type="text" id="file-search-input" class="file-search-input" placeholder="Search files..." autocomplete="off" spellcheck="false">';
+            inputWrapper.appendChild(popup);
+        }
+
+        const searchInput = popup.querySelector('#file-search-input') as HTMLInputElement;
+        if (!searchInput) return;
+
+        // Button click -> toggle popup
+        addBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (popup.classList.contains('show')) {
+                this._closeFileSearch();
+            } else {
+                this._openFileSearch('button', '', null, true);
+            }
+        });
+
+        // Search input with debounce
+        searchInput.addEventListener('input', () => {
+            if (this._searchDebounce) clearTimeout(this._searchDebounce);
+            this._searchDebounce = setTimeout(() => {
+                this._fileSearchMode = 'button';
+                this._fileTrigger = null;
+                vscode.searchFiles(searchInput.value.trim());
+            }, 200);
+        });
+
+        // Prevent keydown from reaching the main input
+        searchInput.addEventListener('keydown', (e) => {
+            e.stopPropagation();
+            if (e.key === 'Escape') {
+                this._closeFileSearch();
+                return;
+            }
+            if (this._handleFileSearchKeydown(e)) {
+                return;
+            }
+        });
+
+        // Listen for results
+        bus.on('fileSearchResults', (results: FilePickerEntry[]) => {
+            this._renderFileSearchResults(results);
+        });
+
+        // Close on outside click
+        document.addEventListener('click', (e) => {
+            const popupEl = document.getElementById('file-search-popup');
+            const addBtnEl = document.getElementById('add-file-btn');
+            const target = e.target as HTMLElement;
+            if (popupEl && popupEl.classList.contains('show') && !popupEl.contains(target) && target !== addBtnEl) {
+                this._closeFileSearch();
+            }
+        });
+    },
+
+    _openFileSearch(mode: 'button' | 'hash', query = '', trigger: FileTrigger | null = null, focusSearch = false, debounce = false): void {
+        const popup = document.getElementById('file-search-popup') as HTMLElement | null;
+        const searchInput = document.getElementById('file-search-input') as HTMLInputElement | null;
+        if (!popup || !searchInput) return;
+        this._fileSearchMode = mode;
+        this._fileTrigger = trigger;
+        this._activeFileSearchIndex = 0;
+        popup.dataset.mode = mode;
+        popup.classList.add('show');
+        searchInput.value = query;
+        if (focusSearch) searchInput.focus();
+        this._renderFileSearchLoading(query ? 'Searching project files...' : 'Loading project file tree...');
+        if (debounce) {
+            if (this._searchDebounce) clearTimeout(this._searchDebounce);
+            this._searchDebounce = setTimeout(() => vscode.searchFiles(query), 200);
+        } else {
+            vscode.searchFiles(query);
+        }
+        if (this._fileSearchRequestTimer) clearTimeout(this._fileSearchRequestTimer);
+        this._fileSearchRequestTimer = setTimeout(() => {
+            const openPopup = document.getElementById('file-search-popup');
+            if (!openPopup?.classList.contains('show')) return;
+            if (openPopup.querySelector('.file-search-list')) return;
+            this._renderFileSearchMessage('No file tree response yet. Try reopening the picker.');
+        }, 2500);
+    },
+
+    _updateHashFileSearch(input: HTMLTextAreaElement): void {
+        const trigger = this._getHashFileTrigger(input);
+        const popup = document.getElementById('file-search-popup');
+        if (!trigger) {
+            if (this._fileSearchMode === 'hash') this._closeFileSearch();
+            return;
+        }
+        this._openFileSearch('hash', trigger.query, trigger, false, true);
+    },
+
+    _getHashFileTrigger(input: HTMLTextAreaElement): FileTrigger | null {
+        const cursor = input.selectionStart;
+        if (cursor !== input.selectionEnd) return null;
+        const before = input.value.slice(0, cursor);
+        const match = /(^|\s)#([^\s#]*)$/.exec(before);
+        if (!match) return null;
+        const query = match[2] || '';
+        const start = before.length - query.length - 1;
+        return { start, end: cursor, query };
+    },
+
+    _handleFileSearchKeydown(e: KeyboardEvent, input?: HTMLTextAreaElement): boolean {
+        const popup = document.getElementById('file-search-popup');
+        if (!popup?.classList.contains('show')) return false;
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            this._setActiveFileSearchIndex(this._activeFileSearchIndex + 1);
+            return true;
+        }
+        if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            this._setActiveFileSearchIndex(this._activeFileSearchIndex - 1);
+            return true;
+        }
+        if (e.key === 'Enter' || e.key === 'Tab') {
+            const item = this._fileSearchResults[this._activeFileSearchIndex];
+            if (item) {
+                e.preventDefault();
+                this._insertFileReference(item.fullPath, item.name, item.relativePath, input);
+                return true;
+            }
+        }
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            this._closeFileSearch();
+            return true;
+        }
+        return false;
+    },
+
+    _renderFileSearchResults(results: FilePickerEntry[]): void {
+        const popup = document.getElementById('file-search-popup');
+        if (!popup) return;
+        if (this._fileSearchRequestTimer) {
+            clearTimeout(this._fileSearchRequestTimer);
+            this._fileSearchRequestTimer = null;
+        }
+
+        popup.querySelector('.file-search-list')?.remove();
+        popup.querySelector('.file-search-empty')?.remove();
+        popup.querySelector('.file-search-loading')?.remove();
+        const fileEntries = results.filter(r => (r.kind || 'file') === 'file');
+        this._fileSearchResults = fileEntries.map(r => this._makeAttachedFileRef(r.fullPath, r.name, r.relativePath));
+        this._activeFileSearchIndex = 0;
+
+        if (results.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'file-search-empty';
+            empty.textContent = 'No project files found';
+            popup.appendChild(empty);
+            return;
+        }
+
+        const list = document.createElement('div');
+        list.className = 'file-search-list';
+        const expandedDirs = new Set<string>();
+        const treeMode = results.some(r => (r.kind || 'file') === 'directory');
+        let fileIndex = 0;
+        for (const r of results) {
+            const item = document.createElement('div');
+            const kind = r.kind || 'file';
+            const depth = Math.min(6, Math.max(0, r.depth || 0));
+            item.className = `file-search-item file-search-${kind}${kind === 'file' && fileIndex === this._activeFileSearchIndex ? ' active' : ''}`;
+            item.dataset.path = r.fullPath;
+            item.dataset.name = r.name;
+            item.dataset.relative = r.relativePath;
+            item.dataset.kind = kind;
+            item.style.setProperty('--file-depth', String(depth));
+            if (treeMode && r.parent && !expandedDirs.has(r.parent)) item.classList.add('file-search-child-collapsed');
+            if (kind === 'directory') {
+                expandedDirs.add(r.relativePath);
+                item.innerHTML = `<span class="file-search-chevron">▾</span><span class="file-search-icon">DIR</span><span class="file-search-info"><span class="file-search-name">${this._escapeHtml(r.name)}</span><span class="file-search-path">${this._escapeHtml(r.relativePath || '.')}</span></span>`;
+                item.addEventListener('click', () => this._toggleFileTreeDirectory(list, r.relativePath, item));
+            } else {
+                const currentFileIndex = fileIndex;
+                item.innerHTML = `<span class="file-search-chevron"></span><span class="file-search-icon">FILE</span><span class="file-search-info"><span class="file-search-name">${this._escapeHtml(r.name)}</span><span class="file-search-path">${this._escapeHtml(r.relativePath)}</span></span>`;
+                item.addEventListener('mouseenter', () => this._setActiveFileSearchIndex(currentFileIndex));
+                item.addEventListener('click', () => {
+                    this._insertFileReference(r.fullPath, r.name, r.relativePath);
+                });
+                fileIndex++;
+            }
+            list.appendChild(item);
+        }
+        popup.appendChild(list);
+    },
+
+    _renderFileSearchLoading(text: string): void {
+        this._renderFileSearchMessage(text, 'file-search-loading');
+    },
+
+    _renderFileSearchMessage(text: string, className = 'file-search-empty'): void {
+        const popup = document.getElementById('file-search-popup');
+        if (!popup) return;
+        popup.querySelector('.file-search-list')?.remove();
+        popup.querySelector('.file-search-empty')?.remove();
+        popup.querySelector('.file-search-loading')?.remove();
+        const el = document.createElement('div');
+        el.className = className;
+        el.textContent = text;
+        popup.appendChild(el);
+    },
+
+    _toggleFileTreeDirectory(list: HTMLElement, dirPath: string, row: HTMLElement): void {
+        const isCollapsed = row.classList.toggle('collapsed');
+        const descendants = Array.from(list.querySelectorAll<HTMLElement>('.file-search-item'))
+            .filter(item => {
+                const rel = item.dataset.relative || '';
+                return rel.startsWith(`${dirPath}/`);
+            });
+        for (const item of descendants) {
+            if (isCollapsed) {
+                item.classList.add('file-search-child-collapsed');
+            } else {
+                item.classList.remove('file-search-child-collapsed');
+            }
+        }
+    },
+
+    _closeFileSearch(): void {
+        const popup = document.getElementById('file-search-popup');
+        if (popup) {
+            popup.classList.remove('show');
+            popup.removeAttribute('data-mode');
+            const list = popup.querySelector('.file-search-list');
+            if (list) list.remove();
+            const empty = popup.querySelector('.file-search-empty');
+            if (empty) empty.remove();
+            const loading = popup.querySelector('.file-search-loading');
+            if (loading) loading.remove();
+        }
+        if (this._fileSearchRequestTimer) {
+            clearTimeout(this._fileSearchRequestTimer);
+            this._fileSearchRequestTimer = null;
+        }
+        this._fileTrigger = null;
+    },
+
+    _setActiveFileSearchIndex(index: number): void {
+        if (this._fileSearchResults.length === 0) return;
+        const next = (index + this._fileSearchResults.length) % this._fileSearchResults.length;
+        this._activeFileSearchIndex = next;
+        const items = Array.from(document.querySelectorAll<HTMLElement>('.file-search-file'));
+        items.forEach((item, i) => item.classList.toggle('active', i === next));
+        items[next]?.scrollIntoView({ block: 'nearest' });
+    },
+
+    _makeAttachedFileRef(fullPath: string, name: string, relativePath: string): AttachedFileRef {
+        let marker = `#${name}`;
+        const existing = new Set(this._attachedFiles.map(file => file.marker));
+        if (existing.has(marker) && !this._attachedFiles.some(file => file.fullPath === fullPath)) {
+            let n = 2;
+            while (existing.has(`${marker}-${n}`)) n++;
+            marker = `${marker}-${n}`;
+        }
+        return { name, relativePath, fullPath, marker };
+    },
+
+    _insertFileReference(fullPath: string, name: string, relativePath: string, targetInput?: HTMLTextAreaElement): void {
+        const input = targetInput || document.getElementById('input') as HTMLTextAreaElement;
+        if (!input) return;
+
+        const file = this._makeAttachedFileRef(fullPath, name, relativePath);
+        const existing = this._attachedFiles.find(f => f.fullPath === fullPath);
+        const marker = existing?.marker || file.marker;
+        const trigger = this._fileSearchMode === 'hash' ? this._fileTrigger : null;
+        const start = trigger ? trigger.start : input.selectionStart;
+        const end = trigger ? trigger.end : input.selectionEnd;
+        const text = input.value;
+        const prefix = start > 0 && !/\s$/.test(text.slice(0, start)) ? ' ' : '';
+        const suffix = end < text.length && !/^\s/.test(text.slice(end)) ? ' ' : '';
+        input.value = text.substring(0, start) + prefix + marker + suffix + text.substring(end);
+        const cursor = start + prefix.length + marker.length + suffix.length;
+        input.selectionStart = input.selectionEnd = cursor;
+
+        this._closeFileSearch();
+        input.focus();
+        input.style.height = 'auto';
+        input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+
+        if (!existing) {
+            this._attachedFiles.push(file);
+        }
+        this._renderFileTags();
+        this._syncInputRender(input);
+        bus.emit('inputChanged', input.value);
+    },
+
+    _renderFileTags(): void {
+        const input = document.getElementById('input') as HTMLTextAreaElement;
+        if (input) this._syncInputRender(input);
+    },
+
+    _removeFileReference(index: number): void {
+        const file = this._attachedFiles[index];
+        if (!file) return;
+        const input = document.getElementById('input') as HTMLTextAreaElement;
+        if (input) {
+            input.value = input.value.replace(file.marker, '').replace(/\s{2,}/g, ' ').trimStart();
+            this._syncInputRender(input);
+        }
+        this._attachedFiles.splice(index, 1);
+        this._renderFileTags();
+    },
+
+    _resolveFileMarkers(text: string): string {
+        let resolved = text;
+        const files = this._attachedFiles.slice().sort((a, b) => b.marker.length - a.marker.length);
+        const used = new Set<string>();
+        for (const file of files) {
+            if (!resolved.includes(file.marker)) continue;
+            resolved = resolved.split(file.marker).join(file.fullPath);
+            used.add(file.fullPath);
+        }
+        const missing = files
+            .filter(file => !used.has(file.fullPath))
+            .map(file => file.fullPath);
+        if (missing.length > 0) {
+            resolved = `${resolved}${resolved.trim() ? '\n\n' : ''}${missing.join('\n')}`;
+        }
+        return resolved.trim();
+    },
+
+    _syncAttachedFilesFromText(text: string): void {
+        const next = this._attachedFiles.filter(file => text.includes(file.marker));
+        if (next.length !== this._attachedFiles.length) {
+            this._attachedFiles = next;
+            this._renderFileTags();
+        }
+    },
+
+    _syncInputRender(input: HTMLTextAreaElement): void {
+        const render = document.getElementById('input-render');
+        if (!render) return;
+        const text = input.value || '';
+        if (!text) {
+            render.innerHTML = '';
+            render.classList.remove('has-content');
+            return;
+        }
+        const files = this._attachedFiles.slice().sort((a, b) => b.marker.length - a.marker.length);
+        const parts: string[] = [];
+        let cursor = 0;
+        while (cursor < text.length) {
+            const next = files
+                .map(file => ({ file, index: text.indexOf(file.marker, cursor) }))
+                .filter(item => item.index >= 0)
+                .sort((a, b) => a.index - b.index || b.file.marker.length - a.file.marker.length)[0];
+            if (!next) {
+                parts.push(this._escapeHtml(text.slice(cursor)));
+                break;
+            }
+            if (next.index > cursor) parts.push(this._escapeHtml(text.slice(cursor, next.index)));
+            parts.push(`<span class="inline-file-token" data-path="${this._escapeHtml(next.file.fullPath)}">${this._escapeHtml(next.file.marker)}</span>`);
+            cursor = next.index + next.file.marker.length;
+        }
+        render.innerHTML = parts.join('').replace(/\n/g, '<br>');
+        render.style.transform = input.scrollTop ? `translateY(${-input.scrollTop}px)` : '';
+        render.classList.toggle('has-content', !!text.trim());
+    },
+
+    _updateFileReferenceHover(input: HTMLTextAreaElement, e: MouseEvent): void {
+        this._lastHoverEvent = { input, clientX: e.clientX, clientY: e.clientY };
+        if (this._hoverFrame) return;
+        this._hoverFrame = requestAnimationFrame(() => {
+            this._hoverFrame = 0;
+            const last = this._lastHoverEvent;
+            if (!last) return;
+            this._applyFileReferenceHover(last.input, last.clientX, last.clientY);
+        });
+    },
+
+    _applyFileReferenceHover(input: HTMLTextAreaElement, clientX: number, clientY: number): void {
+        const hit = this._getHoveredFileReference(input, clientX, clientY);
+        if (!hit) {
+            this._hideFileReferenceHover();
+            return;
+        }
+        this._showFileReferenceHover(hit.file.fullPath, clientX, clientY);
+    },
+
+    _getHoveredFileReference(input: HTMLTextAreaElement, clientX: number, clientY: number): { file: AttachedFileRef } | null {
+        if (this._attachedFiles.length === 0) return null;
+        const doc = input.ownerDocument;
+        const position: any = (doc as any).caretPositionFromPoint?.(clientX, clientY);
+        let offset = typeof position?.offset === 'number' ? position.offset : null;
+        if (offset === null) {
+            const range: any = (doc as any).caretRangeFromPoint?.(clientX, clientY);
+            offset = typeof range?.startOffset === 'number' ? range.startOffset : null;
+        }
+        if (offset === null) return null;
+        const text = input.value || '';
+        for (const file of this._attachedFiles) {
+            let index = text.indexOf(file.marker);
+            while (index >= 0) {
+                const end = index + file.marker.length;
+                if (offset >= index && offset <= end) return { file };
+                index = text.indexOf(file.marker, end);
+            }
+        }
+        return null;
+    },
+
+    _showFileReferenceHover(path: string, clientX: number, clientY: number): void {
+        if (this._hoveredFilePath === path) {
+            const existing = document.getElementById('file-reference-hover');
+            if (existing) {
+                existing.style.left = `${Math.min(window.innerWidth - 24, clientX + 12)}px`;
+                existing.style.top = `${Math.max(8, clientY - 34)}px`;
+                return;
+            }
+        }
+        this._hoveredFilePath = path;
+        let tooltip = document.getElementById('file-reference-hover') as HTMLElement | null;
+        if (!tooltip) {
+            tooltip = document.createElement('div');
+            tooltip.id = 'file-reference-hover';
+            tooltip.className = 'file-reference-hover';
+            document.body.appendChild(tooltip);
+        }
+        tooltip.textContent = path;
+        tooltip.style.left = `${Math.min(window.innerWidth - 24, clientX + 12)}px`;
+        tooltip.style.top = `${Math.max(8, clientY - 34)}px`;
+        tooltip.classList.add('show');
+    },
+
+    _hideFileReferenceHover(): void {
+        this._hoveredFilePath = '';
+        this._lastHoverEvent = null;
+        document.getElementById('file-reference-hover')?.classList.remove('show');
+    },
+
+    _escapeHtml(s: string): string {
+        return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     },
 };

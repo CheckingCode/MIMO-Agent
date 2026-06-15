@@ -54,6 +54,10 @@ export const vscode = {
         api.postMessage({ type: 'stop' });
     },
 
+    searchFiles(query: string): void {
+        api.postMessage({ type: 'searchFiles', query });
+    },
+
     clear(): void {
         api.postMessage({ type: 'clear' });
     },

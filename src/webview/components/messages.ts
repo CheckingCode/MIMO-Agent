@@ -1,5 +1,5 @@
-/**
- * Messages component — chat messages, streaming, tool cards, diff view, thinking blocks.
+﻿/**
+ * Messages component 鈥?chat messages, streaming, tool cards, diff view, thinking blocks.
  */
 import { store, ImageData } from '../core/store';
 import { bus } from '../core/bus';
@@ -28,6 +28,7 @@ import {
     reasoningStoreLimit,
     renderEditDiff as renderMessageEditDiff,
     renderGitDiff as renderMessageGitDiff,
+    sanitizeReasoningForHistoryDisplay as sanitizeMessageReasoningForHistoryDisplay,
     sanitizeReasoningForDisplay as sanitizeMessageReasoningForDisplay,
     renderThinkingBlock as renderMessageThinkingBlock,
     setCopyButtonState as setMessageCopyButtonState,
@@ -41,7 +42,7 @@ import {
     writeClipboardPayload,
 } from './messages/index';
 
-// ── Helpers ──
+// 鈹€鈹€ Helpers 鈹€鈹€
 
 function formatTokenCount(n: number): string {
     return formatMessageTokenCount(n);
@@ -311,13 +312,16 @@ function renderFriendlyErrorHtml(text: string): string {
 
     const collectSection = (label: string) =>
         lines
-            .filter(line => line.startsWith(`${label}:`) || line.startsWith(`${label}：`))
-            .map(line => line.replace(new RegExp(`^${label}[:：]\\s*`), '').trim())
+            .map(line => {
+                if (line.startsWith(`${label}:`)) return line.slice(label.length + 1).trim();
+                if (line.startsWith(`${label}\uFF1A`)) return line.slice(label.length + 1).trim();
+                return '';
+            })
             .filter(Boolean);
 
-    const reasons = [...collectSection('问题归因'), ...collectSection('原因')];
-    const suggestions = collectSection('建议')
-        .flatMap(item => item.split(/[；;]/))
+    const reasons = [...collectSection('闂褰掑洜'), ...collectSection('鍘熷洜')];
+    const suggestions = collectSection('寤鸿')
+        .flatMap(item => item.split(/[锛?]/))
         .map(item => item.trim())
         .filter(Boolean);
     const nextActions = collectSection('Next action');
@@ -334,7 +338,7 @@ function renderFriendlyErrorHtml(text: string): string {
     if (reasons.length) {
         sections.push(
             `<div class="friendly-error-section">` +
-            `<div class="friendly-error-label">原因</div>` +
+            `<div class="friendly-error-label">鍘熷洜</div>` +
             `<div class="friendly-error-text">${escapeHtmlPreservingBreaks(reasons.join('\n'))}</div>` +
             `</div>`
         );
@@ -342,7 +346,7 @@ function renderFriendlyErrorHtml(text: string): string {
     if (suggestions.length) {
         sections.push(
             `<div class="friendly-error-section">` +
-            `<div class="friendly-error-label">建议</div>` +
+            `<div class="friendly-error-label">寤鸿</div>` +
             `<ul class="friendly-error-list">${suggestions.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` +
             `</div>`
         );
@@ -362,8 +366,19 @@ function renderFriendlyErrorHtml(text: string): string {
         ...suggestions,
         ...nextActions.map(v => `Next action: ${v}`),
     ]);
+    const sectionLabels = ['\u95ee\u9898\u5f52\u56e0', '\u539f\u56e0', '\u5efa\u8bae', 'Next action', 'Task status'];
     const leftovers = lines.filter(line => {
-        const normalized = line.replace(/^(问题归因|原因|建议|Next action|Task status)[:：]\s*/, '').trim();
+        let normalized = line.trim();
+        for (const label of sectionLabels) {
+            if (normalized.startsWith(`${label}:`)) {
+                normalized = normalized.slice(label.length + 1).trim();
+                break;
+            }
+            if (normalized.startsWith(`${label}\uFF1A`)) {
+                normalized = normalized.slice(label.length + 1).trim();
+                break;
+            }
+        }
         return normalized && !consumed.has(normalized) && !consumed.has(line);
     });
 
@@ -376,7 +391,7 @@ function renderFriendlyErrorHtml(text: string): string {
         `<div class="friendly-error-title">${escapeHtml(title)}</div>` +
         (sections.length ? sections.join('') : `<div class="friendly-error-text">${escapeHtmlPreservingBreaks(raw)}</div>`) +
         (leftovers.length
-            ? `<details class="friendly-error-raw"><summary>原始信息</summary><pre>${escapeHtml(leftovers.join('\n'))}</pre></details>`
+            ? `<details class="friendly-error-raw"><summary>鍘熷淇℃伅</summary><pre>${escapeHtml(leftovers.join('\n'))}</pre></details>`
             : '') +
         `</div>`
     );
@@ -480,7 +495,7 @@ export const Messages = {
             if (source.classList.contains('collapsible')) {
                 const expandBtn = createElement('button', 'expand-toggle sticky-expand') as HTMLButtonElement;
                 const syncExpandLabel = () => {
-                    expandBtn.textContent = source.classList.contains('expanded') ? '收起' : '展开';
+                    expandBtn.textContent = source.classList.contains('expanded') ? '鏀惰捣' : '灞曞紑';
                     clone.classList.toggle('expanded', source.classList.contains('expanded'));
                 };
                 syncExpandLabel();
@@ -601,7 +616,7 @@ export const Messages = {
                 if (card) card.classList.toggle('expanded');
             }
 
-            // URL link click → open in browser
+            // URL link click 鈫?open in browser
             const link = (e.target as HTMLElement).closest('a.url-link') as HTMLAnchorElement | null;
             if (link && link.href) {
                 e.preventDefault();
@@ -628,7 +643,7 @@ export const Messages = {
 
         // Listen for messages from host
         bus.on('userMessage', (text: string, images?: ImageData[] | null) => this.addUserMessage(text, images));
-        bus.on('streamHtml', (html: string) => this.handleStream(html));
+        bus.on('streamHtml', (html: string, lightweight?: boolean) => this.handleStream(html, !!lightweight));
         bus.on('assistantUpdate', (html: string) => this.handleAssistantUpdate(html));
         bus.on('verificationUpdate', (html: string) => this.handleVerificationUpdate(html));
         bus.on('finalAnswer', (html: string) => this.handleFinalAnswer(html));
@@ -686,7 +701,7 @@ export const Messages = {
         bus.on('fileOpenResult', (msg: any) => this.handleFileOpenResult(msg));
     },
 
-    // ── User message ──
+    // 鈹€鈹€ User message 鈹€鈹€
     addUserMessage(text: string, images?: ImageData[] | null): void {
         const messagesDiv = document.getElementById('messages')!;
         this.archiveAssistantActions();
@@ -755,7 +770,7 @@ export const Messages = {
         messagesDiv.appendChild(u);
         smartScroll(messagesDiv);
 
-        // Collapse toggle for long messages — must check AFTER append so scrollHeight is accurate
+        // Collapse toggle for long messages 鈥?must check AFTER append so scrollHeight is accurate
         requestAnimationFrame(() => {
             const textDiv = u.querySelector('.text-content');
             const lineHeight = 1.5 * 13; // line-height * font-size
@@ -764,11 +779,11 @@ export const Messages = {
 
             if (shouldCollapse) {
                 const expandBtn = createElement('button', 'expand-toggle');
-                expandBtn.textContent = '展开 ▼';
+                expandBtn.textContent = 'Expand';
                 expandBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
                     u.classList.toggle('expanded');
-                    expandBtn.textContent = u.classList.contains('expanded') ? '收起 ▲' : '展开 ▼';
+                    expandBtn.textContent = u.classList.contains('expanded') ? 'Collapse' : 'Expand';
                 });
                 u.appendChild(expandBtn);
                 u.classList.add('collapsible');
@@ -779,7 +794,7 @@ export const Messages = {
         store.set('rawHtml', '');
     },
 
-    // ── Thinking block lifecycle ──
+    // 鈹€鈹€ Thinking block lifecycle 鈹€鈹€
     /** Mark all active (not done) thinking dots as completed. */
     _markThinkingDone(): void {
         const dots = document.querySelectorAll('.thinking-dot:not(.done)');
@@ -806,8 +821,8 @@ export const Messages = {
         }
     },
 
-    // ── Streaming ──
-    handleStream(html: string): void {
+    // 鈹€鈹€ Streaming 鈹€鈹€
+    handleStream(html: string, lightweight = false): void {
         const messagesDiv = document.getElementById('messages')!;
         let streamingMsg = store.get('streamingMsg');
 
@@ -840,8 +855,7 @@ export const Messages = {
         }
         if ((el as any)._lastStreamHtml === html) return;
         (el as any)._lastStreamHtml = html;
-        // Post-process: replace task-checklist blocks with enhanced component
-        el.innerHTML = formatAssistantBodyHtml(html);
+        el.innerHTML = lightweight ? stripMessageRawToolCalls(html || '') : formatAssistantBodyHtml(html);
         smartScroll(messagesDiv);
     },
 
@@ -859,7 +873,7 @@ export const Messages = {
         store.set('rawHtml', '');
     },
 
-    // ── Enhance task checklists ──
+    // 鈹€鈹€ Enhance task checklists 鈹€鈹€
     upsertVerificationSegment(html: string): void {
         const messagesDiv = document.getElementById('messages')!;
         let streamingMsg = store.get('streamingMsg');
@@ -935,7 +949,7 @@ export const Messages = {
         return stripMessageRawToolCalls(html);
     },
 
-    // ── Reasoning/thinking ──
+    // 鈹€鈹€ Reasoning/thinking 鈹€鈹€
     handleReasoning(token: string): void {
         token = this.filterReasoningNoise(token);
         if (!token) return;
@@ -1041,7 +1055,10 @@ export const Messages = {
         const expanded = forceFull || thinkBlock.classList.contains('show');
         let displayText = rawText;
         if (expanded) {
-            displayText = sanitizeMessageReasoningForDisplay(rawText, trimmed);
+            const sanitize = thinkBlock.dataset.historyReasoning === 'true'
+                ? sanitizeMessageReasoningForHistoryDisplay
+                : sanitizeMessageReasoningForDisplay;
+            displayText = sanitize(rawText, trimmed);
         } else {
             const trimmedText = trimmed ? t('thinking.trimmed') : '';
             displayText = t('thinking.compact')
@@ -1069,17 +1086,17 @@ export const Messages = {
     /**
      * Deduplicate repeated phrases in reasoning text.
      * Detects when the same phrase repeats 3+ times consecutively
-     * and collapses it to "×N" notation.
+     * and collapses it to "脳N" notation.
      */
     _dedupReasoning(text: string): string {
         return dedupMessageReasoning(text);
-        // Pass 1: Match 3+ consecutive identical multi-line blocks (each line ≤ 200 chars)
+        // Pass 1: Match 3+ consecutive identical multi-line blocks (each line 鈮?200 chars)
         let result = text.replace(
             /((?:[^\n]{1,200}\n?){1,3})\1{2,}/g,
             (_match: string, phrase: string) => {
                 const trimmed = phrase.replace(/\n+$/, '');
                 const count = Math.ceil(_match.length / phrase.length);
-                return trimmed + ` ×${count}\n`;
+                return trimmed + ` 脳${count}\n`;
             }
         );
         // Skip expensive passes for very long text (performance guard)
@@ -1089,23 +1106,23 @@ export const Messages = {
                 const regex = new RegExp(`(.{${size}})\\1{2,}`, 'g');
                 const newResult = result.replace(regex, (match: string, phrase: string) => {
                     const count = Math.round(match.length / phrase.length);
-                    return phrase + ` ×${count}`;
+                    return phrase + ` 脳${count}`;
                 });
                 if (newResult !== result) { result = newResult; break; }
             }
             // Pass 3: Flexible-length consecutive repeats (catches non-aligned patterns)
-            // e.g. "思考思考思考..." or "Let me think.Let me think.Let me think."
+            // e.g. "鎬濊€冩€濊€冩€濊€?.." or "Let me think.Let me think.Let me think."
             result = result.replace(/(.{20,}?)\1{2,}/g, (match: string, phrase: string) => {
                 const count = Math.round(match.length / phrase.length);
-                return phrase + ` ×${count}`;
+                return phrase + ` 脳${count}`;
             });
         }
         return result;
     },
 
-    // ── Tool cards ──
+    // 鈹€鈹€ Tool cards 鈹€鈹€
     addToolCard(name: string, args: any): void {
-        // Mark thinking as done — tool execution means reasoning for this round is complete
+        // Mark thinking as done 鈥?tool execution means reasoning for this round is complete
         this._markThinkingDone();
         this.markLiveProgressToolStart(name, args);
 
@@ -1124,7 +1141,7 @@ export const Messages = {
         smartScroll(messagesDiv);
         return;
 
-        // execute_command → card-style layout with IN/OUT
+        // execute_command 鈫?card-style layout with IN/OUT
         if (name === 'execute_command') {
             const card = createElement('div', 'tool-card');
             card.setAttribute('data-status', 'running');
@@ -1268,7 +1285,7 @@ export const Messages = {
         const toolName = (last as any)._toolName as string;
         const toolArgs = (last as any)._toolArgs as any;
 
-        // edit_file → compact diff card
+        // edit_file 鈫?compact diff card
         if (toolName === 'edit_file' && toolArgs && (toolArgs.old_text || toolArgs.new_text)) {
             const diffCard = this.createDiffCard(toolArgs);
             if (diffCard) {
@@ -1277,17 +1294,14 @@ export const Messages = {
             }
         }
 
-        // git_diff → compact diff card
+        // git_diff 鈫?compact diff card
         if (toolName === 'git_diff' && result && result !== 'No changes') {
-            const diffCard = createElement('div', 'diff-card');
-            this.renderGitDiff(diffCard, result);
-            if (diffCard.innerHTML) {
-                last.after(diffCard);
-                return;
-            }
+            const diffCard = this.createDeferredGitDiffCard(result);
+            last.after(diffCard);
+            return;
         }
 
-        // execute_command → card-style: add OUT section
+        // execute_command 鈫?card-style: add OUT section
         if (toolName === 'update_todos') {
             const todos = Array.isArray(toolArgs?.todos) ? toolArgs.todos : [];
             const items: TodoItem[] = todos
@@ -1331,11 +1345,7 @@ export const Messages = {
             if (timeEl) timeEl.textContent = elapsed.toFixed(1) + 's';
             // Show git diff card if command modified files
             if (gitDiff && !isError) {
-                const diffCard = createElement('div', 'diff-card');
-                this.renderGitDiff(diffCard, gitDiff);
-                if (diffCard.innerHTML) {
-                    last.after(diffCard);
-                }
+                last.after(this.createDeferredGitDiffCard(gitDiff));
             }
             // Don't clear streamingMsg - allow thinking to continue
             return;
@@ -1360,6 +1370,28 @@ export const Messages = {
             loaded = true;
             el.classList.remove('lazy-tool-output');
         });
+    },
+
+    createDeferredGitDiffCard(diffText: string): HTMLElement {
+        const lineCount = diffText.split(/\r?\n/).length;
+        const fileCount = (diffText.match(/^diff --git /gm) || []).length || 1;
+        const card = createElement('div', 'tool-card tool-card-compact git-diff-preview-card collapsed');
+        card.setAttribute('data-tool', 'git_diff');
+        card.innerHTML =
+            `<div class="tool-header">` +
+            `<div class="tool-icon-wrapper"><div class="tool-icon">GD</div><div class="tool-status-dot"></div></div>` +
+            `<div class="tool-info"><span class="tool-name">git_diff</span><span class="tool-args">${fileCount} file${fileCount === 1 ? '' : 's'}, ${lineCount} lines</span></div>` +
+            `<div class="tool-meta"><span class="tool-elapsed">Preview</span><span class="tool-chevron">鈻?/span></div>` +
+            `</div><div class="tool-body"><div class="tool-result"><div class="diff-line"><span class="diff-info">Expand to render the git diff.</span></div></div></div>`;
+
+        const render = () => {
+            const result = card.querySelector<HTMLElement>('.tool-result');
+            if (!result) return;
+            this.renderGitDiff(result, diffText);
+        };
+        this.makeCardCollapsible(card, '.tool-header', true);
+        this.bindDeferredToolResult(card, render);
+        return card;
     },
 
     ensureStreamingAssistantMessage(): HTMLElement {
@@ -1462,7 +1494,7 @@ export const Messages = {
         card.innerHTML = `<div class="diff-card-header">` +
             `<span class="diff-file">${escapeHtml(filePath)}</span>` +
             `<span class="diff-stats">${added} lines added, ${removed} lines removed</span>` +
-            `<span class="diff-chevron">▸</span>` +
+            `<span class="diff-chevron">鈻?/span>` +
             `</div><div class="diff-card-body"></div>`;
 
         const body = card.querySelector('.diff-card-body') as HTMLElement;
@@ -1581,7 +1613,7 @@ export const Messages = {
         const lines = (truncated ? txt.substring(0, maxChars) : txt).split('\n');
         const CONTEXT_LINES = 2; // lines of context around each change
 
-        // ── Phase 1: Parse into structured hunks per file ──
+        // 鈹€鈹€ Phase 1: Parse into structured hunks per file 鈹€鈹€
         interface DiffLine { type: 'add' | 'del' | 'ctx' | 'hunk' | 'file'; text: string; oldLn?: number; newLn?: number; label?: string; skipped?: number; }
         const files: { name: string; hunks: DiffLine[][]; added: number; removed: number }[] = [];
         let curFile = { name: '', hunks: [] as DiffLine[][], added: 0, removed: 0 };
@@ -1619,7 +1651,7 @@ export const Messages = {
         if (curHunk.length > 0) curFile.hunks.push(curHunk);
         if (curFile.name) files.push(curFile);
 
-        // ── Phase 2: Render with collapsed context ──
+        // 鈹€鈹€ Phase 2: Render with collapsed context 鈹€鈹€
         let html = '';
         let totalAdded = 0, totalRemoved = 0;
 
@@ -1628,7 +1660,7 @@ export const Messages = {
             totalRemoved += file.removed;
             if (file.added === 0 && file.removed === 0) continue;
 
-            html += `<div class="diff-file-header" data-file="${escapeHtml(file.name)}">📄 ${escapeHtml(file.name)}</div>`;
+            html += `<div class="diff-file-header" data-file="${escapeHtml(file.name)}">馃搫 ${escapeHtml(file.name)}</div>`;
 
             for (const hunk of file.hunks) {
                 // Find hunk header line
@@ -1660,7 +1692,7 @@ export const Messages = {
                     // Insert "..." gap if we skipped lines
                     if (l.type === 'ctx' && lastShown >= 0 && i - lastShown > 1) {
                         const skipped = i - lastShown - 1;
-                        html += `<div class="diff-skip">··· ${skipped} unchanged line${skipped > 1 ? 's' : ''} ···</div>`;
+                        html += `<div class="diff-skip">路路路 ${skipped} unchanged line${skipped > 1 ? 's' : ''} 路路路</div>`;
                     }
                     lastShown = i;
 
@@ -1668,7 +1700,7 @@ export const Messages = {
                     if (l.type === 'add') {
                         html += `<div class="diff-line diff-add"><span class="diff-ln new">${l.newLn}</span><span class="diff-sign">+</span><span class="diff-text">${esc}</span></div>`;
                     } else if (l.type === 'del') {
-                        html += `<div class="diff-line diff-del"><span class="diff-ln old">${l.oldLn}</span><span class="diff-sign">−</span><span class="diff-text">${esc}</span></div>`;
+                        html += `<div class="diff-line diff-del"><span class="diff-ln old">${l.oldLn}</span><span class="diff-sign">鈭?/span><span class="diff-text">${esc}</span></div>`;
                     } else {
                         html += `<div class="diff-line diff-ctx"><span class="diff-ln old">${l.oldLn}</span><span class="diff-ln new">${l.newLn}</span><span class="diff-sign"> </span><span class="diff-text">${esc}</span></div>`;
                     }
@@ -1676,20 +1708,20 @@ export const Messages = {
             }
 
             // Per-file summary
-            html += `<div class="diff-file-summary"><span class="diff-stats-add">+${file.added} lines</span><span class="diff-stats-del">−${file.removed} lines</span></div>`;
+            html += `<div class="diff-file-summary"><span class="diff-stats-add">+${file.added} lines</span><span class="diff-stats-del">鈭?{file.removed} lines</span></div>`;
         }
 
         // Total summary bar at top
         if (totalAdded > 0 || totalRemoved > 0) {
             const label = files.length > 1 ? `${files.length} files` : (files[0]?.name || 'changes');
-            html = `<div class="diff-summary"><span class="diff-file-name">${escapeHtml(label)}</span><span class="diff-stats-add">+${totalAdded} lines</span><span class="diff-stats-del">−${totalRemoved} lines</span></div>` + html;
+            html = `<div class="diff-summary"><span class="diff-file-name">${escapeHtml(label)}</span><span class="diff-stats-add">+${totalAdded} lines</span><span class="diff-stats-del">鈭?{totalRemoved} lines</span></div>` + html;
         }
 
         if (truncated) html += `<div class="diff-info">... (truncated, ${txt.length} chars total)</div>`;
         res.innerHTML = html || '<div class="diff-info">No changes</div>';
     },
 
-    // ── Round / Done / Error ──
+    // 鈹€鈹€ Round / Done / Error 鈹€鈹€
     handleRoundStart(round: number): void {
         if (round <= 1) return;
         const messagesDiv = document.getElementById('messages')!;
@@ -1708,12 +1740,13 @@ export const Messages = {
         this.compactExecutionDetails(elapsedSec);
         this.attachAssistantActions(store.get('streamingMsg'), undefined, { elapsedSec });
 
+        const completedStreamingMsg = store.get('streamingMsg');
         store.set('streamingMsg', null);
         store.set('rawHtml', '');
         document.querySelectorAll<HTMLElement>('.live-progress-card[data-active="true"]').forEach(card => card.setAttribute('data-active', 'false'));
         store.set('planExecutionActive', false);
         const messagesDiv = document.getElementById('messages')!;
-        this.renderToolOnlyTaskChangesFallback();
+        this.renderToolOnlyTaskChangesFallback(completedStreamingMsg || undefined);
         smartScroll(messagesDiv);
         this.scheduleHistorySnapshot(elapsedSec);
     },
@@ -1776,7 +1809,7 @@ export const Messages = {
     shouldShowContinueAction(assistant: HTMLElement): boolean {
         if (assistant.querySelector('.task-checklist .todo:not(.done), .todo-tool-result .todo:not(.done)')) return true;
         const text = this.extractAssistantCopyText(assistant);
-        return /(可以继续|继续执行|下一步|未完成|待完成|后续|接着做|continue|next step|remaining work|follow[- ]?up)/i.test(text);
+        return /(鍙互缁х画|缁х画鎵ц|涓嬩竴姝鏈畬鎴恷寰呭畬鎴恷鍚庣画|鎺ョ潃鍋殀continue|next step|remaining work|follow[- ]?up)/i.test(text);
     },
 
     localizeAssistantActions(): void {},
@@ -2120,7 +2153,7 @@ export const Messages = {
 
     openTaskChangePreview(title: string, entries: TaskChangePatchEntry[], statusEl?: HTMLElement | null, emptyMessage?: string): void {
         if (!entries.length) {
-            if (statusEl) statusEl.textContent = emptyMessage || '没有可展示的文本 diff。';
+            if (statusEl) statusEl.textContent = emptyMessage || 'No text diff available.';
             return;
         }
         if (statusEl) statusEl.textContent = '';
@@ -2236,7 +2269,7 @@ export const Messages = {
             const fileUndoBtn = entry?.querySelector<HTMLButtonElement>('.task-change-file-undo') || null;
             entry?.classList.add('task-change-entry-pending');
             if (fileUndoBtn) {
-                fileUndoBtn.dataset.defaultText = fileUndoBtn.dataset.defaultText || fileUndoBtn.textContent || '↶';
+                fileUndoBtn.dataset.defaultText = fileUndoBtn.dataset.defaultText || fileUndoBtn.textContent || 'Undo';
                 fileUndoBtn.disabled = true;
                 fileUndoBtn.textContent = '...';
             }
@@ -2267,7 +2300,7 @@ export const Messages = {
             const fileUndoBtn = entry?.querySelector<HTMLButtonElement>('.task-change-file-undo') || null;
             entry?.classList.remove('task-change-entry-pending');
             if (fileUndoBtn && !entry?.classList.contains('task-change-entry-undone')) {
-                fileUndoBtn.textContent = fileUndoBtn.dataset.defaultText || '↶';
+                fileUndoBtn.textContent = fileUndoBtn.dataset.defaultText || 'Undo';
             }
         }
     },
@@ -2276,10 +2309,10 @@ export const Messages = {
         return Array.from(map.values()).find(file => this.fileKeysMatch(file.path, filePath));
     },
 
-    renderToolOnlyTaskChangesFallback(): void {
+    renderToolOnlyTaskChangesFallback(root?: HTMLElement): void {
         const messagesDiv = document.getElementById('messages');
         if (!messagesDiv) return;
-        const latest = this.getLatestAssistantWithToolDiffs();
+        const latest = root && root.querySelector('.diff-card[data-file], [data-file][data-action]') ? root : null;
         if (!latest || latest.querySelector('.task-changes-card')) return;
         if (messagesDiv.querySelector('.task-changes-card[data-tool-fallback="true"]')) return;
 
@@ -2300,7 +2333,7 @@ export const Messages = {
             patch: '',
             createdAt: Date.now(),
             canUndo: false,
-            warning: '本轮改动来自工具记录，但当前没有可安全反向应用的 Git patch；可查看 diff，撤销需手动处理。',
+            warning: 'Changes were detected from tool records, but no safe reverse Git patch is available. Review the diff and undo manually if needed.',
         };
         this.renderTaskChangesCard(summary, true);
     },
@@ -2431,11 +2464,11 @@ export const Messages = {
             <div class="task-changes-head">
                 <div class="task-changes-icon"><span class="task-changes-icon-add">+</span><span class="task-changes-icon-del">-</span></div>
                 <div class="task-changes-title">
-                    <div>已编辑 ${fileText}</div>
+                    <div>宸茬紪杈?${fileText}</div>
                     <div class="task-changes-stats"><span class="diff-stats-add">+${summary.totalAdded} lines</span> <span class="diff-stats-del">-${summary.totalRemoved} lines</span></div>
                 </div>
                 <div class="task-changes-actions">
-                    <button class="task-changes-review" type="button">审核</button>
+                    <button class="task-changes-review" type="button">瀹℃牳</button>
                 </div>
             </div>
             ${summary.warning ? `<div class="task-changes-warning">${escapeHtml(summary.warning)}</div>` : ''}
@@ -2546,7 +2579,7 @@ export const Messages = {
         const lastUserMsg = store.get('lastUserMsg');
         if (lastUserMsg) {
             const retryBtn = createElement('button', 'retry-btn');
-            retryBtn.textContent = '↻ Retry';
+            retryBtn.textContent = '鈫?Retry';
             retryBtn.addEventListener('click', () => {
                 const { text, images } = lastUserMsg;
                 store.set('lastUserMsg', null);
@@ -2563,7 +2596,7 @@ export const Messages = {
         store.set('planExecutionActive', false);
     },
 
-    // ── Token usage per call ──
+    // 鈹€鈹€ Token usage per call 鈹€鈹€
     renderHistoryTurns(turns: any[]): void {
         const messagesDiv = document.getElementById('messages')!;
         store.set('streamingMsg', null);
@@ -2711,9 +2744,9 @@ export const Messages = {
         const card = createElement('div', 'diff-card history-diff-card');
         card.innerHTML =
             `<div class="diff-card-header">` +
-            `<span class="diff-card-icon">±</span>` +
-            `<span class="diff-card-title">历史 Diff</span>` +
-            `<span class="diff-card-toggle">展开</span>` +
+            `<span class="diff-card-icon">卤</span>` +
+            `<span class="diff-card-title">鍘嗗彶 Diff</span>` +
+            `<span class="diff-card-toggle">灞曞紑</span>` +
             `</div><div class="diff-card-body"></div>`;
         const body = card.querySelector<HTMLElement>('.diff-card-body');
         if (body) renderMessageGitDiff(body, diff.body);
@@ -2807,7 +2840,7 @@ export const Messages = {
     },
 
     isThinkingCompactPlaceholder(text: string): boolean {
-        return /(?:chars?\s+captured|Click to expand|已捕获|点击展开)/i.test(String(text || ''));
+        return /(?:chars?\s+captured|Click to expand|宸叉崟鑾穦鐐瑰嚮灞曞紑)/i.test(String(text || ''));
     },
 
     hydrateHistoryTaskChangeSnapshotCard(card: HTMLElement, snapshot?: HistoryTaskChangeSnapshot): void {
@@ -2871,6 +2904,7 @@ export const Messages = {
             (block as any)._reasoningText = reasoningText;
             (block as any)._reasoningTrimmed = block.dataset.reasoningTrimmed === 'true';
             delete block.dataset.reasoningText;
+            block.dataset.historyReasoning = 'true';
             block.dataset.reasoningTrimmed = (block as any)._reasoningTrimmed ? 'true' : 'false';
             block.title = t('thinking.expand.title');
             this.renderThinkingBlock(block, block.classList.contains('show'), false);
@@ -3067,7 +3101,7 @@ export const Messages = {
 
     previewHistoryDetail(detail: any, maxLen = 120): string {
         const sourceText = detail?.type === 'reasoning'
-            ? sanitizeMessageReasoningForDisplay(String(detail?.body || ''), false)
+            ? sanitizeMessageReasoningForHistoryDisplay(String(detail?.body || ''), false)
             : String(detail?.body || '');
         const text = sourceText
             .replace(/\[reasoning compacted for context\]/gi, '')
@@ -3100,7 +3134,7 @@ export const Messages = {
                 (preview ? `<span class="history-detail-preview">${escapeHtml(preview)}</span>` : '') +
                 (elapsed > 0 ? `<span class="history-detail-time">${this.formatDuration(elapsed)}</span>` : '');
             const bodyText = detail.type === 'reasoning'
-                ? sanitizeMessageReasoningForDisplay(String(detail.body || ''), false)
+                ? sanitizeMessageReasoningForHistoryDisplay(String(detail.body || ''), false)
                 : String(detail.body || '').trim() || '(empty)';
             const isFriendlyError = !!detail.isError && looksLikeConfigOrApiError(bodyText);
             const body = isFriendlyError
@@ -3175,7 +3209,7 @@ export const Messages = {
 
         messagesDiv.appendChild(u);
 
-        // Collapse toggle for long messages — same logic as real-time messages
+        // Collapse toggle for long messages 鈥?same logic as real-time messages
         requestAnimationFrame(() => {
             const textDiv = u.querySelector('.text-content');
             const lineHeight = 1.5 * 13;
@@ -3184,11 +3218,11 @@ export const Messages = {
 
             if (shouldCollapse) {
                 const expandBtn = createElement('button', 'expand-toggle');
-                expandBtn.textContent = '展开 ▼';
+                expandBtn.textContent = 'Expand';
                 expandBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
                     u.classList.toggle('expanded');
-                    expandBtn.textContent = u.classList.contains('expanded') ? '收起 ▲' : '展开 ▼';
+                    expandBtn.textContent = u.classList.contains('expanded') ? 'Collapse' : 'Expand';
                 });
                 u.appendChild(expandBtn);
                 u.classList.add('collapsible');
@@ -3215,7 +3249,7 @@ export const Messages = {
         }
     },
 
-    // ── Conversation usage summary ──
+    // 鈹€鈹€ Conversation usage summary 鈹€鈹€
     handleConversationUsage(usage: { totalTokens: number; callCount: number }): void {
         // Update the token counter with final conversation total
         const statusEl = document.getElementById('token-counter');
@@ -3225,7 +3259,7 @@ export const Messages = {
         }
     },
 
-    // ── Workflow rendering ──
+    // 鈹€鈹€ Workflow rendering 鈹€鈹€
     getWorkflowState(): WorkflowUiState | null {
         const streamingMsg = store.get('streamingMsg') as any;
         return streamingMsg?._workflowState || null;
@@ -3435,7 +3469,7 @@ export const Messages = {
             card.innerHTML = `<div class="tool-header">` +
                 `<div class="tool-icon-wrapper"><div class="tool-icon">E</div><div class="tool-status-dot"></div></div>` +
                 `<div class="tool-info"><span class="tool-name">edit_file</span><span class="tool-args">${escapeHtml(filePath)}</span></div>` +
-                `<div class="tool-meta"><span class="tool-elapsed">Preview</span><span class="tool-chevron">▾</span></div>` +
+                `<div class="tool-meta"><span class="tool-elapsed">Preview</span><span class="tool-chevron">鈻?/span></div>` +
                 `</div><div class="tool-body"><div class="tool-result"><div class="diff-line"><span class="diff-info">Expand to render the edit preview.</span></div></div>` +
                 `<div class="edit-preview-actions"><button class="edit-accept-btn">Accept</button><button class="edit-reject-btn">Reject</button></div></div>`;
 
@@ -3537,7 +3571,7 @@ export const Messages = {
         const maxShow = Math.min(diff.length, 12);
         let diffHtml = `<div class="diff-header-line"><span class="diff-stats">+${added} -${removed}</span><span class="diff-match">${matchCount} match(es)</span></div>`;
         if (diff.length === 0) {
-            diffHtml += `<div class="diff-line"><span class="diff-ln">…</span><span class="diff-info">Large edit preview collapsed for performance. Apply or expand only when needed.</span></div>`;
+            diffHtml += `<div class="diff-line"><span class="diff-ln">鈥?/span><span class="diff-info">Large edit preview collapsed for performance. Apply or expand only when needed.</span></div>`;
         } else {
             for (const part of diff.slice(0, maxShow)) {
                 if (part.type === 'del') {
@@ -3560,9 +3594,9 @@ export const Messages = {
         card.innerHTML = `<div class="tool-header">` +
             `<div class="tool-icon-wrapper"><div class="tool-icon">E</div><div class="tool-status-dot"></div></div>` +
             `<div class="tool-info"><span class="tool-name">edit_file</span><span class="tool-args">${escapeHtml(filePath)}</span></div>` +
-            `<div class="tool-meta"><span class="tool-elapsed">⏳</span><span class="tool-chevron">▸</span></div>` +
+            `<div class="tool-meta"><span class="tool-elapsed">Preview</span><span class="tool-chevron">▾</span></div>` +
             `</div><div class="tool-body"><div class="tool-result">${diffHtml}</div>` +
-            `<div class="edit-preview-actions"><button class="edit-accept-btn">✓ Accept</button><button class="edit-reject-btn">✗ Reject</button></div></div>`;
+            `<div class="edit-preview-actions"><button class="edit-accept-btn">鉁?Accept</button><button class="edit-reject-btn">鉁?Reject</button></div></div>`;
 
         // Button handlers
         const acceptBtn = card.querySelector('.edit-accept-btn');
@@ -3572,7 +3606,7 @@ export const Messages = {
             const dot = card.querySelector('.tool-status-dot') as HTMLElement;
             if (dot) dot.style.background = 'var(--vscode-testing-iconPassed, #4ec9b0)';
             const elapsed = card.querySelector('.tool-elapsed') as HTMLElement;
-            if (elapsed) elapsed.textContent = '✓ Applied';
+            if (elapsed) elapsed.textContent = '鉁?Applied';
             const actions = card.querySelector('.edit-preview-actions') as HTMLElement;
             if (actions) actions.remove();
             card.classList.add('collapsed');
@@ -3586,7 +3620,7 @@ export const Messages = {
             const dot = card.querySelector('.tool-status-dot') as HTMLElement;
             if (dot) dot.style.background = 'var(--vscode-testing-iconFailed, #f44747)';
             const elapsed = card.querySelector('.tool-elapsed') as HTMLElement;
-            if (elapsed) elapsed.textContent = '✗ Rejected';
+            if (elapsed) elapsed.textContent = '鉁?Rejected';
             const actions = card.querySelector('.edit-preview-actions') as HTMLElement;
             if (actions) actions.remove();
             card.classList.add('collapsed');
@@ -3644,7 +3678,7 @@ export const Messages = {
                 card.innerHTML = `<div class="tool-header">` +
                     `<div class="tool-icon-wrapper"><div class="tool-icon">W</div><div class="tool-status-dot"></div></div>` +
                     `<div class="tool-info"><span class="tool-name">write_file</span><span class="tool-args">${escapeHtml(filePath)}</span></div>` +
-                    `<div class="tool-meta"><span class="tool-elapsed">Preview</span><span class="tool-chevron">▾</span></div>` +
+                    `<div class="tool-meta"><span class="tool-elapsed">Preview</span><span class="tool-chevron">鈻?/span></div>` +
                     `</div><div class="tool-body"><div class="tool-result"><div class="diff-line"><span class="diff-info">Expand to render the overwrite preview.</span></div></div>` +
                     `<div class="edit-preview-actions"><button class="edit-accept-btn">Confirm</button><button class="edit-reject-btn">Reject</button></div></div>`;
 
@@ -3712,7 +3746,7 @@ export const Messages = {
             card.innerHTML = `<div class="tool-header">` +
                 `<div class="tool-icon-wrapper"><div class="tool-icon">W</div><div class="tool-status-dot"></div></div>` +
                 `<div class="tool-info"><span class="tool-name">write_file</span><span class="tool-args">${escapeHtml(filePath)} (${linesLite.length} lines)</span></div>` +
-                `<div class="tool-meta"><span class="tool-elapsed">Preview</span><span class="tool-chevron">▾</span></div>` +
+                `<div class="tool-meta"><span class="tool-elapsed">Preview</span><span class="tool-chevron">鈻?/span></div>` +
                 `</div><div class="tool-body"><div class="tool-result">${contentHtmlLite}</div>` +
                 `<div class="edit-preview-actions"><button class="edit-accept-btn">Confirm</button><button class="edit-reject-btn">Reject</button></div></div>`;
 
@@ -3763,12 +3797,12 @@ export const Messages = {
                     contentHtml += `<div class="diff-line"><span class="diff-info">... ${diff.length - maxShow} more lines</span></div>`;
                 }
             }
-            const actionLabel = '覆盖文件';
+            const actionLabel = '瑕嗙洊鏂囦欢';
             card.innerHTML = `<div class="tool-header">` +
                 `<div class="tool-icon-wrapper"><div class="tool-icon">W</div><div class="tool-status-dot"></div></div>` +
-                `<div class="tool-info"><span class="tool-name">⚠️ write_file → ${escapeHtml(filePath)}</span><span class="tool-desc">${escapeHtml(actionLabel)} · <span class="diff-stats-add">+${added}</span> <span class="diff-stats-del">-${removed}</span></span></div>` +
-                `</div><div class="diff-card expanded"><div class="diff-card-header"><span class="diff-file">${escapeHtml(filePath)}</span><span class="diff-stats">+${added} lines, -${removed} lines</span><span class="diff-chevron">▾</span></div><div class="diff-card-body">${contentHtml}</div></div>` +
-                `<div class="tool-actions"><button class="tool-action-confirm" data-preview="${previewId}">✅ 确认</button><button class="tool-action-reject" data-preview="${previewId}">❌ 拒绝</button></div>`;
+                `<div class="tool-info"><span class="tool-name">鈿狅笍 write_file 鈫?${escapeHtml(filePath)}</span><span class="tool-desc">${escapeHtml(actionLabel)} 路 <span class="diff-stats-add">+${added}</span> <span class="diff-stats-del">-${removed}</span></span></div>` +
+                `</div><div class="diff-card expanded"><div class="diff-card-header"><span class="diff-file">${escapeHtml(filePath)}</span><span class="diff-stats">+${added} lines, -${removed} lines</span><span class="diff-chevron">鈻?/span></div><div class="diff-card-body">${contentHtml}</div></div>` +
+                `<div class="tool-actions"><button class="tool-action-confirm" data-preview="${previewId}">鉁?纭</button><button class="tool-action-reject" data-preview="${previewId}">鉂?鎷掔粷</button></div>`;
             card.querySelector('.tool-action-confirm')?.addEventListener('click', () => vscode.editConfirm(previewId));
             card.querySelector('.tool-action-reject')?.addEventListener('click', () => vscode.editReject(previewId));
             messagesDiv.appendChild(card);
@@ -3790,17 +3824,17 @@ export const Messages = {
             contentHtml += `<div class="diff-line"><span class="diff-info">... +${lines.length - maxShow} more lines</span></div>`;
         }
 
-        const actionLabel = isCreate ? '创建文件' : '覆盖文件';
-        const icon = isCreate ? '📄' : '⚠️';
+        const actionLabel = isCreate ? '鍒涘缓鏂囦欢' : '瑕嗙洊鏂囦欢';
+        const icon = isCreate ? '馃搫' : '鈿狅笍';
 
         card.innerHTML = `<div class="tool-header">` +
             `<div class="tool-icon-wrapper"><div class="tool-icon">W</div><div class="tool-status-dot"></div></div>` +
-            `<div class="tool-info"><span class="tool-name">${icon} write_file — ${actionLabel}</span><span class="tool-args">${escapeHtml(filePath)} (${lines.length} lines)</span></div>` +
-            `<div class="tool-meta"><span class="tool-elapsed">⏳</span><span class="tool-chevron">▸</span></div>` +
+            `<div class="tool-info"><span class="tool-name">${icon} write_file 鈥?${actionLabel}</span><span class="tool-args">${escapeHtml(filePath)} (${lines.length} lines)</span></div>` +
+            `<div class="tool-meta"><span class="tool-elapsed">鈴?/span><span class="tool-chevron">鈻?/span></div>` +
             `</div><div class="tool-body"><div class="tool-result">${contentHtml}</div>` +
             `<div class="edit-preview-actions">` +
-            `<button class="edit-accept-btn">✓ 确认写入</button>` +
-            `<button class="edit-reject-btn">✗ 拒绝</button>` +
+            `<button class="edit-accept-btn">Confirm</button>` +
+            `<button class="edit-reject-btn">Reject</button>` +
             `</div></div>`;
 
         // Button handlers
@@ -3811,7 +3845,7 @@ export const Messages = {
             const dot = card.querySelector('.tool-status-dot') as HTMLElement;
             if (dot) dot.style.background = 'var(--vscode-testing-iconPassed, #4ec9b0)';
             const elapsed = card.querySelector('.tool-elapsed') as HTMLElement;
-            if (elapsed) elapsed.textContent = '✓ 已写入';
+            if (elapsed) elapsed.textContent = 'Applied';
             const actions = card.querySelector('.edit-preview-actions') as HTMLElement;
             if (actions) actions.remove();
             card.classList.add('collapsed');
@@ -3825,7 +3859,7 @@ export const Messages = {
             const dot = card.querySelector('.tool-status-dot') as HTMLElement;
             if (dot) dot.style.background = 'var(--vscode-testing-iconFailed, #f44747)';
             const elapsed = card.querySelector('.tool-elapsed') as HTMLElement;
-            if (elapsed) elapsed.textContent = '✗ 已拒绝';
+            if (elapsed) elapsed.textContent = 'Rejected';
             const actions = card.querySelector('.edit-preview-actions') as HTMLElement;
             if (actions) actions.remove();
             card.classList.add('collapsed');
@@ -3835,11 +3869,11 @@ export const Messages = {
         smartScroll(messagesDiv);
     },
 
-    // ── System message ──
+    // 鈹€鈹€ System message 鈹€鈹€
     addSystemMessage(text: string, variant: 'default' | 'manual-stop' = 'default'): void {
         const messagesDiv = document.getElementById('messages')!;
         const sys = createElement('div', 'msg msg-system');
-        const normalizedVariant = variant === 'default' && /^(已手动停止当前任务。|Stopped this task manually\.)$/.test(String(text || '').trim())
+        const normalizedVariant = variant === 'default' && /^(宸叉墜鍔ㄥ仠姝㈠綋鍓嶄换鍔°€倈Stopped this task manually\.)$/.test(String(text || '').trim())
             ? 'manual-stop'
             : variant;
         if (normalizedVariant !== 'default') {
@@ -3850,7 +3884,7 @@ export const Messages = {
         smartScroll(messagesDiv);
     },
 
-    // ── Welcome screen i18n update ──
+    // 鈹€鈹€ Welcome screen i18n update 鈹€鈹€
     updateWelcome(descOrSeed: string, hint?: string): void {
         const welcomeDesc = document.querySelector('.welcome-desc');
         const welcomeHint = document.querySelector('.welcome-hint');
@@ -3865,7 +3899,7 @@ export const Messages = {
         }
     },
 
-    // ── Plan Mode: Confirm/Reject ──
+    // 鈹€鈹€ Plan Mode: Confirm/Reject 鈹€鈹€
 
     makeCardCollapsible(card: HTMLElement, headerSelector: string, collapsed = false): void {
         const header = card.querySelector(headerSelector) as HTMLElement | null;
@@ -3996,21 +4030,21 @@ export const Messages = {
         });
     },
 
-    // ── Ask User: Interactive Dialog ──
+    // 鈹€鈹€ Ask User: Interactive Dialog 鈹€鈹€
 
     renderAskUserCard(previewId: string, question: string, options: string[]): void {
         const messagesDiv = document.getElementById('messages')!;
         const card = createElement('div', 'ask-user-card');
 
         card.innerHTML = `
-            <div class="ask-user-header">❓ 需要你的确认</div>
+            <div class="ask-user-header">鉂?闇€瑕佷綘鐨勭‘璁?/div>
             <div class="ask-user-question">${escapeHtml(question)}</div>
             <div class="ask-user-options">${options.map(opt =>
                 `<button class="ask-user-option-btn" data-answer="${escapeHtml(opt)}">${escapeHtml(opt)}</button>`
             ).join('')}<button class="ask-user-option-btn ask-user-other-btn" data-other="true">${t('ask.other')}</button></div>
             <div class="ask-user-other-input" id="ask-user-other-${previewId}" style="display:none">
-                <input type="text" class="ask-user-input" id="ask-user-input-${previewId}" placeholder="请输入你的回答..." />
-                <button class="ask-user-submit-btn" id="ask-user-submit-${previewId}">✓</button>
+                <input type="text" class="ask-user-input" id="ask-user-input-${previewId}" placeholder="璇疯緭鍏ヤ綘鐨勫洖绛?.." />
+                <button class="ask-user-submit-btn" id="ask-user-submit-${previewId}">鉁?/button>
             </div>
             <div class="ask-user-status" id="ask-user-status-${previewId}"></div>
         `;
@@ -4027,7 +4061,7 @@ export const Messages = {
             if (!answer.trim()) return;
             card.querySelectorAll('button').forEach(b => (b as HTMLButtonElement).disabled = true);
             if (input) input.disabled = true;
-            statusEl.textContent = `✅ 你的回答：${answer}`;
+            statusEl.textContent = `鉁?浣犵殑鍥炵瓟锛?{answer}`;
             card.classList.add('ask-user-answered');
             card.classList.add('collapsed');
             vscode.askUserConfirm(previewId, answer);
@@ -4037,7 +4071,7 @@ export const Messages = {
         card.querySelectorAll('.ask-user-option-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 if (btn.getAttribute('data-other') === 'true') {
-                    // Show inline input for "其他"
+                    // Show inline input for "鍏朵粬"
                     otherInput.style.display = 'flex';
                     input.focus();
                 } else {
@@ -4058,25 +4092,25 @@ export const Messages = {
         const messagesDiv = document.getElementById('messages')!;
         const card = createElement('div', 'stop-guard-card');
         const round = Number.isFinite(info?.round) ? Number(info.round) : 0;
-        const reason = String(info?.reason || '检测到连续低进展');
+        const reason = String(info?.reason || 'Low-progress loop detected.');
         const continuePrompt = [
-            '继续执行当前任务。',
-            '请从刚才已经保存的进度继续，优先完成未完成项。',
-            '避免重复已经做过的检查；如果继续没有新进展，请尽快总结并停止。'
+            'Continue the current task.',
+            'Resume from the saved progress and prioritize unfinished work.',
+            'Avoid repeating completed checks. If no new progress is possible, summarize and stop.'
         ].join('\n');
 
         card.innerHTML = `
-            <div class="stop-guard-header">暂停保护已接管</div>
+            <div class="stop-guard-header">Pause Guard</div>
             <div class="stop-guard-body">
-                <div class="stop-guard-title">MIMO 已保存当前进度，这次暂停不会作为错误处理。</div>
+                <div class="stop-guard-title">MIMO saved the current progress. This pause is not treated as an error.</div>
                 <div class="stop-guard-meta">
-                    <span>第 ${round || '-'} 轮</span>
+                    <span>Round ${round || '-'}</span>
                     <span>${escapeHtml(reason)}</span>
                 </div>
             </div>
             <div class="stop-guard-actions">
-                <button class="stop-guard-continue" type="button">继续执行</button>
-                <button class="stop-guard-dismiss" type="button">先停在这里</button>
+                <button class="stop-guard-continue" type="button">Continue</button>
+                <button class="stop-guard-dismiss" type="button">Stop here</button>
             </div>
             <div class="stop-guard-status"></div>
         `;
@@ -4095,16 +4129,16 @@ export const Messages = {
         };
 
         continueBtn?.addEventListener('click', () => {
-            disableActions('已发送继续指令。');
+            disableActions('Continue instruction sent.');
             vscode.send(continuePrompt);
         });
         dismissBtn?.addEventListener('click', () => {
-            disableActions('已保留当前结果。');
+            disableActions('Current result kept.');
             card.classList.add('collapsed');
         });
     },
 
-    // ── Adversarial Mode: 疯狂程序猿 vs 超级产品经理 ──
+    // 鈹€鈹€ Adversarial Mode: 鐤媯绋嬪簭鐚?vs 瓒呯骇浜у搧缁忕悊 鈹€鈹€
 
     _currentAdversarialPersona: null as string | null,
     _currentAdversarialBlock: null as HTMLElement | null,
@@ -4144,7 +4178,7 @@ export const Messages = {
             nameEl.textContent = displayName;
             nameEl.style.color = persona === 'programmer' ? '#FF6900' : '#2196F3';
             const phaseEl = createElement('span', 'adversarial-phase');
-            phaseEl.textContent = phase === 'speak' ? '正在编码...' : phase === 'review' ? '正在审查...' : phase === 'verdict' ? '裁决' : '';
+            phaseEl.textContent = phase === 'speak' ? '姝ｅ湪缂栫爜...' : phase === 'review' ? '姝ｅ湪瀹℃煡...' : phase === 'verdict' ? '瑁佸喅' : '';
             header.appendChild(avatar);
             header.appendChild(nameEl);
             const roundEl = createElement('span', 'adversarial-round');
@@ -4174,7 +4208,7 @@ export const Messages = {
         // Update phase text if it changed
         const phaseEl = this._currentAdversarialBlock?.querySelector('.adversarial-phase');
         if (phaseEl) {
-            const phaseText = phase === 'speak' ? '正在编码...' : phase === 'review' ? '正在审查...' : phase === 'verdict' ? '裁决' : '';
+            const phaseText = phase === 'speak' ? '姝ｅ湪缂栫爜...' : phase === 'review' ? '姝ｅ湪瀹℃煡...' : phase === 'verdict' ? '瑁佸喅' : '';
             (phaseEl as HTMLElement).textContent = phaseText;
         }
 
@@ -4312,7 +4346,7 @@ export const Messages = {
             return `<ol>${match}</ol>`;
         });
 
-        // Line breaks — collapse 3+ consecutive newlines into a single <br> to reduce excessive blank lines
+        // Line breaks 鈥?collapse 3+ consecutive newlines into a single <br> to reduce excessive blank lines
         html = html.replace(/\n{3,}/g, '\n\n');
         html = html.replace(/\n/g, '<br>');
 
@@ -4324,7 +4358,7 @@ export const Messages = {
         return html;
     },
 
-    // ── Message Queue ──
+    // 鈹€鈹€ Message Queue 鈹€鈹€
 
     formatQueueTitle(count: number): string {
         return `${t('queue.waiting')} (${count})`;
@@ -4341,13 +4375,10 @@ export const Messages = {
     getTaskChangesToggleLabel(hiddenCount: number, expanded: boolean): string {
         const showLabel = t('show');
         const hideLabel = t('hide');
-        const isZh = showLabel === '展开' || hideLabel === '收起';
         if (expanded) {
-            return isZh ? `${hideLabel}额外文件` : `${hideLabel} extra files`;
+            return `${hideLabel} extra files`;
         }
-        return isZh
-            ? `${showLabel}其余 ${hiddenCount} 个文件`
-            : `${showLabel} ${hiddenCount} more file${hiddenCount === 1 ? '' : 's'}`;
+        return `${showLabel} ${hiddenCount} more file${hiddenCount === 1 ? '' : 's'}`;
     },
 
     syncTaskChangeListState(card: HTMLElement): void {
@@ -4512,7 +4543,7 @@ export const Messages = {
         if (container) container.remove();
     },
 
-    // ── Clear ──
+    // 鈹€鈹€ Clear 鈹€鈹€
     clearMessages(): void {
         const messagesDiv = document.getElementById('messages')!;
         Array.from(messagesDiv.children).forEach(child => {
@@ -4529,7 +4560,7 @@ export const Messages = {
         if (statusEl) { statusEl.textContent = ''; statusEl.style.display = 'none'; }
     },
 
-    // ── Helpers ──
+    // 鈹€鈹€ Helpers 鈹€鈹€
     createAssistantMsg(): HTMLElement {
         const messagesDiv = document.getElementById('messages')!;
         const div = createElement('div', 'msg msg-assistant');

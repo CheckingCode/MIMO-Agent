@@ -16,7 +16,7 @@ import { runSubAgent, SubAgentOptions, SubAgentResult, SubAgentEvents } from './
 import { HookManager } from './hooks';
 import { TokenTracker, TokenUsage } from './tokenTracker';
 import { executeWorkflow, WorkflowPhase, WorkflowResult, WorkflowEvents } from './workflow';
-import { classifyIntent, IntentResult, checkAdversarialSuitability, quickClassifyIntent } from './router';
+import { classifyIntent, IntentResult, checkAdversarialSuitability, quickClassifyIntent, requiresToolBackedAnswer, requiresToolEvidence } from './router';
 import { MemoryManager, ToolObservation } from './memory';
 import { AgentEvents, AgentMode, CompletionGateDecision, ConversationState, PendingAsk, PendingEdit, PendingWrite, RoundProgress, TaskChangeFile, TaskChangeSummary, TrackedIssue } from './agentTypes';
 import { DEFAULT_MODELS, MODEL_CAPABILITIES, ModelCapabilities, PREFERRED_CHAT_MODELS, inferModelCapabilities, normalizeModelName } from './modelCapabilities';
@@ -414,6 +414,10 @@ export class MiMoAgent extends EventEmitter {
         const tail = clean.slice(-720);
         return `[reasoning compacted for context]\n${head}\n...\n${tail}`;
     }
+    private isUnlimitedRoundLimit(value?: number): boolean {
+        return typeof value === 'number'
+            && (!Number.isFinite(value) || value >= Number.MAX_SAFE_INTEGER / 2);
+    }
     private isModelUnsupportedError(error: any): boolean {
         const message = String(error?.message || error || '');
         return /\b400\b/i.test(message)
@@ -745,11 +749,12 @@ export class MiMoAgent extends EventEmitter {
                 ...conv,
                 messages: messages.map((msg) => {
                     const maxContent = msg.role === 'tool' ? 2000 : msg.role === 'assistant' ? 8000 : 10000;
+                    const reasoningMax = msg.role === 'assistant' && msg.tool_calls?.length ? 100_000 : 1200;
                     return {
                         ...msg,
                         content: this.trimPersistedContent(msg.content as any, maxContent),
                         reasoning_content: msg.reasoning_content
-                            ? this.trimPersistedText(msg.reasoning_content, 1200)
+                            ? this.trimPersistedText(msg.reasoning_content, reasoningMax)
                             : msg.reasoning_content,
                     };
                 }),
@@ -2255,6 +2260,55 @@ Change strategy now:
             return /(compile|test|lint|validation|验证|测试).{0,80}(pass|success|ok|通过|成功)/i.test(text);
         });
     }
+    private hasRecentEvidenceTool(conv: ConversationState, userInput: string, lookback = 80): boolean {
+        const text = String(userInput || '');
+        const wantsExternalEvidence = /(?:crossref|doi\b|api\b|endpoint|url\b|https?:\/\/|http status|status\s*code|web|internet|online|database|pubmed|arxiv|github|npm|pypi|\u63a5\u53e3|\u7f51\u7edc|\u7f51\u9875|\u5b98\u7f51|\u6570\u636e\u5e93|\u6587\u732e|\u8bba\u6587)/i.test(text);
+        const evidenceTools = wantsExternalEvidence
+            ? ['fetch_url', 'web_search']
+            : [
+                'read_file', 'search_files', 'glob_files', 'list_directory',
+                'get_file_info', 'git_status', 'git_diff', 'git_log',
+                'fetch_url', 'web_search', 'execute_command',
+            ];
+        const targetTerms = [
+            /crossref/i.test(text) ? 'crossref' : '',
+            /\bdoi\b/i.test(text) ? 'doi' : '',
+            /\bapi\b/i.test(text) || /\u63a5\u53e3/.test(text) ? 'api' : '',
+        ].filter(Boolean);
+        const recent = conv.messages.slice(-lookback);
+        return recent.some(msg => {
+            if (msg.role === 'tool' && evidenceTools.includes(msg._toolName || '')) {
+                if (!targetTerms.length) return true;
+                const content = this.extractMessageText(msg.content).toLowerCase();
+                return targetTerms.some(term => content.includes(term));
+            }
+            if (msg.role === 'assistant' && msg.tool_calls?.length) {
+                return msg.tool_calls.some(tc => {
+                    if (!evidenceTools.includes(tc.function.name)) return false;
+                    if (!targetTerms.length) return true;
+                    const args = String(tc.function.arguments || '').toLowerCase();
+                    return targetTerms.some(term => args.includes(term));
+                });
+            }
+            return false;
+        });
+    }
+    private shouldForceToolEvidence(userInput: string, conv: ConversationState): boolean {
+        if (!requiresToolEvidence(userInput))
+            return false;
+        return !this.hasRecentEvidenceTool(conv, userInput);
+    }
+    private shouldForceToolBackedAnswer(userInput: string, conv: ConversationState): boolean {
+        if (!requiresToolBackedAnswer(userInput))
+            return false;
+        if (requiresToolEvidence(userInput))
+            return this.shouldForceToolEvidence(userInput, conv);
+        return !this.hasRecentTool(conv, [
+            'read_file', 'search_files', 'glob_files', 'list_directory',
+            'get_file_info', 'git_status', 'git_diff', 'git_log',
+            'fetch_url', 'web_search', 'execute_command',
+        ], 80);
+    }
     private isReadOnlyAnalysisFinal(finalText: string): boolean {
         const text = String(finalText || '');
         if (!text.trim())
@@ -2890,11 +2944,30 @@ Continue the task now. Treat the previous final draft as already shown to the us
                 if (intent.complexity) {
                     taskComplexity = intent.complexity;
                 }
+                const forceToolEvidence = this.shouldForceToolBackedAnswer(userInput, conv);
+                if (forceToolEvidence) {
+                    const evidenceSpecific = requiresToolEvidence(userInput);
+                    routedIntent = {
+                        ...intent,
+                        needsTools: true,
+                        category: evidenceSpecific ? 'search' : (intent.category === 'question' ? 'debug' : intent.category),
+                        plan: evidenceSpecific
+                            ? 'Gather tool/source evidence before answering the verification question'
+                            : 'Gather workspace/tool evidence before answering',
+                        complexity: intent.complexity || (evidenceSpecific ? 'moderate' : 'complex'),
+                        suggestedPersona: intent.suggestedPersona || (evidenceSpecific ? 'analyst' : 'debugger'),
+                    };
+                    taskComplexity = routedIntent.complexity || 'moderate';
+                    events.onReasoning(evidenceSpecific
+                        ? '[Completion gate] This question asks for verification evidence; continuing with tools before answering.'
+                        : '[Completion gate] This question needs workspace/tool evidence; continuing with tools before answering.');
+                }
                 // Apply router's suggested persona
                 // Priority: router's LLM suggestion > keyword detection
                 // (router uses full LLM context analysis, keyword is just substring matching)
-                if (intent.suggestedPersona) {
-                    const suggested = getPersona(intent.suggestedPersona);
+                const personaIntent = routedIntent || intent;
+                if (personaIntent.suggestedPersona) {
+                    const suggested = getPersona(personaIntent.suggestedPersona);
                     if (suggested) {
                         if (!persona) {
                             // No keyword match — use router's suggestion
@@ -2912,7 +2985,7 @@ Continue the task now. Treat the previous final draft as already shown to the us
                     }
                 }
                 // If no tools needed: simple text-only response (with persona)
-                if (!intent.needsTools && !forceContinuePendingAction) {
+                if (!intent.needsTools && !forceContinuePendingAction && !forceToolEvidence) {
                     return this.handleDirectResponse(userInput, conv, events, signal, effectiveConvId, persona);
                 }
                 if (!intent.needsTools && forceContinuePendingAction) {
@@ -3014,6 +3087,12 @@ Continue the task now. Treat the previous final draft as already shown to the us
                 }
                 else if (routedIntent.category === 'acknowledgement') {
                     systemContent += `\n\nAcknowledgement handling: bind this short confirmation to the most recent pending plan, preview, permission, or recovery context before treating it as a new request.`;
+                }
+                if (requiresToolEvidence(userInput)) {
+                    systemContent += `\n\nEvidence verification handling: this user message asks whether a claim was actually verified, sourced, fetched, or tool/API-backed. First inspect recent tool evidence and, when an external source is named, use fetch_url or web_search if available. Final answer must clearly distinguish prior evidence from any new verification performed in this turn. Do not end with only an offer to verify later.`;
+                }
+                else if (requiresToolBackedAnswer(userInput)) {
+                    systemContent += `\n\nTool-backed answer handling: this user message asks about current workspace/product state, root cause, validation, debugging, performance, UI behavior, files, git/diff, or another evidence-dependent topic. Do not answer from memory alone. Use the relevant read/search/git/web/validation tools first, then answer with the evidence and any remaining uncertainty.`;
                 }
             }
             systemContent = this.appendMemoryPrompt(systemContent, userInput);
@@ -3224,10 +3303,16 @@ Do not ask the user for clarification or confirmation during this run. If a choi
                 content = result.content;
                 toolCalls = result.toolCalls;
                 if (result.reasoningContent) {
-                    reasoningContent = result.reasoningContent.length > MAX_REASONING_CAPTURE_CHARS
-                        ? result.reasoningContent.slice(-MAX_REASONING_CAPTURE_CHARS)
-                        : result.reasoningContent;
-                    reasoningWasTrimmed = reasoningWasTrimmed || result.reasoningContent.length > MAX_REASONING_CAPTURE_CHARS;
+                    if (result.toolCalls.length > 0) {
+                        reasoningContent = result.reasoningContent;
+                        reasoningWasTrimmed = false;
+                    }
+                    else {
+                        reasoningContent = result.reasoningContent.length > MAX_REASONING_CAPTURE_CHARS
+                            ? result.reasoningContent.slice(-MAX_REASONING_CAPTURE_CHARS)
+                            : result.reasoningContent;
+                        reasoningWasTrimmed = reasoningWasTrimmed || result.reasoningContent.length > MAX_REASONING_CAPTURE_CHARS;
+                    }
                 }
                 // Track token usage (API usage or estimate)
                 if (result.usage) {
@@ -3460,10 +3545,10 @@ ${friendlyError}`;
             }
             consecutiveRateRetries = 0;
             const assistantMsg: ChatMessage = { role: 'assistant', content };
-            // Some OpenAI-compatible APIs require reasoning_content to be present
-            // when tool_calls exist, even if it is empty.
+            // Some OpenAI-compatible APIs require the original reasoning_content
+            // when replaying assistant tool_calls with their tool results.
             if (toolCalls.length > 0) {
-                assistantMsg.reasoning_content = this.compactReasoningForContext(reasoningContent, reasoningWasTrimmed);
+                assistantMsg.reasoning_content = reasoningContent || (reasoningWasTrimmed ? '[reasoning trimmed]' : '');
                 assistantMsg.tool_calls = toolCalls;
                 // When tool_calls exist, content should be null (not empty string)
                 // to match the model's actual response format and avoid API 400 errors.
@@ -5303,9 +5388,14 @@ Output format:
             `Completed tool calls: ${toolMessages.length}`,
         ];
         if (typeof options.round === 'number' && typeof options.maxRounds === 'number') {
-            lines.push(`Progress: round ${options.round} of ${options.maxRounds}`);
+            const unlimited = this.isUnlimitedRoundLimit(options.maxRounds);
+            lines.push(unlimited
+                ? `Progress: round ${options.round} (unlimited budget)`
+                : `Progress: round ${options.round} of ${options.maxRounds}`);
             if (typeof options.softMaxRounds === 'number') {
-                lines.push(`Soft budget: ${options.softMaxRounds} rounds`);
+                lines.push(this.isUnlimitedRoundLimit(options.softMaxRounds)
+                    ? 'Soft budget: unlimited'
+                    : `Soft budget: ${options.softMaxRounds} rounds`);
             }
         }
         if (changedFiles.size > 0) {

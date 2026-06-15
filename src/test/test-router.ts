@@ -1,5 +1,5 @@
 import { describe, it, expect, summary } from './test-runner';
-import { buildConcreteTaskIntent, quickClassifyIntent, shouldUseModelIntentClassification } from '../router';
+import { buildConcreteTaskIntent, quickClassifyIntent, requiresToolBackedAnswer, requiresToolEvidence, shouldUseModelIntentClassification } from '../router';
 
 describe('router fast-path classification', () => {
     it('treats concrete file-edit requests as heuristic code tasks', () => {
@@ -59,6 +59,33 @@ describe('router fast-path classification', () => {
         const intent = quickClassifyIntent('\u8bf7\u5c06\u4e0a\u8ff0\u65b9\u6848\u4fdd\u5b58\u8fdb\u7cfb\u7edf\uff0c\u4ee5\u540e\u5fc5\u987b\u9075\u5b88');
         expect(intent?.needsTools).toBe(true);
         expect(intent?.category).toBe('preference');
+    });
+
+    it('routes provenance and external verification questions through tools', () => {
+        const input = '\u6587\u6863\u91cc\u8bf4\u7ecf CrossRef \u9a8c\u8bc1\uff0c\u8fd8\u662f\u4f60\u8fd9\u6b21\u786e\u5b9e\u8c03\u7528 CrossRef \u9a8c\u8bc1\u4e86\uff1f';
+        const intent = quickClassifyIntent(input);
+        expect(requiresToolEvidence(input)).toBe(true);
+        expect(intent?.needsTools).toBe(true);
+        expect(intent?.category).toBe('search');
+    });
+
+    it('does not treat ordinary factual questions as evidence-tool requests', () => {
+        expect(requiresToolEvidence('TypeScript \u662f\u4ec0\u4e48\uff1f')).toBe(false);
+    });
+
+    it('routes root-cause and current project questions through tools', () => {
+        const intent = quickClassifyIntent('\u8fd9\u4e2a\u81ea\u52a8\u4e2d\u65ad\u7684\u6839\u672c\u539f\u56e0\u662f\u4ec0\u4e48\uff1f\u8bf7\u5206\u6790\u5e76\u7ed9\u51fa\u4fee\u590d\u65b9\u6848');
+        expect(requiresToolBackedAnswer('\u8fd9\u4e2a\u81ea\u52a8\u4e2d\u65ad\u7684\u6839\u672c\u539f\u56e0\u662f\u4ec0\u4e48\uff1f\u8bf7\u5206\u6790\u5e76\u7ed9\u51fa\u4fee\u590d\u65b9\u6848')).toBe(true);
+        expect(intent?.needsTools).toBe(true);
+        expect(intent?.category).toBe('experience');
+    });
+
+    it('keeps pure concept questions eligible for direct answers', () => {
+        const intent = quickClassifyIntent('API \u662f\u4ec0\u4e48\uff1f');
+        expect(requiresToolEvidence('API \u662f\u4ec0\u4e48\uff1f')).toBe(false);
+        expect(requiresToolBackedAnswer('API \u662f\u4ec0\u4e48\uff1f')).toBe(false);
+        expect(intent?.needsTools).toBe(false);
+        expect(intent?.category).toBe('question');
     });
 });
 

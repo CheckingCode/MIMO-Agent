@@ -3,7 +3,7 @@ import { AgentEvents, ConversationState, CompletionGateDecision, RoundProgress }
 import { TOOL_DEFINITIONS, executeTool } from './tools';
 import { buildSystemPrompt, loadInstructions, validateInstructions } from './prompt';
 import { manageContext, getContextStats, summarizeContext, recordTokenUsage } from './context';
-import { classifyIntent, checkAdversarialSuitability, quickClassifyIntent } from './router';
+import { classifyIntent, checkAdversarialSuitability, quickClassifyIntent, requiresToolBackedAnswer, requiresToolEvidence } from './router';
 import { detectPersona, buildPersonaPrompt, getPersona } from './personas';
 import { ToolObservation } from './memory';
 import { getFriendlyError } from './agentErrors';
@@ -186,6 +186,18 @@ export async function doChatImpl(
                 if (intent.complexity) {
                     taskComplexity = intent.complexity;
                 }
+                const forceToolEvidence = requiresToolBackedAnswer(userInput)
+                    && (requiresToolEvidence(userInput)
+                        ? !this.hasRecentEvidenceTool?.(conv, userInput)
+                        : !this.hasRecentTool?.(conv, [
+                            'read_file', 'search_files', 'glob_files', 'list_directory',
+                            'get_file_info', 'git_status', 'git_diff', 'git_log',
+                            'fetch_url', 'web_search', 'execute_command',
+                        ], 80));
+                if (forceToolEvidence) {
+                    taskComplexity = intent.complexity || 'moderate';
+                    events.onReasoning('[Completion gate] This question asks for verification evidence; continuing with tools before answering.');
+                }
 
                 // Apply router's suggested persona
                 // Priority: router's LLM suggestion > keyword detection
@@ -209,7 +221,7 @@ export async function doChatImpl(
                 }
 
                 // If no tools needed: simple text-only response (with persona)
-                if (!intent.needsTools && !forceContinuePendingAction) {
+                if (!intent.needsTools && !forceContinuePendingAction && !forceToolEvidence) {
                     return this.handleDirectResponse(userInput, conv, events, signal, effectiveConvId, persona);
                 }
                 if (!intent.needsTools && forceContinuePendingAction) {
@@ -483,10 +495,16 @@ Do not ask the user for clarification or confirmation during this run. If a choi
                 content = result.content;
                 toolCalls = result.toolCalls;
                 if (result.reasoningContent) {
-                    reasoningContent = result.reasoningContent.length > MAX_REASONING_CAPTURE_CHARS
-                        ? result.reasoningContent.slice(-MAX_REASONING_CAPTURE_CHARS)
-                        : result.reasoningContent;
-                    reasoningWasTrimmed = reasoningWasTrimmed || result.reasoningContent.length > MAX_REASONING_CAPTURE_CHARS;
+                    if (result.toolCalls.length > 0) {
+                        reasoningContent = result.reasoningContent;
+                        reasoningWasTrimmed = false;
+                    }
+                    else {
+                        reasoningContent = result.reasoningContent.length > MAX_REASONING_CAPTURE_CHARS
+                            ? result.reasoningContent.slice(-MAX_REASONING_CAPTURE_CHARS)
+                            : result.reasoningContent;
+                        reasoningWasTrimmed = reasoningWasTrimmed || result.reasoningContent.length > MAX_REASONING_CAPTURE_CHARS;
+                    }
                 }
                 // Track token usage (API usage or estimate)
                 if (result.usage) {
@@ -731,10 +749,10 @@ ${friendlyError}`;
 
             consecutiveRateRetries = 0;
             const assistantMsg: ChatMessage = { role: 'assistant', content };
-            // Some OpenAI-compatible APIs require reasoning_content to be present
-            // when tool_calls exist, even if it is empty.
+            // Some OpenAI-compatible APIs require the original reasoning_content
+            // when replaying assistant tool_calls with their tool results.
             if (toolCalls.length > 0) {
-                assistantMsg.reasoning_content = this.compactReasoningForContext(reasoningContent, reasoningWasTrimmed);
+                assistantMsg.reasoning_content = reasoningContent || (reasoningWasTrimmed ? '[reasoning trimmed]' : '');
                 assistantMsg.tool_calls = toolCalls;
                 // When tool_calls exist, content should be null (not empty string)
                 // to match the model's actual response format and avoid API 400 errors.

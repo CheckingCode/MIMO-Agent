@@ -7,7 +7,7 @@ import { MiMoAgent } from '../agent';
 import { AgentMode } from '../agent';
 import { HistoryManager } from '../history';
 import { readSettings, saveSetting, getSettingsPanel, loadConfig } from '../config';
-import { renderMarkdown } from '../markdown';
+import { renderMarkdown, renderStreamingMarkdown } from '../markdown';
 import { ApiEndpointMode, ContentPart, ChatMessage, MiMoAPI, normalizeApiEndpointMode } from '../api';
 import { getContextStats } from '../context';
 import { buildPlanExecutionMessage, getMimoPlansDir, looksLikePlanResponse, sanitizePlanMarkdown } from '../planMode';
@@ -411,7 +411,7 @@ function createStreamingRenderQueue(post: (msg: any) => void) {
         if (text === lastRenderedText) return;
         lastRenderedText = text;
         try {
-            post({ type: 'streamHtml', html: renderMarkdown(text) });
+            post({ type: 'streamHtml', html: renderStreamingMarkdown(text), lightweight: true });
         } catch (e: any) {
             post({ type: 'error', error: `Render failed: ${e?.message || String(e)}` });
         }
@@ -508,6 +508,15 @@ interface SerializedChatPanelState {
     uiLang?: 'en' | 'zh';
 }
 
+interface WorkspaceFilePickerEntry {
+    name: string;
+    relativePath: string;
+    fullPath: string;
+    kind: 'file' | 'directory';
+    depth: number;
+    parent: string;
+}
+
 type ReasoningEffort = 'turbo' | 'fast' | 'balanced' | 'deep' | 'max';
 
 export class ChatViewProvider {
@@ -519,6 +528,7 @@ export class ChatViewProvider {
     private replaySeq = 0;
     private windowReasoningEffort: ReasoningEffort;
     private activeTurnTokens = new Map<string, string>();
+    private workspaceFileCache?: { root: string; createdAt: number; entries: WorkspaceFilePickerEntry[] };
     private pendingHistorySaves = new Map<string, {
         title: string;
         messages: ChatMessage[];
@@ -633,6 +643,18 @@ export class ChatViewProvider {
         };
     }
 
+    private inputHistoryForConversation(convId: string): Array<{ text: string; images: Array<{ dataUrl: string; name: string; size: number }> | null }> {
+        const conv = this.agent.getConversation(convId);
+        return conv ? extractInputHistory(conv.messages) : [];
+    }
+
+    private postInputHistory(panel: vscode.WebviewPanel, convId: string): void {
+        panel.webview.postMessage({
+            type: 'restoreInputHistory',
+            items: this.inputHistoryForConversation(convId),
+        });
+    }
+
     private getPreferredUiLang(): 'en' | 'zh' {
         const saved = readSettings()?.ui?.language;
         if (saved === 'en' || saved === 'zh') return saved;
@@ -646,6 +668,70 @@ export class ChatViewProvider {
             reasoning_effort: this.windowReasoningEffort,
             enable_thinking: this.windowReasoningEffort === 'deep' || this.windowReasoningEffort === 'max',
         };
+    }
+
+    private getWorkspaceFileEntries(root: string): WorkspaceFilePickerEntry[] {
+        const now = Date.now();
+        if (
+            this.workspaceFileCache &&
+            this.workspaceFileCache.root === root &&
+            now - this.workspaceFileCache.createdAt < 3_000
+        ) {
+            return this.workspaceFileCache.entries;
+        }
+
+        const results: WorkspaceFilePickerEntry[] = [];
+        const ignored = new Set(['.git', 'node_modules', 'out', 'dist', '.vscode', '__pycache__']);
+        const ignoredFileExt = new Set(['.pyc', '.pyo', '.map']);
+        const maxEntries = 2_500;
+        const toEntry = (fullPath: string, kind: 'file' | 'directory'): WorkspaceFilePickerEntry => {
+            const relativePath = path.relative(root, fullPath).replace(/\\/g, '/');
+            return {
+                name: path.basename(fullPath),
+                relativePath,
+                fullPath,
+                kind,
+                depth: relativePath ? relativePath.split('/').length - 1 : 0,
+                parent: relativePath.includes('/') ? relativePath.slice(0, relativePath.lastIndexOf('/')) : '',
+            };
+        };
+        const sortEntries = (entries: fs.Dirent[]) => entries.sort((a, b) => {
+            if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+            return a.name.localeCompare(b.name);
+        });
+        const walk = (dir: string, depth: number): void => {
+            if (depth > 8 || results.length >= maxEntries) return;
+            try {
+                const entries = sortEntries(fs.readdirSync(dir, { withFileTypes: true }));
+                for (const entry of entries) {
+                    if (results.length >= maxEntries) break;
+                    if (entry.name.startsWith('.') || ignored.has(entry.name)) continue;
+                    const fullPath = path.join(dir, entry.name);
+                    if (entry.isDirectory()) {
+                        results.push(toEntry(fullPath, 'directory'));
+                        walk(fullPath, depth + 1);
+                    } else if (entry.isFile() && !ignoredFileExt.has(path.extname(entry.name).toLowerCase())) {
+                        results.push(toEntry(fullPath, 'file'));
+                    }
+                }
+            } catch { /* skip inaccessible dirs */ }
+        };
+        walk(root, 0);
+        this.workspaceFileCache = { root, createdAt: now, entries: results };
+        return results;
+    }
+
+    private searchWorkspaceFiles(query: string, maxResults: number): WorkspaceFilePickerEntry[] {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (!workspaceFolders?.length) return [];
+        const root = workspaceFolders[0].uri.fsPath;
+        const lowerQuery = query.trim().toLowerCase();
+        const entries = this.getWorkspaceFileEntries(root);
+        if (!lowerQuery) return entries.slice(0, maxResults);
+        return entries
+            .filter(entry => entry.kind === 'file')
+            .filter(entry => entry.name.toLowerCase().includes(lowerQuery) || entry.relativePath.toLowerCase().includes(lowerQuery))
+            .slice(0, maxResults);
     }
 
     private setWindowReasoningEffort(effort: ReasoningEffort): void {
@@ -943,6 +1029,7 @@ export class ChatViewProvider {
                         this.replayConversation(initConv.messages, panel);
                         post({ type: 'restoreMode', mode: initConv.mode, label: initConv.mode });
                     }
+                    this.postInputHistory(panel, myConvId);
 
                     // 6. Consume pendingInit (cleanup)
                     if (st?.pendingInit && st.pendingInit.firstId === myConvId) {
@@ -972,6 +1059,7 @@ export class ChatViewProvider {
                         post({ type: 'modelCaps', caps: this.agent.getModelCapabilities(this.agent.getModelSelectionValue(msg.id)) });
                         post({ type: 'restoreMode', mode: conv.mode, label: conv.mode });
                         post(this.contextUsageMessage(msg.id));
+                        this.postInputHistory(panel, msg.id);
                         // Restore busy state for the full lifecycle, including outer-turn cleanup
                         // and recovery paths where the chat promise is still active.
                         post(this.agent.isConvBusy(msg.id) ? { type: 'busy' } : { type: 'idle' });
@@ -1000,6 +1088,7 @@ export class ChatViewProvider {
                             post({ type: 'modelCaps', caps: this.agent.getModelCapabilities(this.agent.getModelSelectionValue(nextId)) });
                             post({ type: 'restoreMode', mode: nextConv.mode, label: nextConv.mode });
                             post(this.contextUsageMessage(nextId));
+                            this.postInputHistory(panel, nextId);
                         }
                     }
                     break;
@@ -1077,6 +1166,12 @@ export class ChatViewProvider {
                 case 'skill': {
                     const stSkill = this.panels.get(panelId);
                     await this.handleSkillInvocation(msg.skill, msg.text, stSkill?.activeConvId, panel);
+                    break;
+                }
+                case 'searchFiles': {
+                    const query = String(msg.query || '').trim();
+                    const results = this.searchWorkspaceFiles(query, query ? 120 : 500);
+                    post({ type: 'fileSearchResults', results });
                     break;
                 }
                 case 'setModel': {
@@ -1214,7 +1309,7 @@ export class ChatViewProvider {
                             foundPanel.panel.webview.postMessage({ type: 'modelCaps', caps: this.agent.getModelCapabilities(this.agent.getModelSelectionValue(id)) });
                             foundPanel.panel.webview.postMessage(this.contextUsageMessage(id));
                             foundPanel.panel.webview.postMessage({ type: 'restoreMode', mode: histConv.mode || 'auto', label: histConv.mode || 'auto' });
-                            foundPanel.panel.webview.postMessage({ type: 'restoreInputHistory', items: histConv.inputHistory || extractInputHistory(histConv.messages) });
+                            this.postInputHistory(foundPanel.panel, id);
                         } else {
                             // Not open 鈥?create a NEW panel (don't touch current one)
                             const newPanelId = this.createPanel(false);
@@ -1236,7 +1331,7 @@ export class ChatViewProvider {
                             newState.panel.webview.postMessage({ type: 'modelCaps', caps: this.agent.getModelCapabilities(this.agent.getModelSelectionValue(id)) });
                             newState.panel.webview.postMessage(this.contextUsageMessage(id));
                             newState.panel.webview.postMessage({ type: 'restoreMode', mode: histConv.mode || 'auto', label: histConv.mode || 'auto' });
-                            newState.panel.webview.postMessage({ type: 'restoreInputHistory', items: histConv.inputHistory || extractInputHistory(histConv.messages) });
+                            this.postInputHistory(newState.panel, id);
                         }
                     }
                     break;
@@ -2156,12 +2251,18 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         const m = oldLines.length;
         const n = newLines.length;
         if (m * n > 250_000) {
-            const out: Array<{ type: 'ctx' | 'del' | 'add'; text: string; oldLn?: number; newLn?: number }> = [];
-            oldLines.forEach((line, index) => out.push({ type: 'del', text: line, oldLn: index + 1 }));
-            newLines.forEach((line, index) => out.push({ type: 'add', text: line, newLn: index + 1 }));
-            return out;
+            return this.computeAnchoredSnapshotLineDiff(oldLines, newLines);
         }
 
+        return this.computeLcsSnapshotLineDiff(oldLines, newLines);
+    }
+
+    private computeLcsSnapshotLineDiff(
+        oldLines: string[],
+        newLines: string[],
+    ): Array<{ type: 'ctx' | 'del' | 'add'; text: string; oldLn?: number; newLn?: number }> {
+        const m = oldLines.length;
+        const n = newLines.length;
         const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
         for (let i = 1; i <= m; i++) {
             for (let j = 1; j <= n; j++) {
@@ -2188,6 +2289,168 @@ while ($true) { Start-Sleep -Milliseconds 100 }
             }
         }
         return reversed.reverse();
+    }
+
+    private computeAnchoredSnapshotLineDiff(
+        oldLines: string[],
+        newLines: string[],
+    ): Array<{ type: 'ctx' | 'del' | 'add'; text: string; oldLn?: number; newLn?: number }> {
+        const lineInfo = new Map<string, { oldCount: number; newCount: number; oldIndex: number; newIndex: number }>();
+        oldLines.forEach((line, index) => {
+            const info = lineInfo.get(line) || { oldCount: 0, newCount: 0, oldIndex: index, newIndex: -1 };
+            info.oldCount++;
+            info.oldIndex = index;
+            lineInfo.set(line, info);
+        });
+        newLines.forEach((line, index) => {
+            const info = lineInfo.get(line) || { oldCount: 0, newCount: 0, oldIndex: -1, newIndex: index };
+            info.newCount++;
+            info.newIndex = index;
+            lineInfo.set(line, info);
+        });
+
+        const anchors = Array.from(lineInfo.values())
+            .filter(info => info.oldCount === 1 && info.newCount === 1 && info.oldIndex >= 0 && info.newIndex >= 0)
+            .map(info => ({ oldIndex: info.oldIndex, newIndex: info.newIndex }))
+            .sort((a, b) => a.oldIndex - b.oldIndex);
+        const orderedAnchors = this.selectOrderedSnapshotAnchors(anchors);
+        if (orderedAnchors.length === 0) {
+            return this.computeCompactSnapshotLineDiff(oldLines, newLines);
+        }
+
+        const out: Array<{ type: 'ctx' | 'del' | 'add'; text: string; oldLn?: number; newLn?: number }> = [];
+        let oldCursor = 0;
+        let newCursor = 0;
+        for (const anchor of orderedAnchors) {
+            if (anchor.oldIndex < oldCursor || anchor.newIndex < newCursor) continue;
+            this.appendSnapshotSegmentDiff(out, oldLines, newLines, oldCursor, anchor.oldIndex, newCursor, anchor.newIndex);
+            out.push({
+                type: 'ctx',
+                text: oldLines[anchor.oldIndex],
+                oldLn: anchor.oldIndex + 1,
+                newLn: anchor.newIndex + 1,
+            });
+            oldCursor = anchor.oldIndex + 1;
+            newCursor = anchor.newIndex + 1;
+        }
+        this.appendSnapshotSegmentDiff(out, oldLines, newLines, oldCursor, oldLines.length, newCursor, newLines.length);
+        return out;
+    }
+
+    private selectOrderedSnapshotAnchors(anchors: Array<{ oldIndex: number; newIndex: number }>): Array<{ oldIndex: number; newIndex: number }> {
+        if (anchors.length <= 1) return anchors;
+        const predecessors = new Array<number>(anchors.length).fill(-1);
+        const pileTops: number[] = [];
+        for (let i = 0; i < anchors.length; i++) {
+            let lo = 0;
+            let hi = pileTops.length;
+            while (lo < hi) {
+                const mid = Math.floor((lo + hi) / 2);
+                if (anchors[pileTops[mid]].newIndex < anchors[i].newIndex) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            if (lo > 0) {
+                predecessors[i] = pileTops[lo - 1];
+            }
+            pileTops[lo] = i;
+        }
+
+        const ordered: Array<{ oldIndex: number; newIndex: number }> = [];
+        let cursor = pileTops[pileTops.length - 1];
+        while (cursor >= 0) {
+            ordered.push(anchors[cursor]);
+            cursor = predecessors[cursor];
+        }
+        return ordered.reverse();
+    }
+
+    private appendSnapshotSegmentDiff(
+        out: Array<{ type: 'ctx' | 'del' | 'add'; text: string; oldLn?: number; newLn?: number }>,
+        oldLines: string[],
+        newLines: string[],
+        oldStart: number,
+        oldEnd: number,
+        newStart: number,
+        newEnd: number,
+    ): void {
+        if (oldStart >= oldEnd && newStart >= newEnd) return;
+        const oldSegment = oldLines.slice(oldStart, oldEnd);
+        const newSegment = newLines.slice(newStart, newEnd);
+        const segmentDiff = oldSegment.length * newSegment.length <= 250_000
+            ? this.computeLcsSnapshotLineDiff(oldSegment, newSegment)
+            : this.computeCompactSnapshotLineDiff(oldSegment, newSegment);
+        for (const line of segmentDiff) {
+            out.push({
+                type: line.type,
+                text: line.text,
+                oldLn: typeof line.oldLn === 'number' ? line.oldLn + oldStart : undefined,
+                newLn: typeof line.newLn === 'number' ? line.newLn + newStart : undefined,
+            });
+        }
+    }
+
+    private computeCompactSnapshotLineDiff(
+        oldLines: string[],
+        newLines: string[],
+    ): Array<{ type: 'ctx' | 'del' | 'add'; text: string; oldLn?: number; newLn?: number }> {
+        const out: Array<{ type: 'ctx' | 'del' | 'add'; text: string; oldLn?: number; newLn?: number }> = [];
+        let prefix = 0;
+        while (
+            prefix < oldLines.length &&
+            prefix < newLines.length &&
+            oldLines[prefix] === newLines[prefix]
+        ) {
+            prefix++;
+        }
+
+        let suffix = 0;
+        while (
+            suffix < oldLines.length - prefix &&
+            suffix < newLines.length - prefix &&
+            oldLines[oldLines.length - 1 - suffix] === newLines[newLines.length - 1 - suffix]
+        ) {
+            suffix++;
+        }
+
+        if (prefix === oldLines.length && prefix === newLines.length) {
+            return [];
+        }
+
+        if (oldLines.length === newLines.length) {
+            for (let index = 0; index < oldLines.length; index++) {
+                if (oldLines[index] === newLines[index]) {
+                    out.push({ type: 'ctx', text: oldLines[index], oldLn: index + 1, newLn: index + 1 });
+                } else {
+                    out.push({ type: 'del', text: oldLines[index], oldLn: index + 1 });
+                    out.push({ type: 'add', text: newLines[index], newLn: index + 1 });
+                }
+            }
+            return out;
+        }
+
+        for (let index = 0; index < prefix; index++) {
+            out.push({ type: 'ctx', text: oldLines[index], oldLn: index + 1, newLn: index + 1 });
+        }
+
+        const oldChangeEnd = oldLines.length - suffix;
+        const newChangeEnd = newLines.length - suffix;
+        for (let index = prefix; index < oldChangeEnd; index++) {
+            out.push({ type: 'del', text: oldLines[index], oldLn: index + 1 });
+        }
+        for (let index = prefix; index < newChangeEnd; index++) {
+            out.push({ type: 'add', text: newLines[index], newLn: index + 1 });
+        }
+
+        for (let offset = suffix; offset > 0; offset--) {
+            const oldIndex = oldLines.length - offset;
+            const newIndex = newLines.length - offset;
+            out.push({ type: 'ctx', text: oldLines[oldIndex], oldLn: oldIndex + 1, newLn: newIndex + 1 });
+        }
+
+        return out;
     }
 
     private formatHunkRange(start: number, count: number): string {
@@ -2702,45 +2965,18 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         }
     }
 
-    private postTaskChanges(post: (msg: any) => void, baselinePatch = '', turnToolChanges?: TurnChangeTracker): void {
+    private postTaskChanges(post: (msg: any) => void, _baselinePatch = '', turnToolChanges?: TurnChangeTracker): void {
         if (!turnToolChanges || turnToolChanges.files.size === 0) return;
         const snapshotSummary = this.buildSnapshotTurnSummary(turnToolChanges);
         if (snapshotSummary) {
             post({ type: 'taskChanges', summary: snapshotSummary });
             return;
         }
-        void this.agent.getWorkspaceChangeSummary()
-            .then(summary => {
-                const filteredSummary = this.filterSummaryToTurnChanges(summary, turnToolChanges);
-                if (!filteredSummary) {
-                    const toolOnly = this.buildToolOnlyTurnSummary(turnToolChanges);
-                    if (toolOnly) post({ type: 'taskChanges', summary: toolOnly });
-                    return;
-                }
-                summary = filteredSummary;
-                if (summary && baselinePatch.trim()) {
-                    const samePatch = summary.patch === baselinePatch && summary.patch.trim();
-                    if (samePatch) {
-                        summary.canUndo = false;
-                        summary.warning = '本轮确有工具修改，但当前 Git patch 与任务开始前一致；已按本轮工具记录展示文件，自动撤销不可用。';
-                    } else {
-                        summary.canUndo = false;
-                        summary.warning = '任务开始前已有未提交改动；本卡片只保留本轮工具涉及的文件，自动撤销不可用，请审核 diff 后手动处理。';
-                    }
-                } else if (summary && summary.canUndo !== false) {
-                    summary.canUndo = true;
-                }
-                if (summary && summary.files.length > 0) {
-                    post({ type: 'taskChanges', summary });
-                }
-            })
-            .catch(() => {
-                const toolOnly = this.buildToolOnlyTurnSummary(
-                    turnToolChanges,
-                    '未能读取 Git diff；已按本轮 MiMo 工具记录展示修改文件。自动撤销不可用。',
-                );
-                if (toolOnly) post({ type: 'taskChanges', summary: toolOnly });
-            });
+        const toolOnly = this.buildToolOnlyTurnSummary(
+            turnToolChanges,
+            '本轮文件已由工具记录，但无法生成独立的本轮快照 patch；为避免混入任务开始前已有的工作区改动，自动撤销不可用。',
+        );
+        if (toolOnly) post({ type: 'taskChanges', summary: toolOnly });
     }
 
     /**
@@ -2766,6 +3002,7 @@ while ($true) { Start-Sleep -Milliseconds 100 }
         this.postToWebview({ type: 'modelCaps', caps: this.agent.getModelCapabilities(model) }, p);
         this.postToWebview(this.contextUsageMessage(convId), p);
         this.postToWebview({ type: 'restoreMode', mode: conv.mode, label: conv.mode }, p);
+        if (p) this.postInputHistory(p, convId);
         this.postToWebview(this.agent.isConvBusy(convId) ? { type: 'busy' } : { type: 'idle' }, p);
 
         // Refresh history list
@@ -3014,8 +3251,12 @@ while ($true) { Start-Sleep -Milliseconds 100 }
     <div id="cmd-palette"></div>
     <div id="input-wrapper" class="mode-auto">
         <div id="image-preview"></div>
-        <textarea id="input" data-i18n="paste.hint" placeholder="输入消息... (Ctrl+V 粘贴图片)" rows="1"></textarea>
+        <div class="input-text-shell">
+            <div id="input-render" aria-hidden="true"></div>
+            <textarea id="input" data-i18n="paste.hint" placeholder="输入消息... (Ctrl+V 粘贴图片)" rows="1"></textarea>
+        </div>
         <div id="input-bottom">
+            <button id="add-file-btn" class="add-file-btn" title="Attach file" type="button">+</button>
             <div style="position:relative">
                 <button class="mode-trigger" id="mode-trigger">
                     <span class="mode-label" id="mode-label" data-i18n="auto">Auto</span>

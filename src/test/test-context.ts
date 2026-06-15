@@ -2,7 +2,7 @@
  * Tests for context.ts — Token estimation and context management.
  */
 import { describe, it, expect, summary } from './test-runner';
-import { estimateTokens, estimateMessageTokens, getContextStats } from '../context';
+import { estimateTokens, estimateMessageTokens, getContextStats, manageContext } from '../context';
 import { ChatMessage } from '../api';
 
 describe('estimateTokens', () => {
@@ -60,6 +60,38 @@ describe('getContextStats', () => {
         const stats = getContextStats(msgs, 'mimo-v2.5-pro');
         expect(stats.model).toBe('mimo-v2.5-pro');
         expect(stats.total).toBe(1000000);
+    });
+});
+
+describe('manageContext', () => {
+    it('preserves reasoning_content for assistant tool-call messages', () => {
+        const toolReasoning = 'full tool reasoning '.repeat(200);
+        const messages: ChatMessage[] = [
+            { role: 'user', content: 'please inspect the project' },
+            {
+                role: 'assistant',
+                content: null as any,
+                reasoning_content: toolReasoning,
+                tool_calls: [
+                    {
+                        id: 'call_1',
+                        type: 'function',
+                        function: { name: 'read_file', arguments: '{"path":"src/agent.ts"}' },
+                    },
+                ],
+            },
+            { role: 'tool', tool_call_id: 'call_1', content: 'file contents', _toolName: 'read_file' } as any,
+            ...Array.from({ length: 12 }, (_, i) => ({ role: 'user' as const, content: `follow-up ${i}` })),
+        ];
+
+        const managed = manageContext(messages, 'mimo-v2.5-pro', {
+            maxContextTokens: 1000000,
+            responseReserve: 0,
+            maxMessages: 0,
+        });
+        const toolAssistant = managed.find(m => m.role === 'assistant' && m.tool_calls?.length);
+
+        expect(toolAssistant?.reasoning_content).toBe(toolReasoning);
     });
 });
 

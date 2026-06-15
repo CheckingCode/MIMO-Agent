@@ -29,6 +29,10 @@ export function parseTodoItems(html: string): TodoItem[] {
 
 export function renderTaskChecklist(items: TodoItem[]): string {
     if (items.length === 0) return '';
+    const minimalUi = typeof document !== 'undefined' && document.body?.classList.contains('ui-minimal');
+    if (minimalUi) {
+        return renderMinimalTaskChecklist(items);
+    }
 
     const doneCount = items.filter(i => i.done).length;
     const total = items.length;
@@ -69,6 +73,26 @@ export function renderTaskChecklist(items: TodoItem[]): string {
     html += `</div>`;
     html += `</div>`;
 
+    return html;
+}
+
+function renderMinimalTaskChecklist(items: TodoItem[]): string {
+    const doneCount = items.filter(i => i.done).length;
+    let html = `<div class="task-checklist task-checklist-minimal">`;
+    html += `<div class="task-checklist-header">`;
+    html += `<span>${escapeHtml(t('todo.progress.title'))}</span>`;
+    html += `<span class="progress-text">${doneCount}/${items.length}</span>`;
+    html += `</div>`;
+    html += `<div class="task-checklist-items">`;
+    for (const item of items) {
+        const cls = item.done ? 'todo done' : 'todo';
+        html += `<div class="${cls}">`;
+        html += `<span class="todo-check">${item.done ? '✓' : ''}</span>`;
+        html += `<span class="todo-text">${escapeHtml(item.text)}</span>`;
+        html += `</div>`;
+    }
+    html += `</div>`;
+    html += `</div>`;
     return html;
 }
 

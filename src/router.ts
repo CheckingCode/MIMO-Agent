@@ -217,6 +217,101 @@ const SEARCH_SIGNAL =
         'i',
     );
 
+const EVIDENCE_VERIFICATION_SIGNAL =
+    /(?:crossref|doi\b|api\b|endpoint|fetch_url|web_search|http status|status\s*code|request|response|verified|validated|actually\s+(?:checked|verified|called|queried|fetched)|did\s+(?:you|it)\s+(?:check|verify|call|query|fetch)|source|evidence|citation|\u9a8c\u8bc1|\u6821\u9a8c|\u67e5\u8bc1|\u6838\u5b9e|\u8c03\u7528|\u8bf7\u6c42|\u63a5\u53e3|\u8fd4\u56de|\u72b6\u6001\u7801|\u5b9e\u9645|\u786e\u5b9e|\u771f\u7684|\u4f9d\u636e|\u8bc1\u636e|\u6765\u6e90|\u5f15\u7528)/i;
+
+const EXTERNAL_EVIDENCE_TARGET_SIGNAL =
+    /(?:crossref|doi\b|api\b|endpoint|url\b|https?:\/\/|http status|status\s*code|request|response|web|internet|online|database|pubmed|arxiv|github|npm|pypi|\u63a5\u53e3|\u7f51\u7edc|\u7f51\u9875|\u5b98\u7f51|\u6570\u636e\u5e93|\u6587\u732e|\u8bba\u6587)/i;
+
+export function requiresToolEvidence(userInput: string): boolean {
+    const trimmed = userInput.trim();
+    if (!trimmed) return false;
+    if (!EVIDENCE_VERIFICATION_SIGNAL.test(trimmed)) return false;
+
+    const asksDefinitionOnly = /^(?:what\s+(?:is|are)|what does .+ mean|define|explain)\b/i.test(trimmed)
+        || /^(?:\u4ec0\u4e48\u662f|.+\u662f\u4ec0\u4e48|.+\u4ec0\u4e48\u610f\u601d)/.test(trimmed);
+    const asksQuestion = /[?\uFF1F]/.test(trimmed)
+        || /^(?:what|why|how|whether|did|do|does|is|are|was|were|can|could)\b/i.test(trimmed)
+        || /(?:\u662f\u5426|\u662f\u4e0d\u662f|\u6709\u6ca1\u6709|\u4e3a\u4ec0\u4e48|\u600e\u4e48|\u5982\u4f55)/.test(trimmed);
+    const asksForProvenance = /(?:actually|really|did\s+you|was\s+it|were\s+they|source|evidence|verified|validated|\u5b9e\u9645|\u786e\u5b9e|\u771f\u7684|\u4f9d\u636e|\u8bc1\u636e|\u6765\u6e90|\u8c03\u7528|\u9a8c\u8bc1|\u6821\u9a8c|\u67e5\u8bc1|\u6838\u5b9e)/i.test(trimmed);
+    if (asksDefinitionOnly && !asksForProvenance) return false;
+
+    return asksForProvenance || (asksQuestion && EXTERNAL_EVIDENCE_TARGET_SIGNAL.test(trimmed));
+}
+
+function buildEvidenceVerificationIntent(): IntentResult {
+    return {
+        needsTools: true,
+        category: 'search',
+        plan: 'Verify the claim against recent tool evidence or external/source data before answering',
+        complexity: 'moderate',
+        suggestedPersona: 'analyst',
+        source: 'heuristic',
+    };
+}
+
+const TOOL_BACKED_ANSWER_SIGNAL =
+    /(?:root cause|why.*(?:broken|failed|stopped|slow|lag|freeze|hang)|fix plan|solution|diagnos(?:e|is)|investigate|inspect|verify|validate|test|reproduce|regression|current|latest|recent|today|now|workspace|repo|repository|project|codebase|file|folder|diff|git|commit|staged|cached|VS\s*Code|vscode|MIMO|MiMo|agent|workflow|webview|UI|button|card|input|textarea|performance|slow|lag|freeze|hang|stutter|crash|bug|error|exception|undefined|null|\u6839\u56e0|\u539f\u56e0|\u4e3a\u4ec0\u4e48.*(?:\u4e0d|\u9519|\u5361|\u6162|\u4e2d\u65ad|\u5931\u8d25)|\u4fee\u590d\u65b9\u6848|\u89e3\u51b3\u65b9\u6848|\u6392\u67e5|\u68c0\u67e5|\u9a8c\u8bc1|\u6821\u9a8c|\u590d\u73b0|\u56de\u5f52|\u5f53\u524d|\u6700\u65b0|\u6700\u8fd1|\u4eca\u5929|\u73b0\u5728|\u9879\u76ee|\u4ee3\u7801|\u4ee3\u7801\u5e93|\u6587\u4ef6|\u6587\u4ef6\u5939|\u5dee\u5f02|\u6682\u5b58|\u63d2\u4ef6|\u6269\u5c55|\u5de5\u4f5c\u6d41|\u5361\u7247|\u6309\u94ae|\u8f93\u5165\u6846|\u6027\u80fd|\u5361\u987f|\u5d29\u6e83|\u62a5\u9519|\u9519\u8bef|\u5f02\u5e38|\u4e2d\u65ad)/i;
+
+export function requiresToolBackedAnswer(userInput: string): boolean {
+    const trimmed = userInput.trim();
+    if (!trimmed) return false;
+    if (requiresToolEvidence(trimmed)) return true;
+    if (TOOL_BACKED_ANSWER_SIGNAL.test(trimmed)) return true;
+    if (hasConcreteCodeSignal(trimmed)) return true;
+    if (SEARCH_SIGNAL.test(trimmed)) return true;
+    return false;
+}
+
+function buildToolBackedAnswerIntent(text: string): IntentResult {
+    if (requiresToolEvidence(text)) return buildEvidenceVerificationIntent();
+    if (SEARCH_SIGNAL.test(text) || /(?:current|latest|recent|today|now|\u5f53\u524d|\u6700\u65b0|\u6700\u8fd1|\u4eca\u5929|\u73b0\u5728)/i.test(text)) {
+        return {
+            needsTools: true,
+            category: 'search',
+            plan: 'Search current sources or workspace evidence before answering',
+            complexity: 'moderate',
+            suggestedPersona: 'analyst',
+            source: 'heuristic',
+        };
+    }
+    const hasExplicitCodeTarget = /[A-Za-z]:[\\/]|(?:^|[\s"'`])\.{1,2}[\\/]|(?:^|[\s"'`])(?:src|out|dist|app|lib|test|tests|package\.json|tsconfig\.json|README\.md)(?:[\s"'`)\/\\]|$)|(?:\.html?|\.tsx?|\.jsx?|\.ts|\.js|\.py|\.json|\.md|\.css|\.scss|\.yml|\.yaml)\b/i.test(text);
+    if (hasExplicitCodeTarget) {
+        return buildConcreteTaskIntent(text);
+    }
+    if (EXPERIENCE_SIGNAL.test(text) || /(?:workflow|webview|UI|\u5de5\u4f5c\u6d41|\u4e2d\u65ad|\u5361\u987f|\u5361\u987f|\u4f53\u9a8c|\u8df3\u7ea2)/i.test(text)) {
+        return {
+            needsTools: true,
+            category: 'experience',
+            plan: 'Inspect relevant evidence before answering the product or workflow reliability question',
+            complexity: 'complex',
+            suggestedPersona: 'pm',
+            source: 'heuristic',
+        };
+    }
+    if (hasConcreteCodeSignal(text)) {
+        return buildConcreteTaskIntent(text);
+    }
+    if (/(?:review|audit|security|\u5ba1\u67e5|\u5ba1\u6838|\u5b89\u5168)/i.test(text)) {
+        return {
+            needsTools: true,
+            category: 'review',
+            plan: 'Inspect evidence before producing the review',
+            complexity: 'complex',
+            suggestedPersona: 'reviewer',
+            source: 'heuristic',
+        };
+    }
+    return {
+        needsTools: true,
+        category: 'debug',
+        plan: 'Inspect relevant evidence before answering or proposing a fix',
+        complexity: inferConcreteTaskComplexity(text),
+        suggestedPersona: 'debugger',
+        source: 'heuristic',
+    };
+}
+
 const QUICK_GREETINGS = new Set([
     'hi', 'hello', 'hey', 'ok', 'okay', 'thanks', 'thank you', 'thx',
     ZH.hello, ZH.hi, ZH.hey, ZH.okay, ZH.received, ZH.thanks,
@@ -271,7 +366,7 @@ function hasTaskVerb(text: string): boolean {
 }
 
 function shouldUseToolsForFeedback(text: string): boolean {
-    return /(?:MIMO|MiMo|mimo|agent|AGENT|\u667a\u80fd\u4f53|workflow|stop|busy|idle|\u5de5\u4f5c\u6d41|\u8df3\u7ea2|\u4e2d\u65ad|\u8bfb\u5199)/i.test(text);
+    return /(?:MIMO|MiMo|mimo|agent|AGENT|\u667a\u80fd\u4f53|workflow|stop|busy|idle|UI|webview|button|btn|card|diff|git|VS\s*Code|vscode|add-file-btn|document\.getElementById|undefined|null|\u5de5\u4f5c\u6d41|\u8df3\u7ea2|\u4e2d\u65ad|\u8bfb\u5199|\u56fe\s*\d+|\u622a\u56fe|\u6309\u94ae|\u5361\u7247|\u6ca1\u53cd\u5e94|\u62a5\u9519|\u9519\u8bef|\u4e0d\u5e94\u8be5|\u4e0d\u6b63\u5e38)/i.test(text);
 }
 
 function shouldUseToolsForPreference(text: string): boolean {
@@ -498,6 +593,10 @@ export function quickClassifyIntent(userInput: string): IntentResult | null {
         return null;
     }
 
+    if (requiresToolEvidence(trimmed)) {
+        return buildEvidenceVerificationIntent();
+    }
+
     if (PREFERENCE_SIGNAL.test(trimmed)) {
         return {
             needsTools: shouldUseToolsForPreference(trimmed),
@@ -543,6 +642,10 @@ export function quickClassifyIntent(userInput: string): IntentResult | null {
             suggestedPersona: 'analyst',
             source: 'heuristic',
         };
+    }
+
+    if (requiresToolBackedAnswer(trimmed)) {
+        return buildToolBackedAnswerIntent(trimmed);
     }
 
     if (looksLikeSimpleQuestion(trimmed)) {

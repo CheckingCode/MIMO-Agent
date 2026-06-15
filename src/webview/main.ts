@@ -26,6 +26,7 @@ class RenderQueue {
     private frame = 0;
     private reasoningBuffer = '';
     private latestStreamHtml: string | undefined;
+    private latestStreamLightweight = false;
     private latestStatus: string | undefined;
     private pending: QueuedWebviewMessage[] = [];
 
@@ -36,6 +37,7 @@ class RenderQueue {
                 break;
             case 'streamHtml':
                 this.latestStreamHtml = msg.html || '';
+                this.latestStreamLightweight = !!msg.lightweight;
                 break;
             case 'assistantUpdate':
             case 'verificationUpdate':
@@ -76,15 +78,17 @@ class RenderQueue {
 
         const reasoning = this.reasoningBuffer;
         const streamHtml = this.latestStreamHtml;
+        const streamLightweight = this.latestStreamLightweight;
         const status = this.latestStatus;
         const events = this.pending.splice(0);
         this.reasoningBuffer = '';
         this.latestStreamHtml = undefined;
+        this.latestStreamLightweight = false;
         this.latestStatus = undefined;
 
         if (reasoning) bus.emit('reasoning', reasoning);
         for (const evt of events) this.dispatch(evt);
-        if (streamHtml !== undefined) bus.emit('streamHtml', streamHtml);
+        if (streamHtml !== undefined) bus.emit('streamHtml', streamHtml, streamLightweight);
         if (status !== undefined) {
             store.set('statusText', status);
             const el = document.getElementById('status-text');
@@ -107,7 +111,7 @@ class RenderQueue {
     private dispatch(msg: QueuedWebviewMessage): void {
         switch (msg.type) {
             case 'userMessage': bus.emit('userMessage', msg.text, msg.images); break;
-            case 'streamHtml': bus.emit('streamHtml', msg.html); break;
+            case 'streamHtml': bus.emit('streamHtml', msg.html, !!msg.lightweight); break;
             case 'assistantUpdate': bus.emit('assistantUpdate', msg.html); break;
             case 'verificationUpdate': bus.emit('verificationUpdate', msg.html); break;
             case 'finalAnswer': bus.emit('finalAnswer', msg.html); break;
@@ -128,6 +132,7 @@ class RenderQueue {
             case 'workflowTaskEnd': bus.emit('workflowTaskEnd', msg.phaseIndex, msg.taskIndex, msg.result); break;
             case 'workflowPhaseEnd': bus.emit('workflowPhaseEnd', msg.phaseIndex, msg.result); break;
             case 'workflowEnd': bus.emit('workflowEnd', msg.result); break;
+            case 'fileSearchResults': bus.emit('fileSearchResults', msg.results); break;
             default:
                 bus.emit(msg.type, msg);
         }
@@ -267,6 +272,10 @@ function init(): void {
 
             case 'fileOpenResult':
                 bus.emit('fileOpenResult', msg);
+                break;
+
+            case 'fileSearchResults':
+                bus.emit('fileSearchResults', msg.results || []);
                 break;
 
             case 'replayBatch':

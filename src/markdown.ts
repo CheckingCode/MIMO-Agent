@@ -276,3 +276,82 @@ export function renderMarkdown(text: string): string {
 
     return s;
 }
+
+export function renderStreamingMarkdown(text: string): string {
+    if (!text) return '';
+
+    const codeBlocks: Array<{ lang: string; code: string }> = [];
+    let s = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_: string, lang: string, code: string) => {
+        const idx = codeBlocks.length;
+        codeBlocks.push({ lang, code });
+        return `\n__STREAM_CODE_BLOCK_${idx}__\n`;
+    });
+    s = s.replace(/```\n?([\s\S]*?)```/g, (_: string, code: string) => {
+        const idx = codeBlocks.length;
+        codeBlocks.push({ lang: '', code });
+        return `\n__STREAM_CODE_BLOCK_${idx}__\n`;
+    });
+
+    s = escapeHtml(s);
+    const renderedCodeBlocks = codeBlocks.map(({ lang, code }) => {
+        const langLabel = lang || 'text';
+        return `<div class="code-block">` +
+            `<div class="code-header">` +
+            `<span class="code-lang">${escapeHtml(langLabel)}</span>` +
+            `<button class="copy-btn">Copy</button>` +
+            `</div>` +
+            `<pre><code class="language-${escapeHtml(lang)}">${escapeHtml(code)}</code></pre>` +
+            `</div>`;
+    });
+
+    s = s.replace(/`([^\n]+?)`/g, '<code>$1</code>');
+    s = s.replace(/^#### (.+)$/gm, '\n<h4>$1</h4>');
+    s = s.replace(/^### (.+)$/gm, '\n<h3>$1</h3>');
+    s = s.replace(/^## (.+)$/gm, '\n<h2>$1</h2>');
+    s = s.replace(/^# (.+)$/gm, '\n<h1>$1</h1>');
+    s = s.replace(/^---+$/gm, '\n<hr>');
+    s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/\*(.+?)\*/g, '<em>$1</em>');
+    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_: string, label: string, href: string) => {
+        if (isLocalFilePathTarget(href)) return renderFileLink(label, href);
+        if (!isSafeLinkTarget(href)) return `${label} (${href})`;
+        return `<a href="${normalizeEscapedAttr(href)}" class="md-link url-link">${label}</a>`;
+    });
+    s = replaceOutsideInlineCodeAndLinks(s, chunk =>
+        chunk.replace(/(?<![">&])(https?:\/\/[^\s<>\)]+|localhost:\d+[^\s<>\)]*)/g, (_: string, url: string) => {
+            return `<a href="${normalizeEscapedAttr(url)}" class="md-link url-link">${url}</a>`;
+        })
+    );
+    s = s.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+    s = s.replace(/^([\-\*]) \[x\] (.+)$/gm, '<li class="todo done">&#9745; $2</li>');
+    s = s.replace(/^([\-\*]) \[ \] (.+)$/gm, '<li class="todo">&#9744; $2</li>');
+    s = s.replace(/^((?: {2})+)[\-\*] (.+)$/gm, (_: string, indent: string, item: string) => {
+        const depth = Math.floor(indent.length / 2);
+        return '<li data-depth="' + depth + '">' + item + '</li>';
+    });
+    s = s.replace(/^[\-\*] (.+)$/gm, '<li>$1</li>');
+    s = s.replace(/^((?: {2})+)(\d+)\. (.+)$/gm, (_: string, indent: string, _num: string, item: string) => {
+        const depth = Math.floor(indent.length / 2);
+        return '<li data-depth="' + depth + '">' + item + '</li>';
+    });
+    s = s.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+    s = s.replace(/((?:<li(?:\s[^>]*)?>.*?<\/li>\n?)+)/g, (block: string) => {
+        if (block.startsWith('<ul>') || block.startsWith('<ol>') || block.startsWith('<div')) return block;
+        return '\n<ul>' + block.trim() + '</ul>\n';
+    });
+
+    const blockTags = 'h[1-6]|ul|ol|li|hr|pre|code|blockquote|div';
+    const blockRe = new RegExp(`(<(?:${blockTags})(?:\\s[^>]*)?>[\\s\\S]*?<\\/(?:${blockTags})>|<(?:${blockTags})(?:\\s[^>]*)?\\/>)`, 'g');
+    const blocks: string[] = [];
+    s = s.replace(blockRe, (m) => {
+        const idx = blocks.length;
+        blocks.push(m);
+        return `\n__STREAM_BLOCK_${idx}__\n`;
+    });
+    s = s.replace(/\n{2,}/g, '\n__STREAM_PARA_GAP__\n');
+    s = s.replace(/\n/g, ' ');
+    s = s.replace(/__STREAM_PARA_GAP__/g, '\n');
+    s = s.replace(/__STREAM_BLOCK_(\d+)__/g, (_: string, i: string) => blocks[parseInt(i)] || '');
+    s = s.replace(/__STREAM_CODE_BLOCK_(\d+)__/g, (_: string, i: string) => renderedCodeBlocks[parseInt(i)] || '');
+    return s.replace(/  +/g, ' ').trim();
+}

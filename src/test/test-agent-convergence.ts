@@ -237,6 +237,23 @@ describe('agent convergence guards', () => {
         expect(text).toContain('Do not retract or rewrite the whole draft');
     });
 
+    it('formats unlimited round budgets without leaking MAX_SAFE_INTEGER', () => {
+        const agent = makeAgent();
+        const conv = makeConv([
+            { role: 'user', content: 'fix the failing request' },
+        ]);
+
+        const summary = agent.buildProgressSummary(conv, 'task interrupted by API or runtime error', {
+            round: 3,
+            maxRounds: Number.MAX_SAFE_INTEGER,
+            softMaxRounds: Number.MAX_SAFE_INTEGER,
+        });
+
+        expect(summary.includes(String(Number.MAX_SAFE_INTEGER))).toBe(false);
+        expect(summary).toContain('Progress: round 3 (unlimited budget)');
+        expect(summary).toContain('Soft budget: unlimited');
+    });
+
     it('filters unchanged dirty workspace diff blocks from execute_command previews', () => {
         const agent = makeAgent();
         const oldDirty = [
