@@ -1,5 +1,5 @@
 ﻿/**
- * Messages component 鈥?chat messages, streaming, tool cards, diff view, thinking blocks.
+ * Messages component - chat messages, streaming, tool cards, diff view, thinking blocks.
  */
 import { store, ImageData } from '../core/store';
 import { bus } from '../core/bus';
@@ -42,7 +42,7 @@ import {
     writeClipboardPayload,
 } from './messages/index';
 
-// 鈹€鈹€ Helpers 鈹€鈹€
+// Helpers
 
 function formatTokenCount(n: number): string {
     return formatMessageTokenCount(n);
@@ -577,7 +577,7 @@ export const Messages = {
             if (msgCopyBtn) {
                 e.stopPropagation();
                 const bubble = msgCopyBtn.closest('.msg');
-                if (!bubble) return;
+                if (!(bubble instanceof HTMLElement)) return;
                 const payload = extractBubbleClipboardPayload(bubble);
                 writeClipboardPayload(payload).then(() => {
                     setCopyButtonState(msgCopyBtn, true);
@@ -701,7 +701,7 @@ export const Messages = {
         bus.on('fileOpenResult', (msg: any) => this.handleFileOpenResult(msg));
     },
 
-    // 鈹€鈹€ User message 鈹€鈹€
+    // User message
     addUserMessage(text: string, images?: ImageData[] | null): void {
         const messagesDiv = document.getElementById('messages')!;
         this.archiveAssistantActions();
@@ -719,82 +719,9 @@ export const Messages = {
         installUserBubbleCollapse(delegatedBubble, images, text);
         store.set('streamingMsg', null);
         store.set('rawHtml', '');
-        return;
-
-        const u = createElement('div', 'msg msg-user');
-        // Add spacing before user message if there are previous messages
-        const hasVisibleMessages = Array.from(messagesDiv.children)
-            .some(child => !(child as HTMLElement).classList.contains('sticky-user-preview'));
-        if (hasVisibleMessages) {
-            u.style.marginTop = '20px';
-        }
-        if (images && images.length > 0) {
-            const imgRow = createElement('div');
-            imgRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-bottom:2px';
-            for (let i = 0; i < images.length; i++) {
-                const img = createElement('img', 'msg-img') as HTMLImageElement;
-                img.src = images[i].dataUrl;
-                img.title = `#${i + 1} ${images[i].name}`;
-                img.style.cssText = 'height:40px;width:auto;border-radius:4px;cursor:pointer;vertical-align:middle';
-                img.addEventListener('click', (e) => { e.stopPropagation(); bus.emit('showOverlay', images[i].dataUrl); });
-                imgRow.appendChild(img);
-            }
-            u.appendChild(imgRow);
-        }
-        // Wrap text in a div for line-clamp to work
-        if (text) {
-            const textDiv = createElement('div', 'text-content');
-            textDiv.textContent = text;
-            u.appendChild(textDiv);
-        }
-
-        // Copy button (appears on hover)
-        const copyBtn = createElement('button', 'msg-copy');
-        setCopyButtonState(copyBtn, false);
-        copyBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            // Copy text
-            const textToCopy = text || '';
-            // Also include image data URLs if present
-            let fullText = textToCopy;
-            if (images && images.length > 0) {
-                fullText += (textToCopy ? '\n' : '') + images.map(img => `[Image: ${img.name}]`).join('\n');
-            }
-            navigator.clipboard.writeText(fullText).then(() => {
-                setCopyButtonState(copyBtn, true);
-                setTimeout(() => setCopyButtonState(copyBtn, false), 1600);
-            }).catch(() => {});
-        });
-        u.appendChild(copyBtn);
-
-        messagesDiv.appendChild(u);
-        smartScroll(messagesDiv);
-
-        // Collapse toggle for long messages 鈥?must check AFTER append so scrollHeight is accurate
-        requestAnimationFrame(() => {
-            const textDiv = u.querySelector('.text-content');
-            const lineHeight = 1.5 * 13; // line-height * font-size
-            const maxHeight = lineHeight * 3 + 16; // 3 lines + padding
-            const shouldCollapse = textDiv && (textDiv.scrollHeight > maxHeight + 10 || (images && images.length > 0 && text));
-
-            if (shouldCollapse) {
-                const expandBtn = createElement('button', 'expand-toggle');
-                expandBtn.textContent = 'Expand';
-                expandBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    u.classList.toggle('expanded');
-                    expandBtn.textContent = u.classList.contains('expanded') ? 'Collapse' : 'Expand';
-                });
-                u.appendChild(expandBtn);
-                u.classList.add('collapsible');
-            }
-        });
-
-        store.set('streamingMsg', null);
-        store.set('rawHtml', '');
     },
 
-    // 鈹€鈹€ Thinking block lifecycle 鈹€鈹€
+    // Thinking block lifecycle
     /** Mark all active (not done) thinking dots as completed. */
     _markThinkingDone(): void {
         const dots = document.querySelectorAll('.thinking-dot:not(.done)');
@@ -821,7 +748,7 @@ export const Messages = {
         }
     },
 
-    // 鈹€鈹€ Streaming 鈹€鈹€
+    // Streaming
     handleStream(html: string, lightweight = false): void {
         const messagesDiv = document.getElementById('messages')!;
         let streamingMsg = store.get('streamingMsg');
@@ -873,7 +800,7 @@ export const Messages = {
         store.set('rawHtml', '');
     },
 
-    // 鈹€鈹€ Enhance task checklists 鈹€鈹€
+    // Enhance task checklists
     upsertVerificationSegment(html: string): void {
         const messagesDiv = document.getElementById('messages')!;
         let streamingMsg = store.get('streamingMsg');
@@ -949,7 +876,7 @@ export const Messages = {
         return stripMessageRawToolCalls(html);
     },
 
-    // 鈹€鈹€ Reasoning/thinking 鈹€鈹€
+    // Reasoning/thinking
     handleReasoning(token: string): void {
         token = this.filterReasoningNoise(token);
         if (!token) return;
@@ -1120,7 +1047,7 @@ export const Messages = {
         return result;
     },
 
-    // 鈹€鈹€ Tool cards 鈹€鈹€
+    // Tool cards
     addToolCard(name: string, args: any): void {
         // Mark thinking as done 鈥?tool execution means reasoning for this round is complete
         this._markThinkingDone();
@@ -1191,9 +1118,10 @@ export const Messages = {
             `<span class="tool-time"></span>`;
 
         // Click link to open files in VSCode or URLs externally.
-        const link = card.querySelector('.tool-link');
+        const link = card.querySelector<HTMLAnchorElement>('.tool-link');
         if (!link) return;
-        link.addEventListener('click', (e) => {
+        const toolLink = link!;
+        toolLink.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
             if (url) {
@@ -1318,7 +1246,7 @@ export const Messages = {
                         priority,
                     };
                 })
-                .filter((item): item is TodoItem => !!item);
+                .filter((item: TodoItem | null): item is TodoItem => !!item);
             const checklist = renderTaskChecklist(items);
             if (checklist) {
                 const card = createElement('div', 'todo-tool-result');
@@ -1613,7 +1541,7 @@ export const Messages = {
         const lines = (truncated ? txt.substring(0, maxChars) : txt).split('\n');
         const CONTEXT_LINES = 2; // lines of context around each change
 
-        // 鈹€鈹€ Phase 1: Parse into structured hunks per file 鈹€鈹€
+        // Phase 1: Parse into structured hunks per file
         interface DiffLine { type: 'add' | 'del' | 'ctx' | 'hunk' | 'file'; text: string; oldLn?: number; newLn?: number; label?: string; skipped?: number; }
         const files: { name: string; hunks: DiffLine[][]; added: number; removed: number }[] = [];
         let curFile = { name: '', hunks: [] as DiffLine[][], added: 0, removed: 0 };
@@ -1651,7 +1579,7 @@ export const Messages = {
         if (curHunk.length > 0) curFile.hunks.push(curHunk);
         if (curFile.name) files.push(curFile);
 
-        // 鈹€鈹€ Phase 2: Render with collapsed context 鈹€鈹€
+        // Phase 2: Render with collapsed context
         let html = '';
         let totalAdded = 0, totalRemoved = 0;
 
@@ -1660,7 +1588,7 @@ export const Messages = {
             totalRemoved += file.removed;
             if (file.added === 0 && file.removed === 0) continue;
 
-            html += `<div class="diff-file-header" data-file="${escapeHtml(file.name)}">馃搫 ${escapeHtml(file.name)}</div>`;
+            html += `<div class="diff-file-header" data-file="${escapeHtml(file.name)}">File ${escapeHtml(file.name)}</div>`;
 
             for (const hunk of file.hunks) {
                 // Find hunk header line
@@ -1692,7 +1620,7 @@ export const Messages = {
                     // Insert "..." gap if we skipped lines
                     if (l.type === 'ctx' && lastShown >= 0 && i - lastShown > 1) {
                         const skipped = i - lastShown - 1;
-                        html += `<div class="diff-skip">路路路 ${skipped} unchanged line${skipped > 1 ? 's' : ''} 路路路</div>`;
+                        html += `<div class="diff-skip">... ${skipped} unchanged line${skipped > 1 ? 's' : ''} ...</div>`;
                     }
                     lastShown = i;
 
@@ -1700,7 +1628,7 @@ export const Messages = {
                     if (l.type === 'add') {
                         html += `<div class="diff-line diff-add"><span class="diff-ln new">${l.newLn}</span><span class="diff-sign">+</span><span class="diff-text">${esc}</span></div>`;
                     } else if (l.type === 'del') {
-                        html += `<div class="diff-line diff-del"><span class="diff-ln old">${l.oldLn}</span><span class="diff-sign">鈭?/span><span class="diff-text">${esc}</span></div>`;
+                        html += `<div class="diff-line diff-del"><span class="diff-ln old">${l.oldLn}</span><span class="diff-sign">-</span><span class="diff-text">${esc}</span></div>`;
                     } else {
                         html += `<div class="diff-line diff-ctx"><span class="diff-ln old">${l.oldLn}</span><span class="diff-ln new">${l.newLn}</span><span class="diff-sign"> </span><span class="diff-text">${esc}</span></div>`;
                     }
@@ -1708,20 +1636,20 @@ export const Messages = {
             }
 
             // Per-file summary
-            html += `<div class="diff-file-summary"><span class="diff-stats-add">+${file.added} lines</span><span class="diff-stats-del">鈭?{file.removed} lines</span></div>`;
+            html += `<div class="diff-file-summary"><span class="diff-stats-add">+${file.added} lines</span><span class="diff-stats-del">-${file.removed} lines</span></div>`;
         }
 
         // Total summary bar at top
         if (totalAdded > 0 || totalRemoved > 0) {
             const label = files.length > 1 ? `${files.length} files` : (files[0]?.name || 'changes');
-            html = `<div class="diff-summary"><span class="diff-file-name">${escapeHtml(label)}</span><span class="diff-stats-add">+${totalAdded} lines</span><span class="diff-stats-del">鈭?{totalRemoved} lines</span></div>` + html;
+            html = `<div class="diff-summary"><span class="diff-file-name">${escapeHtml(label)}</span><span class="diff-stats-add">+${totalAdded} lines</span><span class="diff-stats-del">-${totalRemoved} lines</span></div>` + html;
         }
 
         if (truncated) html += `<div class="diff-info">... (truncated, ${txt.length} chars total)</div>`;
         res.innerHTML = html || '<div class="diff-info">No changes</div>';
     },
 
-    // 鈹€鈹€ Round / Done / Error 鈹€鈹€
+    // Round / Done / Error
     handleRoundStart(round: number): void {
         if (round <= 1) return;
         const messagesDiv = document.getElementById('messages')!;
@@ -1910,12 +1838,15 @@ export const Messages = {
 
     collectLatestTurnSnapshotNodes(messagesDiv: HTMLElement, assistant: HTMLElement, user: HTMLElement | null): HTMLElement[] {
         const nodes: HTMLElement[] = [];
-        let next = (user?.nextElementSibling as HTMLElement | null) || assistant;
+        let next: HTMLElement | null = user?.nextElementSibling instanceof HTMLElement
+            ? user.nextElementSibling
+            : assistant;
         while (next) {
             if (this.isLatestTurnSnapshotNode(next)) {
                 nodes.push(next);
             }
-            next = next.nextElementSibling as HTMLElement | null;
+            const following: Element | null = next.nextElementSibling;
+            next = following instanceof HTMLElement ? following : null;
         }
         if (!nodes.includes(assistant)) nodes.unshift(assistant);
         return nodes.filter((node, index) => nodes.indexOf(node) === index);
@@ -2208,6 +2139,16 @@ export const Messages = {
         return count === 1 ? '1 file' : `${count} files`;
     },
 
+    formatTaskChangeEditedTitle(count: number): string {
+        return t('task.changes.edited').replace('{count}', this.formatTaskChangeFileCount(count));
+    },
+
+    formatTaskChangeRemainingTitle(remaining: number, total: number): string {
+        return t('task.changes.remaining')
+            .replace('{remaining}', this.formatTaskChangeFileCount(remaining))
+            .replace('{total}', this.formatTaskChangeFileCount(total));
+    },
+
     setTaskChangeCardState(card: HTMLElement, text = '', tone: 'info' | 'success' | 'error' | 'pending' = 'info'): void {
         const badge = card.querySelector<HTMLElement>('.task-changes-card-state');
         if (!badge) return;
@@ -2233,11 +2174,11 @@ export const Messages = {
         const titleMain = card.querySelector<HTMLElement>('.task-changes-title-main');
         if (titleMain) {
             if (remainingCount === totalCount) {
-                titleMain.textContent = `Edited ${this.formatTaskChangeFileCount(totalCount)}`;
+                titleMain.textContent = this.formatTaskChangeEditedTitle(totalCount);
             } else if (remainingCount > 0) {
-                titleMain.textContent = `Remaining ${this.formatTaskChangeFileCount(remainingCount)} of ${this.formatTaskChangeFileCount(totalCount)}`;
+                titleMain.textContent = this.formatTaskChangeRemainingTitle(remainingCount, totalCount);
             } else {
-                titleMain.textContent = 'All changes in this card were undone';
+                titleMain.textContent = t('task.changes.undone');
             }
         }
 
@@ -2454,7 +2395,7 @@ export const Messages = {
                 `<button class="task-change-row" type="button" data-file="${escapeHtml(file.path)}">` +
                 `<span class="task-change-path">${escapeHtml(file.path)}</span>` +
                 `<span class="task-change-row-stats">${binary}${staged}${external}${action}<span class="diff-stats-add">+${file.added} lines</span> <span class="diff-stats-del">-${file.removed} lines</span></span>` +
-                `</div>`;
+                `</button></div>`;
         }).join('\n');
         const fileToggle = hiddenFileCount > 0
             ? `<button class="task-changes-files-toggle" type="button" data-expanded="false" data-hidden-count="${hiddenFileCount}"></button>`
@@ -2464,11 +2405,11 @@ export const Messages = {
             <div class="task-changes-head">
                 <div class="task-changes-icon"><span class="task-changes-icon-add">+</span><span class="task-changes-icon-del">-</span></div>
                 <div class="task-changes-title">
-                    <div>宸茬紪杈?${fileText}</div>
+                    <div>${escapeHtml(this.formatTaskChangeEditedTitle(fileCount))}</div>
                     <div class="task-changes-stats"><span class="diff-stats-add">+${summary.totalAdded} lines</span> <span class="diff-stats-del">-${summary.totalRemoved} lines</span></div>
                 </div>
                 <div class="task-changes-actions">
-                    <button class="task-changes-review" type="button">瀹℃牳</button>
+                    <button class="task-changes-review" type="button">${escapeHtml(t('task.changes.review'))}</button>
                 </div>
             </div>
             ${summary.warning ? `<div class="task-changes-warning">${escapeHtml(summary.warning)}</div>` : ''}
@@ -2527,7 +2468,7 @@ export const Messages = {
         const patch = file?.toolDiff || '';
         if (!patch) return null;
         const card = createElement('div', 'diff-card task-tool-diff expanded');
-        card.setAttribute('data-file', file.path || filePath);
+        card.setAttribute('data-file', file?.path || filePath);
         this.renderGitDiff(card, patch);
         return card;
     },
@@ -2596,7 +2537,7 @@ export const Messages = {
         store.set('planExecutionActive', false);
     },
 
-    // 鈹€鈹€ Token usage per call 鈹€鈹€
+    // Token usage per call
     renderHistoryTurns(turns: any[]): void {
         const messagesDiv = document.getElementById('messages')!;
         store.set('streamingMsg', null);
@@ -2768,7 +2709,7 @@ export const Messages = {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 const bubble = btn.closest('.msg');
-                if (!bubble) return;
+                if (!(bubble instanceof HTMLElement)) return;
                 const payload = extractBubbleClipboardPayload(bubble);
                 writeClipboardPayload(payload).then(() => {
                     setCopyButtonState(btn, true);
@@ -3162,72 +3103,6 @@ export const Messages = {
         }
         messagesDiv.appendChild(delegatedBubble);
         installUserBubbleCollapse(delegatedBubble, images, text);
-        return;
-
-        const u = createElement('div', 'msg msg-user history-message');
-
-        const hasVisibleMessages = Array.from(messagesDiv.children)
-            .some(child => !(child as HTMLElement).classList.contains('sticky-user-preview'));
-        if (hasVisibleMessages) {
-            u.style.marginTop = '20px';
-        }
-
-        if (images && images.length > 0) {
-            const imgRow = createElement('div');
-            imgRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-bottom:2px';
-            for (let i = 0; i < images.length; i++) {
-                const img = createElement('img', 'msg-img') as HTMLImageElement;
-                img.src = images[i].dataUrl;
-                img.title = `#${i + 1} ${images[i].name}`;
-                img.style.cssText = 'height:40px;width:auto;border-radius:4px;cursor:pointer;vertical-align:middle';
-                img.addEventListener('click', (e) => { e.stopPropagation(); bus.emit('showOverlay', images[i].dataUrl); });
-                imgRow.appendChild(img);
-            }
-            u.appendChild(imgRow);
-        }
-
-        if (text) {
-            const textDiv = createElement('div', 'text-content');
-            textDiv.textContent = text;
-            u.appendChild(textDiv);
-        }
-
-        const copyBtn = createElement('button', 'msg-copy');
-        setCopyButtonState(copyBtn, false);
-        copyBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            let fullText = text || '';
-            if (images && images.length > 0) {
-                fullText += (fullText ? '\n' : '') + images.map(img => `[Image: ${img.name}]`).join('\n');
-            }
-            navigator.clipboard.writeText(fullText).then(() => {
-                setCopyButtonState(copyBtn, true);
-                setTimeout(() => setCopyButtonState(copyBtn, false), 1600);
-            }).catch(() => {});
-        });
-        u.appendChild(copyBtn);
-
-        messagesDiv.appendChild(u);
-
-        // Collapse toggle for long messages 鈥?same logic as real-time messages
-        requestAnimationFrame(() => {
-            const textDiv = u.querySelector('.text-content');
-            const lineHeight = 1.5 * 13;
-            const maxHeight = lineHeight * 3 + 16;
-            const shouldCollapse = textDiv && (textDiv.scrollHeight > maxHeight + 10 || (images && images.length > 0 && text));
-
-            if (shouldCollapse) {
-                const expandBtn = createElement('button', 'expand-toggle');
-                expandBtn.textContent = 'Expand';
-                expandBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    u.classList.toggle('expanded');
-                    expandBtn.textContent = u.classList.contains('expanded') ? 'Collapse' : 'Expand';
-                });
-                u.appendChild(expandBtn);
-                u.classList.add('collapsible');
-            }
-        });
     },
 
     handleTokenUsage(usage: { promptTokens: number; completionTokens: number; totalTokens: number }): void {
@@ -3249,7 +3124,7 @@ export const Messages = {
         }
     },
 
-    // 鈹€鈹€ Conversation usage summary 鈹€鈹€
+    // Conversation usage summary
     handleConversationUsage(usage: { totalTokens: number; callCount: number }): void {
         // Update the token counter with final conversation total
         const statusEl = document.getElementById('token-counter');
@@ -3259,7 +3134,7 @@ export const Messages = {
         }
     },
 
-    // 鈹€鈹€ Workflow rendering 鈹€鈹€
+    // Workflow rendering
     getWorkflowState(): WorkflowUiState | null {
         const streamingMsg = store.get('streamingMsg') as any;
         return streamingMsg?._workflowState || null;
@@ -3551,84 +3426,6 @@ export const Messages = {
             return;
         }
 
-        const oldLines = oldText.split('\n');
-        const newLines = newText.split('\n');
-        const shouldRenderDetailedDiff = oldLines.length * newLines.length <= 20000
-            && (oldText.length + newText.length) <= 120000;
-        const diff = shouldRenderDetailedDiff ? this.computeDiff(oldLines, newLines) : [];
-        const added = diff.length > 0
-            ? diff.filter(d => d.type === 'add').length
-            : Math.max(0, newLines.length - oldLines.length);
-        const removed = diff.length > 0
-            ? diff.filter(d => d.type === 'del').length
-            : Math.max(0, oldLines.length - newLines.length);
-        card.setAttribute('data-added', String(added));
-        card.setAttribute('data-removed', String(removed));
-
-        const startBase = Number.isFinite(Number(lineStart)) && Number(lineStart) > 0 ? Math.floor(Number(lineStart)) - 1 : 0;
-        let oldLineNum = startBase;
-        let newLineNum = startBase;
-        const maxShow = Math.min(diff.length, 12);
-        let diffHtml = `<div class="diff-header-line"><span class="diff-stats">+${added} -${removed}</span><span class="diff-match">${matchCount} match(es)</span></div>`;
-        if (diff.length === 0) {
-            diffHtml += `<div class="diff-line"><span class="diff-ln">鈥?/span><span class="diff-info">Large edit preview collapsed for performance. Apply or expand only when needed.</span></div>`;
-        } else {
-            for (const part of diff.slice(0, maxShow)) {
-                if (part.type === 'del') {
-                    oldLineNum++;
-                    diffHtml += `<div class="diff-line"><span class="diff-ln">${oldLineNum}</span><span class="diff-del">- ${escapeHtml(part.text).substring(0, 140)}</span></div>`;
-                } else if (part.type === 'add') {
-                    newLineNum++;
-                    diffHtml += `<div class="diff-line"><span class="diff-ln">${newLineNum}</span><span class="diff-add">+ ${escapeHtml(part.text).substring(0, 140)}</span></div>`;
-                } else {
-                    oldLineNum++;
-                    newLineNum++;
-                    diffHtml += `<div class="diff-line"><span class="diff-ln">${newLineNum}</span><span class="diff-ctx">${escapeHtml(part.text).substring(0, 140)}</span></div>`;
-                }
-            }
-            if (diff.length > maxShow) {
-                diffHtml += `<div class="diff-line"><span class="diff-ln">...</span><span class="diff-info">... ${diff.length - maxShow} more lines</span></div>`;
-            }
-        }
-
-        card.innerHTML = `<div class="tool-header">` +
-            `<div class="tool-icon-wrapper"><div class="tool-icon">E</div><div class="tool-status-dot"></div></div>` +
-            `<div class="tool-info"><span class="tool-name">edit_file</span><span class="tool-args">${escapeHtml(filePath)}</span></div>` +
-            `<div class="tool-meta"><span class="tool-elapsed">Preview</span><span class="tool-chevron">▾</span></div>` +
-            `</div><div class="tool-body"><div class="tool-result">${diffHtml}</div>` +
-            `<div class="edit-preview-actions"><button class="edit-accept-btn">鉁?Accept</button><button class="edit-reject-btn">鉁?Reject</button></div></div>`;
-
-        // Button handlers
-        const acceptBtn = card.querySelector('.edit-accept-btn');
-        if (acceptBtn) acceptBtn.addEventListener('click', () => {
-            vscode.editConfirm(previewId);
-            card.setAttribute('data-status', 'success');
-            const dot = card.querySelector('.tool-status-dot') as HTMLElement;
-            if (dot) dot.style.background = 'var(--vscode-testing-iconPassed, #4ec9b0)';
-            const elapsed = card.querySelector('.tool-elapsed') as HTMLElement;
-            if (elapsed) elapsed.textContent = '鉁?Applied';
-            const actions = card.querySelector('.edit-preview-actions') as HTMLElement;
-            if (actions) actions.remove();
-            card.classList.add('collapsed');
-        });
-
-        const rejectBtn = card.querySelector('.edit-reject-btn');
-        if (rejectBtn) rejectBtn.addEventListener('click', () => {
-            vscode.editReject(previewId);
-            card.setAttribute('data-status', 'error');
-            card.classList.add('tool-error');
-            const dot = card.querySelector('.tool-status-dot') as HTMLElement;
-            if (dot) dot.style.background = 'var(--vscode-testing-iconFailed, #f44747)';
-            const elapsed = card.querySelector('.tool-elapsed') as HTMLElement;
-            if (elapsed) elapsed.textContent = '鉁?Rejected';
-            const actions = card.querySelector('.edit-preview-actions') as HTMLElement;
-            if (actions) actions.remove();
-            card.classList.add('collapsed');
-        });
-
-        messagesDiv.appendChild(card);
-        this.makeCardCollapsible(card, '.tool-header', true);
-        smartScroll(messagesDiv);
     },
 
     renderWritePreviewCard(previewId: string, filePath: string, content: string, isCreate: boolean, oldText?: string): void {
@@ -3768,108 +3565,9 @@ export const Messages = {
             return;
         }
 
-        // Compute diff when overwriting existing file
-        if (!isCreate && oldText) {
-            const oldLines = oldText.split('\n');
-            const newLines = content.split('\n');
-            const shouldRenderDetailedDiff = oldLines.length * newLines.length <= 20000
-                && (oldText.length + content.length) <= 120000;
-            const diff = shouldRenderDetailedDiff ? this.computeDiff(oldLines, newLines) : [];
-            const added = diff.length > 0
-                ? diff.filter(d => d.type === 'add').length
-                : Math.max(0, newLines.length - oldLines.length);
-            const removed = diff.length > 0
-                ? diff.filter(d => d.type === 'del').length
-                : Math.max(0, oldLines.length - newLines.length);
-            card.setAttribute('data-added', String(added));
-            card.setAttribute('data-removed', String(removed));
-            const maxShow = Math.min(diff.length, 10);
-            let contentHtml = '';
-            if (diff.length === 0) {
-                contentHtml = `<div class="diff-line"><span class="diff-info">Large overwrite preview collapsed for performance.</span></div>`;
-            } else {
-                for (const d of diff.slice(0, maxShow)) {
-                    const cls = d.type === 'add' ? 'diff-add' : d.type === 'del' ? 'diff-del' : 'diff-ctx';
-                    const prefix = d.type === 'add' ? '+' : d.type === 'del' ? '-' : ' ';
-                    contentHtml += `<div class="diff-line"><span class="${cls}">${prefix} ${escapeHtml(d.text).substring(0, 118)}</span></div>`;
-                }
-                if (diff.length > maxShow) {
-                    contentHtml += `<div class="diff-line"><span class="diff-info">... ${diff.length - maxShow} more lines</span></div>`;
-                }
-            }
-            const actionLabel = '瑕嗙洊鏂囦欢';
-            card.innerHTML = `<div class="tool-header">` +
-                `<div class="tool-icon-wrapper"><div class="tool-icon">W</div><div class="tool-status-dot"></div></div>` +
-                `<div class="tool-info"><span class="tool-name">鈿狅笍 write_file 鈫?${escapeHtml(filePath)}</span><span class="tool-desc">${escapeHtml(actionLabel)} 路 <span class="diff-stats-add">+${added}</span> <span class="diff-stats-del">-${removed}</span></span></div>` +
-                `</div><div class="diff-card expanded"><div class="diff-card-header"><span class="diff-file">${escapeHtml(filePath)}</span><span class="diff-stats">+${added} lines, -${removed} lines</span><span class="diff-chevron">鈻?/span></div><div class="diff-card-body">${contentHtml}</div></div>` +
-                `<div class="tool-actions"><button class="tool-action-confirm" data-preview="${previewId}">鉁?纭</button><button class="tool-action-reject" data-preview="${previewId}">鉂?鎷掔粷</button></div>`;
-            card.querySelector('.tool-action-confirm')?.addEventListener('click', () => vscode.editConfirm(previewId));
-            card.querySelector('.tool-action-reject')?.addEventListener('click', () => vscode.editReject(previewId));
-            messagesDiv.appendChild(card);
-            this.makeCardCollapsible(card, '.tool-header', true);
-            smartScroll(messagesDiv);
-            return;
-        }
-
-        // Build content preview (new file or no old content)
-        const lines = content.split('\n');
-        card.setAttribute('data-added', String(lines.length));
-        card.setAttribute('data-removed', '0');
-        const maxShow = Math.min(lines.length, 10);
-        let contentHtml = '';
-        for (const line of lines.slice(0, maxShow)) {
-            contentHtml += `<div class="diff-line"><span class="diff-add">${escapeHtml(line).substring(0, 120)}</span></div>`;
-        }
-        if (lines.length > maxShow) {
-            contentHtml += `<div class="diff-line"><span class="diff-info">... +${lines.length - maxShow} more lines</span></div>`;
-        }
-
-        const actionLabel = isCreate ? '鍒涘缓鏂囦欢' : '瑕嗙洊鏂囦欢';
-        const icon = isCreate ? '馃搫' : '鈿狅笍';
-
-        card.innerHTML = `<div class="tool-header">` +
-            `<div class="tool-icon-wrapper"><div class="tool-icon">W</div><div class="tool-status-dot"></div></div>` +
-            `<div class="tool-info"><span class="tool-name">${icon} write_file 鈥?${actionLabel}</span><span class="tool-args">${escapeHtml(filePath)} (${lines.length} lines)</span></div>` +
-            `<div class="tool-meta"><span class="tool-elapsed">鈴?/span><span class="tool-chevron">鈻?/span></div>` +
-            `</div><div class="tool-body"><div class="tool-result">${contentHtml}</div>` +
-            `<div class="edit-preview-actions">` +
-            `<button class="edit-accept-btn">Confirm</button>` +
-            `<button class="edit-reject-btn">Reject</button>` +
-            `</div></div>`;
-
-        // Button handlers
-        const writeAcceptBtn = card.querySelector('.edit-accept-btn');
-        if (writeAcceptBtn) writeAcceptBtn.addEventListener('click', () => {
-            vscode.writeConfirm(previewId);
-            card.setAttribute('data-status', 'success');
-            const dot = card.querySelector('.tool-status-dot') as HTMLElement;
-            if (dot) dot.style.background = 'var(--vscode-testing-iconPassed, #4ec9b0)';
-            const elapsed = card.querySelector('.tool-elapsed') as HTMLElement;
-            if (elapsed) elapsed.textContent = 'Applied';
-            const actions = card.querySelector('.edit-preview-actions') as HTMLElement;
-            if (actions) actions.remove();
-            card.classList.add('collapsed');
-        });
-
-        const writeRejectBtn = card.querySelector('.edit-reject-btn');
-        if (writeRejectBtn) writeRejectBtn.addEventListener('click', () => {
-            vscode.writeReject(previewId);
-            card.setAttribute('data-status', 'error');
-            card.classList.add('tool-error');
-            const dot = card.querySelector('.tool-status-dot') as HTMLElement;
-            if (dot) dot.style.background = 'var(--vscode-testing-iconFailed, #f44747)';
-            const elapsed = card.querySelector('.tool-elapsed') as HTMLElement;
-            if (elapsed) elapsed.textContent = 'Rejected';
-            const actions = card.querySelector('.edit-preview-actions') as HTMLElement;
-            if (actions) actions.remove();
-            card.classList.add('collapsed');
-        });
-
-        messagesDiv.appendChild(card);
-        smartScroll(messagesDiv);
     },
 
-    // 鈹€鈹€ System message 鈹€鈹€
+    // System message
     addSystemMessage(text: string, variant: 'default' | 'manual-stop' = 'default'): void {
         const messagesDiv = document.getElementById('messages')!;
         const sys = createElement('div', 'msg msg-system');
@@ -3884,7 +3582,7 @@ export const Messages = {
         smartScroll(messagesDiv);
     },
 
-    // 鈹€鈹€ Welcome screen i18n update 鈹€鈹€
+    // Welcome screen i18n update
     updateWelcome(descOrSeed: string, hint?: string): void {
         const welcomeDesc = document.querySelector('.welcome-desc');
         const welcomeHint = document.querySelector('.welcome-hint');
@@ -3899,7 +3597,7 @@ export const Messages = {
         }
     },
 
-    // 鈹€鈹€ Plan Mode: Confirm/Reject 鈹€鈹€
+    // Plan Mode: Confirm/Reject
 
     makeCardCollapsible(card: HTMLElement, headerSelector: string, collapsed = false): void {
         const header = card.querySelector(headerSelector) as HTMLElement | null;
@@ -4030,21 +3728,21 @@ export const Messages = {
         });
     },
 
-    // 鈹€鈹€ Ask User: Interactive Dialog 鈹€鈹€
+    // Ask User: Interactive Dialog
 
     renderAskUserCard(previewId: string, question: string, options: string[]): void {
         const messagesDiv = document.getElementById('messages')!;
         const card = createElement('div', 'ask-user-card');
 
         card.innerHTML = `
-            <div class="ask-user-header">鉂?闇€瑕佷綘鐨勭‘璁?/div>
+            <div class="ask-user-header">${escapeHtml(t('ask.confirmation'))}</div>
             <div class="ask-user-question">${escapeHtml(question)}</div>
             <div class="ask-user-options">${options.map(opt =>
                 `<button class="ask-user-option-btn" data-answer="${escapeHtml(opt)}">${escapeHtml(opt)}</button>`
             ).join('')}<button class="ask-user-option-btn ask-user-other-btn" data-other="true">${t('ask.other')}</button></div>
             <div class="ask-user-other-input" id="ask-user-other-${previewId}" style="display:none">
-                <input type="text" class="ask-user-input" id="ask-user-input-${previewId}" placeholder="璇疯緭鍏ヤ綘鐨勫洖绛?.." />
-                <button class="ask-user-submit-btn" id="ask-user-submit-${previewId}">鉁?/button>
+                <input type="text" class="ask-user-input" id="ask-user-input-${previewId}" placeholder="${escapeHtml(t('ask.input.placeholder'))}" />
+                <button class="ask-user-submit-btn" id="ask-user-submit-${previewId}">OK</button>
             </div>
             <div class="ask-user-status" id="ask-user-status-${previewId}"></div>
         `;
@@ -4061,7 +3759,7 @@ export const Messages = {
             if (!answer.trim()) return;
             card.querySelectorAll('button').forEach(b => (b as HTMLButtonElement).disabled = true);
             if (input) input.disabled = true;
-            statusEl.textContent = `鉁?浣犵殑鍥炵瓟锛?{answer}`;
+            statusEl.textContent = t('ask.answered').replace('{answer}', answer);
             card.classList.add('ask-user-answered');
             card.classList.add('collapsed');
             vscode.askUserConfirm(previewId, answer);
@@ -4138,7 +3836,7 @@ export const Messages = {
         });
     },
 
-    // 鈹€鈹€ Adversarial Mode: 鐤媯绋嬪簭鐚?vs 瓒呯骇浜у搧缁忕悊 鈹€鈹€
+    // Adversarial mode: programmer vs reviewer
 
     _currentAdversarialPersona: null as string | null,
     _currentAdversarialBlock: null as HTMLElement | null,
@@ -4346,7 +4044,7 @@ export const Messages = {
             return `<ol>${match}</ol>`;
         });
 
-        // Line breaks 鈥?collapse 3+ consecutive newlines into a single <br> to reduce excessive blank lines
+        // Line breaks - collapse 3+ consecutive newlines into a single <br> to reduce excessive blank lines
         html = html.replace(/\n{3,}/g, '\n\n');
         html = html.replace(/\n/g, '<br>');
 
@@ -4358,7 +4056,7 @@ export const Messages = {
         return html;
     },
 
-    // 鈹€鈹€ Message Queue 鈹€鈹€
+    // Message queue
 
     formatQueueTitle(count: number): string {
         return `${t('queue.waiting')} (${count})`;
@@ -4543,7 +4241,7 @@ export const Messages = {
         if (container) container.remove();
     },
 
-    // 鈹€鈹€ Clear 鈹€鈹€
+    // Clear
     clearMessages(): void {
         const messagesDiv = document.getElementById('messages')!;
         Array.from(messagesDiv.children).forEach(child => {
@@ -4560,7 +4258,7 @@ export const Messages = {
         if (statusEl) { statusEl.textContent = ''; statusEl.style.display = 'none'; }
     },
 
-    // 鈹€鈹€ Helpers 鈹€鈹€
+    // Helpers
     createAssistantMsg(): HTMLElement {
         const messagesDiv = document.getElementById('messages')!;
         const div = createElement('div', 'msg msg-assistant');

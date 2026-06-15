@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 电脑管家</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <!-- 侧边栏 -->
+    <nav class="sidebar">
+        <div class="sidebar-header">
+            <span class="logo">🤖</span>
+            <h1>AI 电脑管家</h1>
+        </div>
+        <ul class="nav-menu">
+            <li class="nav-item active" data-page="dashboard">
+                <span class="nav-icon">📊</span>
+                <span class="nav-text">仪表盘</span>
+            </li>
+            <li class="nav-item" data-page="agents">
+                <span class="nav-icon">🤖</span>
+                <span class="nav-text">Agent 中心</span>
+            </li>
+            <li class="nav-item" data-page="tasks">
+                <span class="nav-icon">📋</span>
+                <span class="nav-text">任务中心</span>
+            </li>
+        </ul>
+        <div class="sidebar-footer">
+            <div class="version">v0.1.0</div>
+        </div>
+    </nav>
+
+    <!-- 主内容区 -->
+    <main class="main-content">
+        <!-- 仪表盘 -->
+        <section id="page-dashboard" class="page active">
+            <header class="page-header">
+                <h2>仪表盘</h2>
+                <div class="header-actions">
+                    <button class="btn btn-primary" onclick="showNewTaskModal()">
+                        <span>➕</span> 新建任务
+                    </button>
+                </div>
+            </header>
+
+            <!-- 系统概览 -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-icon">🖥️</div>
+                    <div class="stat-info">
+                        <div class="stat-label">CPU 使用率</div>
+                        <div class="stat-value" id="cpu-value">--</div>
+                        <div class="progress-bar"><div class="progress-fill" id="cpu-bar"></div></div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">💾</div>
+                    <div class="stat-info">
+                        <div class="stat-label">内存使用</div>
+                        <div class="stat-value" id="mem-value">--</div>
+                        <div class="progress-bar"><div class="progress-fill" id="mem-bar"></div></div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">💿</div>
+                    <div class="stat-info">
+                        <div class="stat-label">磁盘空间</div>
+                        <div class="stat-value" id="disk-value">--</div>
+                        <div class="progress-bar"><div class="progress-fill" id="disk-bar"></div></div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">📋</div>
+                    <div class="stat-info">
+                        <div class="stat-label">任务队列</div>
+                        <div class="stat-value" id="task-count">--</div>
+                        <div class="stat-sub" id="task-sub">加载中...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Agent 状态 -->
+            <div class="section">
+                <h3>Agent 状态</h3>
+                <div class="agent-grid" id="agent-status-grid"></div>
+            </div>
+
+            <!-- 快捷任务 -->
+            <div class="section">
+                <h3>快捷任务</h3>
+                <div class="quick-task-grid" id="quick-task-grid"></div>
+            </div>
+
+            <!-- 最近任务 -->
+            <div class="section">
+                <h3>最近任务</h3>
+                <div class="task-list" id="recent-tasks"></div>
+            </div>
+        </section>
+
+        <!-- Agent 中心 -->
+        <section id="page-agents" class="page">
+            <header class="page-header">
+                <h2>Agent 中心</h2>
+                <p class="page-desc">管理和监控所有 AI Agent</p>
+            </header>
+            <div class="agent-detail-grid" id="agent-detail-grid"></div>
+        </section>
+
+        <!-- 任务中心 -->
+        <section id="page-tasks" class="page">
+            <header class="page-header">
+                <h2>任务中心</h2>
+                <div class="header-actions">
+                    <button class="btn btn-primary" onclick="showNewTaskModal()">
+                        <span>➕</span> 新建任务
+                    </button>
+                </div>
+            </header>
+            <div class="task-filter-bar">
+                <button class="filter-btn active" data-filter="all">全部</button>
+                <button class="filter-btn" data-filter="pending">等待中</button>
+                <button class="filter-btn" data-filter="running">执行中</button>
+                <button class="filter-btn" data-filter="success">已完成</button>
+                <button class="filter-btn" data-filter="failed">失败</button>
+            </div>
+            <div class="task-list" id="all-tasks"></div>
+        </section>
+    </main>
+
+    <!-- 新建任务弹窗 -->
+    <div class="modal-overlay" id="new-task-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>新建任务</h3>
+                <button class="modal-close" onclick="hideNewTaskModal()">✕</button>
+            </div>
+            <form id="new-task-form" onsubmit="submitNewTask(event)">
+                <div class="form-group">
+                    <label>任务标题 <span class="required">*</span></label>
+                    <input type="text" id="task-title" placeholder="输入任务标题..." required>
+                </div>
+                <div class="form-group">
+                    <label>任务描述</label>
+                    <textarea id="task-desc" rows="3" placeholder="详细描述任务需求..."></textarea>
+                </div>
+                <div class="form-group">
+                    <label>指定 Agent</label>
+                    <select id="task-agent">
+                        <option value="">自动选择最佳 Agent</option>
+                        <option value="code">💻 代码 Agent</option>
+                        <option value="file">📁 文件 Agent</option>
+                        <option value="system">⚙️ 系统 Agent</option>
+                        <option value="browser">🌐 浏览器 Agent</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>优先级</label>
+                    <select id="task-priority">
+                        <option value="3">低</option>
+                        <option value="5" selected>普通</option>
+                        <option value="7">高</option>
+                        <option value="10">紧急</option>
+                    </select>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="hideNewTaskModal()">取消</button>
+                    <button type="submit" class="btn btn-primary">提交任务</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- 任务详情弹窗 -->
+    <div class="modal-overlay" id="task-detail-modal">
+        <div class="modal modal-wide">
+            <div class="modal-header">
+                <h3 id="detail-title">任务详情</h3>
+                <button class="modal-close" onclick="hideTaskDetailModal()">✕</button>
+            </div>
+            <div class="task-detail-content" id="task-detail-content"></div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
