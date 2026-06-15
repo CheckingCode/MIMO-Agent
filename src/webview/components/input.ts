@@ -156,7 +156,9 @@ export const InputArea = {
 
         modeTrigger.addEventListener('click', (e) => {
             e.stopPropagation();
-            modePopup.classList.toggle('show');
+            const shouldOpen = !modePopup.classList.contains('show');
+            this._closeInputPopovers('mode');
+            modePopup.classList.toggle('show', shouldOpen);
         });
 
         modePopup.addEventListener('click', (e) => {
@@ -173,8 +175,7 @@ export const InputArea = {
 
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
-                modePopup.classList.remove('show');
-                modelPopup?.classList.remove('show');
+                this._closeInputPopovers();
             }
         });
 
@@ -201,8 +202,9 @@ export const InputArea = {
         if (modelTrigger && modelPopup) {
             modelTrigger.addEventListener('click', (e) => {
                 e.stopPropagation();
-                modePopup.classList.remove('show');
-                modelPopup.classList.toggle('show');
+                const shouldOpen = !modelPopup.classList.contains('show');
+                this._closeInputPopovers('model');
+                modelPopup.classList.toggle('show', shouldOpen);
                 // 动态定位弹窗，避免在窄屏时被遮挡
                 if (modelPopup.classList.contains('show')) {
                     this.alignModelPopup(modelPopup, modelTrigger);
@@ -232,6 +234,7 @@ export const InputArea = {
 
         if (reasoningBtn) {
             reasoningBtn.addEventListener('click', () => {
+                this._closeInputPopovers();
                 const current = store.get('reasoningEffort');
                 const order = ['turbo', 'fast', 'balanced', 'deep', 'max'] as const;
                 const idx = order.indexOf(current as any);
@@ -436,7 +439,6 @@ export const InputArea = {
         if (/tts|voice|speech|audio/.test(text)) badges.push(t('badge.tts'));
         if (/asr|transcribe|whisper/.test(text)) badges.push(t('badge.asr'));
         if (/vision|vl|omni|image/.test(text)) badges.push(t('badge.vision'));
-        if (/pro|reasoner|deep|r1/.test(text)) badges.push(t('badge.reason'));
         if (/flash|lite|mini/.test(text)) badges.push(t('badge.fast'));
         return badges.slice(0, 2);
     },
@@ -500,10 +502,18 @@ export const InputArea = {
             deep: t('reasoning.deep.tip'),
             max: t('reasoning.max.tip'),
         };
-        btn.textContent = `${t('reasoning.prefix')}: ${labels[effort]}`;
+        btn.textContent = labels[effort];
+        btn.setAttribute('aria-label', `${t('reasoning.prefix')}: ${labels[effort]}`);
         btn.setAttribute('data-effort', effort);
         btn.title = titles[effort];
         this.syncBodyUiClasses();
+    },
+
+    _closeInputPopovers(except: 'mode' | 'model' | 'file' | 'command' | null = null): void {
+        if (except !== 'mode') document.getElementById('mode-popup')?.classList.remove('show');
+        if (except !== 'model') document.getElementById('model-picker-popup')?.classList.remove('show');
+        if (except !== 'command') document.getElementById('cmd-palette')?.classList.remove('show');
+        if (except !== 'file') this._closeFileSearch();
     },
 
     syncBodyUiClasses(): void {
@@ -524,7 +534,7 @@ export const InputArea = {
         const resolvedText = this._resolveFileMarkers(text);
 
         // Close file search if open
-        this._closeFileSearch();
+        this._closeInputPopovers();
         // Clear file tags
         this._attachedFiles = [];
         this._renderFileTags();
@@ -733,6 +743,7 @@ export const InputArea = {
             if (popup.classList.contains('show')) {
                 this._closeFileSearch();
             } else {
+                this._closeInputPopovers('file');
                 this._openFileSearch('button', '', null, true);
             }
         });
@@ -782,6 +793,7 @@ export const InputArea = {
         this._fileSearchMode = mode;
         this._fileTrigger = trigger;
         this._activeFileSearchIndex = 0;
+        this._closeInputPopovers('file');
         popup.dataset.mode = mode;
         popup.classList.add('show');
         searchInput.value = query;
@@ -893,11 +905,11 @@ export const InputArea = {
             if (treeMode && r.parent && !expandedDirs.has(r.parent)) item.classList.add('file-search-child-collapsed');
             if (kind === 'directory') {
                 expandedDirs.add(r.relativePath);
-                item.innerHTML = `<span class="file-search-chevron">▾</span><span class="file-search-icon">DIR</span><span class="file-search-info"><span class="file-search-name">${this._escapeHtml(r.name)}</span><span class="file-search-path">${this._escapeHtml(r.relativePath || '.')}</span></span>`;
+                item.innerHTML = `<span class="file-search-chevron">▾</span><span class="file-search-icon" aria-hidden="true"></span><span class="file-search-info"><span class="file-search-name">${this._escapeHtml(r.name)}</span><span class="file-search-path">${this._escapeHtml(r.relativePath || '.')}</span></span>`;
                 item.addEventListener('click', () => this._toggleFileTreeDirectory(list, r.relativePath, item));
             } else {
                 const currentFileIndex = fileIndex;
-                item.innerHTML = `<span class="file-search-chevron"></span><span class="file-search-icon">FILE</span><span class="file-search-info"><span class="file-search-name">${this._escapeHtml(r.name)}</span><span class="file-search-path">${this._escapeHtml(r.relativePath)}</span></span>`;
+                item.innerHTML = `<span class="file-search-chevron"></span><span class="file-search-icon" aria-hidden="true"></span><span class="file-search-info"><span class="file-search-name">${this._escapeHtml(r.name)}</span><span class="file-search-path">${this._escapeHtml(r.relativePath)}</span></span>`;
                 item.addEventListener('mouseenter', () => this._setActiveFileSearchIndex(currentFileIndex));
                 item.addEventListener('click', () => {
                     this._insertFileReference(r.fullPath, r.name, r.relativePath);
