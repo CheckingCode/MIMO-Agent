@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Messages component - chat messages, streaming, tool cards, diff view, thinking blocks.
  */
 import { store, ImageData } from '../core/store';
@@ -112,8 +112,8 @@ function assistantActionIcon(action: string): string {
     return `<svg ${attrs}><rect x="5" y="3" width="8" height="10" rx="1.4" /><path d="M3 11V5.2C3 4.5 3.5 4 4.2 4H10" /></svg>`;
 }
 
-const REASONING_PREVIEW_CHARS = 360;
-const REASONING_STORE_CHARS = 4000;
+const REASONING_PREVIEW_CHARS = 500;
+const REASONING_STORE_CHARS = 16000;
 const REASONING_DEDUP_INTERVAL_MS = 3000;
 const WORKFLOW_UPDATE_INTERVAL_MS = 400;
 const HISTORY_SNAPSHOT_MAX_HTML = 700_000;
@@ -986,6 +986,8 @@ export const Messages = {
                 ? sanitizeMessageReasoningForHistoryDisplay
                 : sanitizeMessageReasoningForDisplay;
             displayText = sanitize(rawText, trimmed);
+            const stepCount = (displayText.match(/\n/g) || []).length + 1;
+            displayText = `## ${t('thinking.steps')} (${stepCount} lines)\n\n${displayText}`;
         } else {
             const trimmedText = trimmed ? t('thinking.trimmed') : '';
             displayText = t('thinking.compact')

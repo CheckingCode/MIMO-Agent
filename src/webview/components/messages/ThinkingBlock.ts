@@ -5,9 +5,9 @@ import { escapeHtml } from '../../utils/dom';
  * Thinking/reasoning block rendering helpers.
  */
 
-const REASONING_PREVIEW_CHARS = 360;
-const REASONING_STORE_CHARS = 4000;
-const REASONING_HISTORY_DISPLAY_CHARS = 6000;
+const REASONING_PREVIEW_CHARS = 500;
+const REASONING_STORE_CHARS = 16000;
+const REASONING_HISTORY_DISPLAY_CHARS = 12000;
 const REASONING_DEDUP_INTERVAL_MS = 3000;
 
 export function reasoningStoreLimit(): number {
@@ -44,32 +44,9 @@ export function filterReasoningNoise(text: string): string {
 
 export function sanitizeReasoningForDisplay(text: string, trimmed = false): string {
     const filtered = filterReasoningNoise(text || '');
-    const safeStatusLines = filtered
-        .split(/\r?\n/)
-        .map(line => line.trim())
-        .filter(line => /^\[[^\]\n]{1,120}\]/.test(line) || /^第\s*\d+\s*轮/.test(line))
-        .slice(0, 8);
-    const looksLikePrivateDraft =
-        filtered.length > 800 ||
-        /<!DOCTYPE|<html|<script|<\/style>|```|function\s+\w+|const\s+\w+|let\s+\w+|canvas|ctx\.|fuselage|coordinates?|Actually,|Let me|I need to|I should|The user wants|Here's my plan/i.test(filtered);
-
-    if (looksLikePrivateDraft) {
-        const lines = [
-            '已隐藏详细思考内容。',
-            '执行进度、工具结果和最终答复会继续显示。',
-        ];
-        if (safeStatusLines.length > 0) {
-            lines.push('', ...safeStatusLines);
-        }
-        if (trimmed) {
-            lines.push('', '[较早思考内容已为流畅性压缩]');
-        }
-        return lines.join('\n');
-    }
-
-    const maxChars = 1200;
+    const maxChars = 8000;
     const clipped = filtered.length > maxChars
-        ? `${filtered.slice(0, maxChars)}\n\n[思考内容过长，已截断显示]`
+        ? `${filtered.slice(0, maxChars)}\n\n[... reasoning continued (${filtered.length - maxChars} chars trimmed) ...]\n\n${filtered.slice(-Math.floor(maxChars * 0.3))}`
         : filtered;
     return trimmed ? `${t('thinking.trimmed.prefix')}${clipped}` : clipped;
 }

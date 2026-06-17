@@ -1,8 +1,8 @@
 {
   "name": "mimo-agent",
   "displayName": "MiMo",
-  "description": "AI coding agent powered by Xiaomi MiMo LLM",
-  "version": "1.7.6",
+  "description": "AI coding agent powered by Xiaomi MiMo LLM with chain-of-thought reasoning",
+  "version": "1.7.7",
   "publisher": "mimo-agent",
   "icon": "assets/mimo-agent-icon.png",
   "engines": {
@@ -170,8 +170,8 @@
         },
         "mimo.enableThinking": {
           "type": "boolean",
-          "default": false,
-          "description": "Enable MiMo thinking mode"
+          "default": true,
+          "description": "Enable MiMo chain-of-thought reasoning display"
         },
         "mimo.maxRounds": {
           "type": "number",
